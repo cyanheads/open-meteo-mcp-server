@@ -74,17 +74,13 @@ async function openMeteoFetch<T>(url: string, ctx: Context): Promise<T> {
   }
 
   // Open-Meteo error envelope: { "error": true, "reason": "..." }
+  // 5xx envelopes are transient — throw immediately so the retry loop fires.
+  // 4xx envelopes carry input-error context that tool handlers need to classify;
+  // return the body so handlers can call ctx.fail() with the correct contract reason.
   const asRecord = body as Record<string, unknown>;
-  if (asRecord.error === true) {
+  if (asRecord.error === true && response.status >= 500) {
     const reason = typeof asRecord.reason === 'string' ? asRecord.reason : 'Unknown error';
-    // 4xx input errors vs 5xx transients — distinguish by HTTP status
-    if (response.status >= 500) {
-      throw serviceUnavailable(`Open-Meteo API error: ${reason}`, { url, status: response.status });
-    }
-    throw validationError(`Open-Meteo API rejected request: ${reason}`, {
-      url,
-      status: response.status,
-    });
+    throw serviceUnavailable(`Open-Meteo API error: ${reason}`, { url, status: response.status });
   }
 
   if (!response.ok) {
@@ -98,7 +94,11 @@ async function openMeteoFetch<T>(url: string, ctx: Context): Promise<T> {
     if (response.status >= 500) {
       throw serviceUnavailable(`Open-Meteo API returned ${response.status}.`, { url });
     }
-    throw validationError(`Open-Meteo API returned ${response.status}.`, { url });
+    // 4xx without an error envelope — throw as validation error.
+    // 4xx WITH an error envelope: body is returned above so handlers can attach the contract reason.
+    if (!(asRecord.error === true)) {
+      throw validationError(`Open-Meteo API returned ${response.status}.`, { url });
+    }
   }
 
   return body;

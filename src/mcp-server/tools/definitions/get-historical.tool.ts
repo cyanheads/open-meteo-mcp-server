@@ -49,6 +49,14 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       recovery: 'Provide at least one of hourly_variables or daily_variables.',
       retryable: false,
     },
+    {
+      reason: 'invalid_variable',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'An unknown variable name was requested',
+      recovery:
+        'Check the variable name against Open-Meteo docs. Common hourly: temperature_2m, precipitation, wind_speed_10m, relative_humidity_2m, cloud_cover. Common daily: temperature_2m_max, temperature_2m_min, precipitation_sum.',
+      retryable: false,
+    },
   ],
 
   input: z.object({
@@ -198,13 +206,11 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     );
 
     if (data.error) {
-      if (
-        (data.reason ?? '').toLowerCase().includes('date') ||
-        (data.reason ?? '').toLowerCase().includes('range')
-      ) {
-        throw ctx.fail('date_out_of_range', data.reason ?? 'Date out of ERA5 range.');
+      const reason = data.reason ?? '';
+      if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
+        throw ctx.fail('date_out_of_range', reason || 'Date out of ERA5 range.');
       }
-      throw ctx.fail('date_out_of_range', data.reason ?? 'Invalid request.');
+      throw ctx.fail('invalid_variable', reason || 'Unknown variable or invalid request.');
     }
 
     const hourlyRecords = data.hourly ? reshapeColumnar(data.hourly) : undefined;

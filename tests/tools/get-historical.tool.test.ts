@@ -146,6 +146,48 @@ describe('openmeteoGetHistoricalTool', () => {
     });
   });
 
+  it('throws invalid_variable (not date_out_of_range) when API error envelope has non-date reason', async () => {
+    // Regression: the handler catch-all previously mapped ALL API errors to date_out_of_range,
+    // including invalid variable names. Non-date errors must produce invalid_variable.
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason: 'Variable "bogus_historical_var" is not a valid historical variable.',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      hourly_variables: ['bogus_historical_var'],
+    });
+    await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_variable' },
+    });
+  });
+
+  it('throws date_out_of_range when API error reason contains "range"', async () => {
+    // Verifies the "range" keyword path is also classified correctly.
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason: 'Parameter start_date is out of allowed range from 1940-01-01 to 2026-05-30.',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      daily_variables: ['temperature_2m_max'],
+    });
+    await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'date_out_of_range' },
+    });
+  });
+
   it('spills to DataCanvas and sets truncated=true when records exceed INLINE_LIMIT', async () => {
     // Build a response with 502 daily records (> INLINE_LIMIT of 500)
     const days = 502;
