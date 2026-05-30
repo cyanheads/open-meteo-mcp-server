@@ -35,3 +35,17 @@ export function formatUnits(units: UnitsMap | undefined): string {
     .map(([k, v]) => `${k}: ${v}`)
     .join(' | ');
 }
+
+/**
+ * Format a single per-timestamp record as a markdown line for `format()` output.
+ * e.g. `**2024-07-01T00:00** — temperature_2m: 18 | precipitation: 0`
+ * Accepts `Record<string, unknown>` to match both narrowed `TimeRecord` values
+ * (returned from reshapeColumnar) and the output-schema type in format() callbacks.
+ */
+export function formatRecord(rec: Record<string, unknown>): string {
+  const { time, ...vars } = rec;
+  const vals = Object.entries(vars)
+    .map(([k, v]) => `${k}: ${v ?? 'null'}`)
+    .join(' | ');
+  return `**${time}** — ${vals}`;
+}

@@ -1,9 +1,10 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-05-30 09:59:39
+Generated on: 2026-05-30 13:10:50
 
 ```text
 open-meteo-mcp-server/
+├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -18,8 +19,10 @@ open-meteo-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
+│   ├── design.md
 │   └── idea.md
 ├── scripts/
 │   ├── build-changelog.ts
@@ -106,26 +109,41 @@ open-meteo-mcp-server/
 │   └── tool-defs-analysis/
 │       └── SKILL.md
 ├── src/
+│   ├── config/
+│   │   └── server-config.ts
 │   ├── mcp-server/
 │   │   ├── prompts/
 │   │   │   └── definitions/
-│   │   │       └── echo.prompt.ts
 │   │   ├── resources/
 │   │   │   └── definitions/
-│   │   │       ├── echo-app-ui.app-resource.ts
-│   │   │       └── echo.resource.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── echo-app.app-tool.ts
-│   │           └── echo.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── geocode.tool.ts
+│   │       │   ├── get-air-quality.tool.ts
+│   │       │   ├── get-elevation.tool.ts
+│   │       │   ├── get-forecast.tool.ts
+│   │       │   ├── get-historical.tool.ts
+│   │       │   ├── get-marine.tool.ts
+│   │       │   └── index.ts
+│   │       └── reshape-utils.ts
+│   ├── services/
+│   │   ├── open-meteo/
+│   │   │   ├── open-meteo-service.ts
+│   │   │   └── types.ts
+│   │   └── canvas-accessor.ts
 │   └── index.ts
 ├── tests/
 │   ├── prompts/
-│   │   └── echo.prompt.test.ts
 │   ├── resources/
-│   │   └── echo.resource.test.ts
+│   ├── services/
+│   │   └── open-meteo-service.test.ts
 │   └── tools/
-│       └── echo.tool.test.ts
+│       ├── geocode.tool.test.ts
+│       ├── get-air-quality.tool.test.ts
+│       ├── get-elevation.tool.test.ts
+│       ├── get-forecast.tool.test.ts
+│       ├── get-historical.tool.test.ts
+│       └── get-marine.tool.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
@@ -133,11 +151,14 @@ open-meteo-mcp-server/
 ├── AGENTS.md
 ├── biome.json
 ├── bun.lock
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
+├── LICENSE
 ├── manifest.json
 ├── package.json
+├── README.md
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json

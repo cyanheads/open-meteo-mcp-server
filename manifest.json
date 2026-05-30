@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "open-meteo-mcp-server",
   "version": "0.1.0",
-  "description": "",
-  "author": { "name": "" },
+  "description": "Geocode places, fetch global weather forecasts, ERA5 historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP.",
+  "author": { "name": "cyanheads" },
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",

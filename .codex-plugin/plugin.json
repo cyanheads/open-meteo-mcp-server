@@ -1,25 +1,41 @@
 {
-  "name": "open-meteo-mcp-server",
+  "name": "@cyanheads/open-meteo-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "Geocode places, fetch global weather forecasts, ERA5 historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "",
-    "email": "",
-    "url": ""
+    "name": "cyanheads",
+    "url": "https://github.com/cyanheads"
   },
-  "homepage": "",
-  "repository": "",
+  "homepage": "https://github.com/cyanheads/open-meteo-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/open-meteo-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "weather",
+    "open-meteo",
+    "forecast",
+    "climate",
+    "era5",
+    "marine",
+    "air-quality",
+    "geocoding",
+    "elevation"
+  ],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
-    "displayName": "open-meteo-mcp-server",
-    "shortDescription": "",
+    "displayName": "@cyanheads/open-meteo-mcp-server",
+    "shortDescription": "Geocode places, fetch global weather forecasts, ERA5 historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP.",
     "longDescription": "",
-    "developerName": "",
-    "category": "",
+    "developerName": "cyanheads",
+    "category": "data",
     "capabilities": ["Read"],
-    "websiteURL": "",
+    "websiteURL": "https://github.com/cyanheads/open-meteo-mcp-server",
     "defaultPrompt": []
   }
 }

@@ -8,7 +8,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
-import { formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 
 export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
   description:
@@ -48,6 +48,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
     hourly_variables: z
       .array(z.string())
+      .max(50)
       .optional()
       .describe(
         'Hourly air quality variables (e.g., ["pm2_5", "pm10", "ozone", "nitrogen_dioxide", "european_aqi", "us_aqi"]). At least one required.',
@@ -136,13 +137,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     if (result.hourly && result.hourly.length > 0) {
       const shown = Math.min(result.hourly.length, 48);
       lines.push('', `### Hourly air quality (first ${shown} of ${result.hourly.length})`);
-      for (const rec of result.hourly.slice(0, shown)) {
-        const { time, ...vars } = rec;
-        const vals = Object.entries(vars)
-          .map(([k, v]) => `${k}: ${v ?? 'null'}`)
-          .join(' | ');
-        lines.push(`**${time}** — ${vals}`);
-      }
+      for (const rec of result.hourly.slice(0, shown)) lines.push(formatRecord(rec));
       if (result.hourly.length > shown) {
         lines.push(`_...and ${result.hourly.length - shown} more hourly records._`);
       }

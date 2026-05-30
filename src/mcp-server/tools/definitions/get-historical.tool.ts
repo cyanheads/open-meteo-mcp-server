@@ -11,7 +11,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
-import { formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 
 /** Inline record limit before DataCanvas spillover. */
 const INLINE_LIMIT = 500;
@@ -82,12 +82,14 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       ),
     hourly_variables: z
       .array(z.string())
+      .max(50)
       .optional()
       .describe(
         'Hourly ERA5 variables (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "relative_humidity_2m", "cloud_cover", "soil_moisture_0_to_7cm"]). At least one of hourly_variables or daily_variables required.',
       ),
     daily_variables: z
       .array(z.string())
+      .max(50)
       .optional()
       .describe(
         'Daily summary variables (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_max"]). At least one of hourly_variables or daily_variables required.',
@@ -217,11 +219,10 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : undefined;
 
     const totalRecords = (hourlyRecords?.length ?? 0) + (dailyRecords?.length ?? 0);
+    const records = hourlyRecords ?? dailyRecords;
     const dateRange = {
-      start: ((hourlyRecords ?? dailyRecords)?.[0]?.time as string) ?? input.start_date,
-      end:
-        ((hourlyRecords ?? dailyRecords)?.[((hourlyRecords ?? dailyRecords)?.length ?? 1) - 1]
-          ?.time as string) ?? input.end_date,
+      start: (records?.[0]?.time as string) ?? input.start_date,
+      end: (records?.[records.length - 1]?.time as string) ?? input.end_date,
     };
 
     // DataCanvas spillover for large datasets
@@ -292,25 +293,13 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
 
     if (result.daily && result.daily.length > 0) {
       lines.push('', '### Daily summary (first 30)');
-      for (const rec of result.daily.slice(0, 30)) {
-        const { time, ...vars } = rec;
-        const vals = Object.entries(vars)
-          .map(([k, v]) => `${k}: ${v ?? 'null'}`)
-          .join(' | ');
-        lines.push(`**${time}** — ${vals}`);
-      }
+      for (const rec of result.daily.slice(0, 30)) lines.push(formatRecord(rec));
     }
 
     if (result.hourly && result.hourly.length > 0) {
       const shown = Math.min(result.hourly.length, 48);
       lines.push('', `### Hourly (first ${shown} of ${result.hourly.length})`);
-      for (const rec of result.hourly.slice(0, shown)) {
-        const { time, ...vars } = rec;
-        const vals = Object.entries(vars)
-          .map(([k, v]) => `${k}: ${v ?? 'null'}`)
-          .join(' | ');
-        lines.push(`**${time}** — ${vals}`);
-      }
+      for (const rec of result.hourly.slice(0, shown)) lines.push(formatRecord(rec));
       if (result.hourly.length > shown) {
         lines.push(`_...and ${result.hourly.length - shown} more hourly records._`);
       }

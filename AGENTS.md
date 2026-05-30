@@ -11,19 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. The framework, skills, and example definitions are in place — the domain isn't. The user's first messages will set direction; wait for them before proceeding.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
@@ -60,26 +47,53 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
+  description:
+    'Resolve a place name to ranked coordinate matches with country, region, elevation, ' +
+    'timezone, and population. Required prerequisite for name-based queries — all weather ' +
+    'tools take latitude/longitude, not place names.',
+  annotations: { readOnlyHint: true, idempotentHint: true },
+
+  errors: [
+    {
+      reason: 'no_results',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The search returned no matching places',
+      recovery: 'Check the spelling, try a broader term, or search in English.',
+      retryable: false,
+    },
+  ],
+
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    name: z.string().min(1).max(100).describe('Place name to search (e.g., "Seattle").'),
+    count: z.number().int().min(1).max(10).default(5).describe('Max results (1–10). Default 5.'),
   }),
+
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    results: z.array(z.object({
+      id: z.number().describe('Open-Meteo place ID'),
+      name: z.string().describe('Place name'),
+      latitude: z.number().describe('Latitude in decimal degrees'),
+      longitude: z.number().describe('Longitude in decimal degrees'),
+      timezone: z.string().describe('IANA timezone — pass to weather tools'),
+      country: z.string().describe('Country name'),
+    })).describe('Ranked matches (most relevant first)'),
+    count: z.number().describe('Number of results returned'),
   }),
-  auth: ['inventory:read'],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const service = getOpenMeteoService();
+    const response = await service.getGeocode(input.name, input.count, 'en', ctx);
+    const results = (response.results ?? []).map((r) => ({
+      id: r.id, name: r.name, latitude: r.latitude, longitude: r.longitude,
+      timezone: r.timezone, country: r.country,
+    }));
+    if (results.length === 0) throw ctx.fail('no_results', `No places found matching "${input.name}".`);
+    ctx.log.info('Geocode results', { name: input.name, count: results.length });
+    return { results, count: results.length };
   },
 
   // format() populates content[] — the markdown twin of structuredContent.
@@ -88,43 +102,8 @@ export const searchItems = tool('search_items', {
   // Enforced at lint time: every field in `output` must appear in the rendered text.
   format: (result) => [{
     type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
+    text: result.results.map(r => `**${r.name}** (${r.country}) — ${r.latitude}, ${r.longitude} | tz: ${r.timezone}`).join('\n'),
   }],
-});
-```
-
-### Resource
-
-```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
-
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
-
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
 });
 ```
 
@@ -223,20 +202,22 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() entry point — registers tools, init service
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # Server-specific env vars (all optional base URL overrides)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    open-meteo/
+      open-meteo-service.ts             # HTTP client: forecast, archive, marine, air quality, geocoding, elevation
+      types.ts                          # API response types
+    canvas-accessor.ts                  # DataCanvas accessor for openmeteo_get_historical spillover
   mcp-server/
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
-    resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      geocode.tool.ts                   # openmeteo_geocode
+      get-forecast.tool.ts              # openmeteo_get_forecast
+      get-historical.tool.ts            # openmeteo_get_historical (DataCanvas spillover)
+      get-marine.tool.ts                # openmeteo_get_marine
+      get-air-quality.tool.ts           # openmeteo_get_air_quality
+      get-elevation.tool.ts             # openmeteo_get_elevation
 ```
 
 ---

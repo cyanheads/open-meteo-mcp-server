@@ -8,7 +8,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
-import { formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 
 export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
   description:
@@ -51,12 +51,14 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
     hourly_variables: z
       .array(z.string())
+      .max(50)
       .optional()
       .describe(
         'Hourly marine variables (e.g., ["wave_height", "wave_direction", "wave_period", "wind_wave_height", "swell_wave_height"]). At least one of hourly_variables or daily_variables required.',
       ),
     daily_variables: z
       .array(z.string())
+      .max(50)
       .optional()
       .describe(
         'Daily marine summary variables (e.g., ["wave_height_max", "wave_direction_dominant", "wave_period_max"]). At least one of hourly_variables or daily_variables required.',
@@ -151,25 +153,13 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
 
     if (result.daily && result.daily.length > 0) {
       lines.push('', '### Daily marine summary');
-      for (const rec of result.daily) {
-        const { time, ...vars } = rec;
-        const vals = Object.entries(vars)
-          .map(([k, v]) => `${k}: ${v ?? 'null'}`)
-          .join(' | ');
-        lines.push(`**${time}** — ${vals}`);
-      }
+      for (const rec of result.daily) lines.push(formatRecord(rec));
     }
 
     if (result.hourly && result.hourly.length > 0) {
       const shown = Math.min(result.hourly.length, 48);
       lines.push('', `### Hourly marine (first ${shown} of ${result.hourly.length})`);
-      for (const rec of result.hourly.slice(0, shown)) {
-        const { time, ...vars } = rec;
-        const vals = Object.entries(vars)
-          .map(([k, v]) => `${k}: ${v ?? 'null'}`)
-          .join(' | ');
-        lines.push(`**${time}** — ${vals}`);
-      }
+      for (const rec of result.hourly.slice(0, shown)) lines.push(formatRecord(rec));
       if (result.hourly.length > shown) {
         lines.push(`_...and ${result.hourly.length - shown} more hourly records._`);
       }
