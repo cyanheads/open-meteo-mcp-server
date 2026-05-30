@@ -1,0 +1,9 @@
+{
+  "open-meteo-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "open-meteo-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}
