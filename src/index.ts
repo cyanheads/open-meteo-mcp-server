@@ -5,17 +5,46 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
-import { echoTool } from './mcp-server/tools/definitions/echo.tool.js';
-import { echoAppTool } from './mcp-server/tools/definitions/echo-app.app-tool.js';
-import { echoResource } from './mcp-server/resources/definitions/echo.resource.js';
-import { echoAppUiResource } from './mcp-server/resources/definitions/echo-app-ui.app-resource.js';
-import { echoPrompt } from './mcp-server/prompts/definitions/echo.prompt.js';
+import {
+  openmeteoGeocodeTool,
+  openmeteoGetAirQualityTool,
+  openmeteoGetElevationTool,
+  openmeteoGetForecastTool,
+  openmeteoGetHistoricalTool,
+  openmeteoGetMarineTool,
+} from './mcp-server/tools/definitions/index.js';
+import { setCanvas } from './services/canvas-accessor.js';
+import { initOpenMeteoService } from './services/open-meteo/open-meteo-service.js';
 
 await createApp({
-  tools: [echoTool, echoAppTool],
-  resources: [echoResource, echoAppUiResource],
-  prompts: [echoPrompt],
-  // instructions: 'Server-level orientation forwarded to the model on every initialize.\n' +
-  //   '- Use shortcut `X` for the most common case\n' +
-  //   '- Tools require auth via the `inventory:read` scope',
+  tools: [
+    openmeteoGeocodeTool,
+    openmeteoGetElevationTool,
+    openmeteoGetForecastTool,
+    openmeteoGetHistoricalTool,
+    openmeteoGetMarineTool,
+    openmeteoGetAirQualityTool,
+  ],
+  resources: [],
+  prompts: [],
+  setup(core) {
+    initOpenMeteoService();
+    setCanvas(core.canvas);
+  },
+  instructions:
+    'Open-Meteo global weather server — keyless, no API key required for non-commercial use.\n' +
+    'Weather data by Open-Meteo.com (CC BY 4.0).\n\n' +
+    'Workflow:\n' +
+    '1. openmeteo_geocode — resolve a place name to coordinates (required first step for name-based queries)\n' +
+    '2. openmeteo_get_forecast — up to 16 days ahead + 92 days past_days; hourly and/or daily variables\n' +
+    '3. openmeteo_get_historical — ERA5 archive from 1940; use start_date/end_date\n' +
+    '4. openmeteo_get_marine — wave/swell forecast for coastal and ocean points\n' +
+    '5. openmeteo_get_air_quality — CAMS modeled PM2.5, PM10, ozone, AQI (forecast only)\n' +
+    '6. openmeteo_get_elevation — Copernicus DEM terrain elevation for up to 100 coordinate pairs\n\n' +
+    'Notes:\n' +
+    '- All weather tools take latitude/longitude — use openmeteo_geocode first for place names\n' +
+    '- ERA5 has a variable lag (~1–5 days). For recent history, use openmeteo_get_forecast with past_days\n' +
+    '- All responses use timezone=auto by default (localizes to the location)\n' +
+    '- Variable names are exact API names: temperature_2m, pm2_5, wave_height, etc.\n' +
+    '- Large historical queries (multi-year hourly) spill to DataCanvas when CANVAS_PROVIDER_TYPE=duckdb',
 });
