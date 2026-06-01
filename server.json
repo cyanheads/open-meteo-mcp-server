@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/open-meteo-mcp-server",
     "source": "github"
   },
-  "version": "0.1.1",
+  "version": "0.1.2",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/open-meteo-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "packageArguments": [
         {
           "type": "positional",
@@ -37,6 +37,13 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "CANVAS_PROVIDER_TYPE",
+          "description": "Canvas engine for openmeteo_get_historical spillover. Set to 'duckdb' to enable DataCanvas and the dataframe_query / dataframe_describe tools. Default 'none' (spillover disabled).",
+          "format": "string",
+          "isRequired": false,
+          "default": "none"
         }
       ],
       "transport": {
@@ -48,7 +55,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/open-meteo-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "packageArguments": [
         {
           "type": "positional",
@@ -94,6 +101,13 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "CANVAS_PROVIDER_TYPE",
+          "description": "Canvas engine for openmeteo_get_historical spillover. Set to 'duckdb' to enable DataCanvas and the dataframe_query / dataframe_describe tools. Default 'none' (spillover disabled).",
+          "format": "string",
+          "isRequired": false,
+          "default": "none"
         }
       ],
       "transport": {

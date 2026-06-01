@@ -11,6 +11,6 @@
     "ignorePatterns": []
   },
   "outdated": {
-    "allowlist": ["typescript"]
+    "allowlist": ["typescript", "@cyanheads/mcp-ts-core"]
   }
 }

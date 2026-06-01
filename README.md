@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/open-meteo-mcp-server</h1>
   <p><b>Geocode places, fetch global weather forecasts, ERA5 historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP.</b>
-  <div>6 Tools</div>
+  <div>8 Tools</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Tools
 
-Six tools covering geocoding, weather forecasts, historical climate, marine conditions, air quality, and terrain elevation — all from Open-Meteo's keyless API:
+Eight tools covering geocoding, weather forecasts, historical climate, marine conditions, air quality, terrain elevation, and SQL analytics over large historical datasets:
 
 | Tool | Description |
 |:---|:---|
@@ -39,6 +39,8 @@ Six tools covering geocoding, weather forecasts, historical climate, marine cond
 | `openmeteo_get_marine` | Marine forecast for coastal or ocean coordinates: wave height, period, direction, swell, and sea-surface temperature |
 | `openmeteo_get_air_quality` | Modeled CAMS air quality forecast: PM2.5, PM10, NO2, O3, CO, dust, pollen, and European/US AQI indices |
 | `openmeteo_get_elevation` | Terrain elevation from Copernicus DEM (~90m resolution) for up to 100 coordinate pairs per call |
+| `openmeteo_dataframe_describe` | List tables and columns on a DataCanvas staged by `openmeteo_get_historical` |
+| `openmeteo_dataframe_query` | Run a read-only SQL SELECT against tables staged on a DataCanvas |
 
 ### `openmeteo_geocode`
 
@@ -72,7 +74,8 @@ Historical weather from the ERA5 reanalysis archive, covering 1940 to approximat
 - Requires `start_date` and `end_date` (YYYY-MM-DD); ERA5 has a variable ~1–5 day lag
 - Same variable vocabulary as `openmeteo_get_forecast` — past and forecast data are directly comparable on one schema
 - At least one of `hourly_variables` or `daily_variables` is required
-- Large date ranges (multi-year hourly queries) spill to DataCanvas when `CANVAS_PROVIDER_TYPE=duckdb` — output includes `canvas_id` and `truncated: true` when the inline record limit is exceeded; query the canvas via `secedgar_dataframe_query` or equivalent
+- Large date ranges (multi-year hourly queries) spill to DataCanvas when `CANVAS_PROVIDER_TYPE=duckdb` — output includes `canvas_id` and `truncated: true` when the inline record limit is exceeded
+- Spill → query workflow: call `openmeteo_dataframe_describe` with the `canvas_id` to list tables, then `openmeteo_dataframe_query` to run SQL SELECT against the staged data
 
 ---
 
@@ -253,7 +256,7 @@ All configuration is validated at startup via Zod schemas. No API key is require
 | `MCP_GC_PRESSURE_INTERVAL_MS` | Opt-in forced-GC interval (ms, Bun only). Set to `60000` if heap growth is observed under sustained HTTP traffic. | `0` |
 | `LOGS_DIR` | Directory for log files (Node.js only) | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
-| `CANVAS_PROVIDER_TYPE` | Canvas engine for `openmeteo_get_historical` spillover: `duckdb` or `none` | `duckdb` |
+| `CANVAS_PROVIDER_TYPE` | Canvas engine for `openmeteo_get_historical` spillover: `duckdb` or `none` | `none` |
 | `OPEN_METEO_API_BASE_URL` | Override for the main forecast + elevation API | `https://api.open-meteo.com` |
 | `OPEN_METEO_ARCHIVE_BASE_URL` | Override for the ERA5 historical archive API | `https://archive-api.open-meteo.com` |
 | `OPEN_METEO_MARINE_BASE_URL` | Override for the marine forecast API | `https://marine-api.open-meteo.com` |
@@ -301,7 +304,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 |:---|:---|
 | `src/index.ts` | `createApp()` entry point — registers tools, initializes the Open-Meteo service |
 | `src/config` | Server-specific environment variable parsing and validation with Zod |
-| `src/mcp-server/tools/definitions` | Tool definitions (`*.tool.ts`) — one file per tool |
+| `src/mcp-server/tools/definitions` | Tool definitions (`*.tool.ts`) — one file per tool; includes `dataframe-describe.tool.ts` and `dataframe-query.tool.ts` |
 | `src/services/open-meteo` | Open-Meteo HTTP client wrapping all six endpoints with retry, error classification, and columnar reshape |
 | `src/services/canvas-accessor.ts` | DataCanvas accessor for `openmeteo_get_historical` spillover |
 | `tests/` | Unit and integration tests mirroring `src/` |

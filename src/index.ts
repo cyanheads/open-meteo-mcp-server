@@ -6,6 +6,8 @@
 
 import { createApp } from '@cyanheads/mcp-ts-core';
 import {
+  openmeteoDataframeDescribeTool,
+  openmeteoDataframeQueryTool,
   openmeteoGeocodeTool,
   openmeteoGetAirQualityTool,
   openmeteoGetElevationTool,
@@ -24,6 +26,8 @@ await createApp({
     openmeteoGetHistoricalTool,
     openmeteoGetMarineTool,
     openmeteoGetAirQualityTool,
+    openmeteoDataframeQueryTool,
+    openmeteoDataframeDescribeTool,
   ],
   resources: [],
   prompts: [],
@@ -41,6 +45,10 @@ await createApp({
     '4. openmeteo_get_marine — wave/swell forecast for coastal and ocean points\n' +
     '5. openmeteo_get_air_quality — CAMS modeled PM2.5, PM10, ozone, AQI (forecast only)\n' +
     '6. openmeteo_get_elevation — Copernicus DEM terrain elevation for up to 100 coordinate pairs\n\n' +
+    'DataCanvas workflow (requires CANVAS_PROVIDER_TYPE=duckdb):\n' +
+    '- openmeteo_get_historical with a large date range returns canvas_id + truncated: true\n' +
+    '- openmeteo_dataframe_describe — list tables and columns on the canvas\n' +
+    '- openmeteo_dataframe_query — run SQL SELECT against staged tables\n\n' +
     'Notes:\n' +
     '- All weather tools take latitude/longitude — use openmeteo_geocode first for place names\n' +
     '- ERA5 has a variable lag (~1–5 days). For recent history, use openmeteo_get_forecast with past_days\n' +

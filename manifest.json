@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "open-meteo-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Geocode places, fetch global weather forecasts, ERA5 historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP.",
   "author": { "name": "cyanheads" },
   "server": {
@@ -22,5 +22,13 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "CANVAS_PROVIDER_TYPE": {
+      "title": "Canvas Provider",
+      "type": "string",
+      "description": "Canvas engine for openmeteo_get_historical spillover. Set to 'duckdb' to enable DataCanvas and the dataframe_query / dataframe_describe tools. Default 'none' (spillover disabled).",
+      "required": false,
+      "default": "none"
+    }
+  }
 }
