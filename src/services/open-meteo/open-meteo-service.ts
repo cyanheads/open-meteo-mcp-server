@@ -1,6 +1,6 @@
 /**
- * @fileoverview Open-Meteo API client. Wraps all six endpoints (forecast, archive,
- * marine, air quality, geocoding, elevation) with retry logic, timeout, and error
+ * @fileoverview Open-Meteo API client. Wraps all eight endpoints (forecast, archive,
+ * marine, air quality, geocoding, elevation, ensemble, flood) with retry logic, timeout, and error
  * envelope detection. Returns raw API responses — reshaping to per-timestamp records
  * is the tool handler's responsibility.
  * @module services/open-meteo/open-meteo-service
@@ -16,7 +16,13 @@ import {
 } from '@cyanheads/mcp-ts-core/errors';
 import { withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import type { ElevationResponse, GeocodingResponse, WeatherEnvelope } from './types.js';
+import type {
+  ElevationResponse,
+  EnsembleEnvelope,
+  FloodEnvelope,
+  GeocodingResponse,
+  WeatherEnvelope,
+} from './types.js';
 
 const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 500;
@@ -170,6 +176,26 @@ export interface AirQualityParams {
   timezone?: string | undefined;
 }
 
+export interface EnsembleParams {
+  daily?: string[] | undefined;
+  forecast_days?: number | undefined;
+  hourly?: string[] | undefined;
+  models?: string | undefined;
+  past_days?: number | undefined;
+  precipitation_unit?: string | undefined;
+  temperature_unit?: string | undefined;
+  timezone?: string | undefined;
+  wind_speed_unit?: string | undefined;
+}
+
+export interface FloodParams {
+  daily: string[];
+  end_date?: string | undefined;
+  forecast_days?: number | undefined;
+  start_date?: string | undefined;
+  timezone?: string | undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Public service class
 // ---------------------------------------------------------------------------
@@ -247,6 +273,66 @@ export class OpenMeteoService {
     const url = buildWeatherUrl(`${airQualityBaseUrl}/v1/air-quality`, lat, lon, params);
     ctx.log.info('Fetching air quality', { lat, lon, forecast_days: params.forecast_days });
     return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, 'air-quality');
+  }
+
+  /** Ensemble forecast endpoint — per-member hourly/daily time series up to 16 days. */
+  getEnsemble(
+    lat: number,
+    lon: number,
+    params: EnsembleParams,
+    ctx: Context,
+  ): Promise<EnsembleEnvelope> {
+    const { ensembleBaseUrl } = getServerConfig();
+    const url = new URL(`${ensembleBaseUrl}/v1/ensemble`);
+    url.searchParams.set('latitude', String(lat));
+    url.searchParams.set('longitude', String(lon));
+
+    if (params.hourly && params.hourly.length > 0) {
+      url.searchParams.set('hourly', params.hourly.join(','));
+    }
+    if (params.daily && params.daily.length > 0) {
+      url.searchParams.set('daily', params.daily.join(','));
+    }
+    if (params.models) url.searchParams.set('models', params.models);
+    if (params.forecast_days != null)
+      url.searchParams.set('forecast_days', String(params.forecast_days));
+    if (params.past_days != null) url.searchParams.set('past_days', String(params.past_days));
+    if (params.temperature_unit) url.searchParams.set('temperature_unit', params.temperature_unit);
+    if (params.wind_speed_unit) url.searchParams.set('wind_speed_unit', params.wind_speed_unit);
+    if (params.precipitation_unit)
+      url.searchParams.set('precipitation_unit', params.precipitation_unit);
+    url.searchParams.set('timezone', params.timezone ?? 'auto');
+
+    ctx.log.info('Fetching ensemble forecast', {
+      lat,
+      lon,
+      models: params.models,
+      forecast_days: params.forecast_days,
+    });
+    return withOpenMeteoRetry<EnsembleEnvelope>(url.toString(), ctx, 'ensemble');
+  }
+
+  /** GloFAS Flood endpoint — river discharge forecasts and reanalysis history. */
+  getFlood(lat: number, lon: number, params: FloodParams, ctx: Context): Promise<FloodEnvelope> {
+    const { floodBaseUrl } = getServerConfig();
+    const url = new URL(`${floodBaseUrl}/v1/flood`);
+    url.searchParams.set('latitude', String(lat));
+    url.searchParams.set('longitude', String(lon));
+    url.searchParams.set('daily', params.daily.join(','));
+    if (params.forecast_days != null)
+      url.searchParams.set('forecast_days', String(params.forecast_days));
+    if (params.start_date) url.searchParams.set('start_date', params.start_date);
+    if (params.end_date) url.searchParams.set('end_date', params.end_date);
+    url.searchParams.set('timezone', params.timezone ?? 'auto');
+
+    ctx.log.info('Fetching flood forecast', {
+      lat,
+      lon,
+      forecast_days: params.forecast_days,
+      start_date: params.start_date,
+      end_date: params.end_date,
+    });
+    return withOpenMeteoRetry<FloodEnvelope>(url.toString(), ctx, 'flood');
   }
 
   /** Elevation endpoint — up to 100 coordinate pairs. */

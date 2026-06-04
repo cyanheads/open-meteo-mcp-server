@@ -11,6 +11,8 @@ import {
   openmeteoGeocodeTool,
   openmeteoGetAirQualityTool,
   openmeteoGetElevationTool,
+  openmeteoGetEnsembleTool,
+  openmeteoGetFloodTool,
   openmeteoGetForecastTool,
   openmeteoGetHistoricalTool,
   openmeteoGetMarineTool,
@@ -26,6 +28,8 @@ await createApp({
     openmeteoGetHistoricalTool,
     openmeteoGetMarineTool,
     openmeteoGetAirQualityTool,
+    openmeteoGetEnsembleTool,
+    openmeteoGetFloodTool,
     openmeteoDataframeQueryTool,
     openmeteoDataframeDescribeTool,
   ],
@@ -44,15 +48,17 @@ await createApp({
     '3. openmeteo_get_historical — ERA5 archive from 1940; use start_date/end_date\n' +
     '4. openmeteo_get_marine — wave/swell forecast for coastal and ocean points\n' +
     '5. openmeteo_get_air_quality — CAMS modeled PM2.5, PM10, ozone, AQI (forecast only)\n' +
-    '6. openmeteo_get_elevation — Copernicus DEM terrain elevation for up to 100 coordinate pairs\n\n' +
+    '6. openmeteo_get_elevation — Copernicus DEM terrain elevation for up to 100 coordinate pairs\n' +
+    '7. openmeteo_get_ensemble — probabilistic ensemble forecast (up to 51 members, 16 days); use for exceedance probabilities and uncertainty quantification\n' +
+    '8. openmeteo_get_flood — GloFAS river discharge forecast (up to 210 days) and reanalysis (from 1984); coordinate-based, snaps to nearest river\n\n' +
     'DataCanvas workflow (requires CANVAS_PROVIDER_TYPE=duckdb):\n' +
-    '- openmeteo_get_historical with a large date range returns canvas_id + truncated: true\n' +
+    '- openmeteo_get_historical or openmeteo_get_ensemble with a large query returns canvas_id + truncated: true\n' +
     '- openmeteo_dataframe_describe — list tables and columns on the canvas\n' +
     '- openmeteo_dataframe_query — run SQL SELECT against staged tables\n\n' +
     'Notes:\n' +
     '- All weather tools take latitude/longitude — use openmeteo_geocode first for place names\n' +
     '- ERA5 has a variable lag (~1–5 days). For recent history, use openmeteo_get_forecast with past_days\n' +
     '- All responses use timezone=auto by default (localizes to the location)\n' +
-    '- Variable names are exact API names: temperature_2m, pm2_5, wave_height, etc.\n' +
-    '- Large historical queries (multi-year hourly) spill to DataCanvas when CANVAS_PROVIDER_TYPE=duckdb',
+    '- Variable names are exact API names: temperature_2m, pm2_5, wave_height, river_discharge, etc.\n' +
+    '- Large historical/ensemble queries spill to DataCanvas when CANVAS_PROVIDER_TYPE=duckdb',
 });
