@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Server:** open-meteo-mcp-server
-**Version:** 0.1.3
+**Version:** 0.1.4
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.21`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
@@ -207,9 +207,9 @@ src/
     server-config.ts                    # Server-specific env vars (all optional base URL overrides)
   services/
     open-meteo/
-      open-meteo-service.ts             # HTTP client: forecast, archive, marine, air quality, geocoding, elevation
+      open-meteo-service.ts             # HTTP client: forecast, archive, marine, air quality, geocoding, elevation, ensemble, flood
       types.ts                          # API response types
-    canvas-accessor.ts                  # DataCanvas accessor for openmeteo_get_historical spillover
+    canvas-accessor.ts                  # DataCanvas accessor for openmeteo_get_historical / openmeteo_get_ensemble spillover
   mcp-server/
     tools/definitions/
       geocode.tool.ts                   # openmeteo_geocode
@@ -218,6 +218,8 @@ src/
       get-marine.tool.ts                # openmeteo_get_marine
       get-air-quality.tool.ts           # openmeteo_get_air_quality
       get-elevation.tool.ts             # openmeteo_get_elevation
+      get-ensemble.tool.ts              # openmeteo_get_ensemble (DataCanvas spillover)
+      get-flood.tool.ts                 # openmeteo_get_flood
 ```
 
 ---

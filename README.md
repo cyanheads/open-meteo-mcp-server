@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/open-meteo-mcp-server</h1>
   <p><b>Geocode places, fetch global weather forecasts, ERA5 historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP.</b>
-  <div>8 Tools</div>
+  <div>10 Tools</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Tools
 
-Eight tools covering geocoding, weather forecasts, historical climate, marine conditions, air quality, terrain elevation, and SQL analytics over large historical datasets:
+Ten tools covering geocoding, weather forecasts, historical climate, probabilistic ensemble forecasts, marine conditions, air quality, terrain elevation, river discharge, and SQL analytics over large datasets:
 
 | Tool | Description |
 |:---|:---|
@@ -39,7 +39,9 @@ Eight tools covering geocoding, weather forecasts, historical climate, marine co
 | `openmeteo_get_marine` | Marine forecast for coastal or ocean coordinates: wave height, period, direction, swell, and sea-surface temperature |
 | `openmeteo_get_air_quality` | Modeled CAMS air quality forecast: PM2.5, PM10, NO2, O3, CO, dust, pollen, and European/US AQI indices |
 | `openmeteo_get_elevation` | Terrain elevation from Copernicus DEM (~90m resolution) for up to 100 coordinate pairs per call |
-| `openmeteo_dataframe_describe` | List tables and columns on a DataCanvas staged by `openmeteo_get_historical` |
+| `openmeteo_get_ensemble` | Probabilistic ensemble forecast: per-member hourly/daily time series (up to 51 members, 16 days) for exceedance and uncertainty analysis |
+| `openmeteo_get_flood` | GloFAS river discharge forecast (up to 210 days) and reanalysis (1984–present); coordinate-based, snaps to nearest river |
+| `openmeteo_dataframe_describe` | List tables and columns on a DataCanvas staged by `openmeteo_get_historical` or `openmeteo_get_ensemble` |
 | `openmeteo_dataframe_query` | Run a read-only SQL SELECT against tables staged on a DataCanvas |
 
 ### `openmeteo_geocode`
@@ -111,6 +113,33 @@ Terrain elevation from the Copernicus Digital Elevation Model (~90m resolution).
 - Returns results in input order: `{ latitude, longitude, elevation_m }`
 - Useful for geographic context, elevation-adjusted weather interpretation, or route planning
 
+---
+
+### `openmeteo_get_ensemble`
+
+Probabilistic ensemble weather forecast exposing all individual model member trajectories.
+
+- Up to 16 forecast days (`forecast_days 1–16`, default 7) with optional `past_days` (0–92)
+- Each requested variable is returned as per-member columns: `temperature_2m_member01`, `temperature_2m_member02`, … Use the spread across members to compute exceedance probabilities, interquantile ranges, and decision thresholds
+- Available ensemble models: `ecmwf_ifs025` (51 members, global 0.25°), `gfs025` (31 members), `icon_seamless` (40 members, global/Europe blend), `gem_global` (21 members). Omit `models` to use the API default
+- Response includes `model` (system used) and `member_count` (number of members)
+- At least one of `hourly_variables` or `daily_variables` is required
+- Large multi-member, multi-day pulls spill to DataCanvas when `CANVAS_PROVIDER_TYPE=duckdb` — output includes `canvas_id` and `truncated: true`; query with `openmeteo_dataframe_query`
+- Configurable temperature, wind speed, and precipitation units
+
+---
+
+### `openmeteo_get_flood`
+
+GloFAS (Global Flood Awareness System) river discharge forecast and reanalysis via the Open-Meteo Flood API.
+
+- Coordinate-based — no river ID needed; the API snaps to the nearest river grid point automatically
+- Forecast horizon up to 210 days; reanalysis history from 1984-01-01 to present
+- Use `forecast_days` for future outlook, `start_date`/`end_date` for historical analysis; both can be combined
+- Available daily variables: `river_discharge` (ensemble mean), `river_discharge_mean`, `river_discharge_min`, `river_discharge_max`, `river_discharge_median`, `river_discharge_p25` (25th percentile), `river_discharge_p75` (75th percentile) — all in m³/s
+- Returns null for coordinates outside GloFAS coverage (e.g., open ocean or areas without river network data)
+- Discharge values reflect the GloFAS ensemble — percentile variables expose the uncertainty spread
+
 ## Features
 
 Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
@@ -128,8 +157,8 @@ Open-Meteo–specific:
 - Self-contained geocoding: `openmeteo_geocode` resolves place names so agents don't need a separate geocoder
 - ERA5 archive from 1940 to present with same variable schema as the forecast API — direct past/forecast comparisons on one schema
 - Automatic columnar-to-record reshape: Open-Meteo returns parallel time/variable arrays; handlers convert to per-timestamp records with a `*_units` map
-- DataCanvas spillover for `openmeteo_get_historical`: multi-year hourly queries that exceed the inline limit register a DuckDB dataframe for SQL querying
-- Configurable base URLs for all five API endpoints (forecast, archive, marine, air quality, geocoding) — override for testing or self-hosted deployments
+- DataCanvas spillover for `openmeteo_get_historical` and `openmeteo_get_ensemble`: large queries that exceed the inline record limit register a DuckDB dataframe for SQL querying
+- Configurable base URLs for all seven API endpoints (forecast, archive, marine, air quality, geocoding, ensemble, flood) — override for testing or self-hosted deployments
 - **Attribution:** Weather data by [Open-Meteo.com](https://open-meteo.com/) (CC BY 4.0). Non-commercial use is free and keyless; commercial use requires Open-Meteo's paid API tier (~10,000 req/day, 5,000/hour fair-use ceiling for non-commercial)
 
 Agent-friendly output:
