@@ -30,6 +30,14 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
       recovery: 'Re-run openmeteo_get_historical to stage a fresh canvas, then retry.',
       retryable: false,
     },
+    {
+      reason: 'system_catalog_access',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The SQL references a system catalog (information_schema, sqlite_master, pg_catalog, or a duckdb_*() function)',
+      recovery:
+        'List tables and columns with openmeteo_dataframe_describe instead — system catalogs are blocked so callers cannot enumerate other staged canvases.',
+      retryable: false,
+    },
   ],
 
   input: z.object({
@@ -62,7 +70,10 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     }
 
     const instance = await canvas.acquire(input.canvas_id, ctx);
-    const result = await instance.query(input.sql, { signal: ctx.signal });
+    const result = await instance.query(input.sql, {
+      signal: ctx.signal,
+      denySystemCatalogs: true,
+    });
 
     ctx.log.info('Dataframe query executed', {
       canvas_id: instance.canvasId,
