@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-06-12 · 🛡️ Security
+
+mcp-ts-core ^0.10.6 adoption, dataframe_query system-catalog deny, Docker healthcheck + bundle cleaner
+
 ## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-06-04
 
 Ensemble forecast + GloFAS flood tools (openmeteo_get_ensemble, openmeteo_get_flood)

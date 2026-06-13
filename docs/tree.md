@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-06-04 06:07:03
+Generated on: 2026-06-13 03:43:41
 
 ```text
 open-meteo-mcp-server/
@@ -31,6 +31,7 @@ open-meteo-mcp-server/
 │   ├── check-framework-antipatterns.ts
 │   ├── check-skill-versions.ts
 │   ├── check-skills-sync.ts
+│   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
@@ -116,6 +117,10 @@ open-meteo-mcp-server/
 │   ├── security-pass/
 │   │   └── SKILL.md
 │   ├── setup/
+│   │   └── SKILL.md
+│   ├── techniques/
+│   │   ├── references/
+│   │   │   └── outline-on-overflow.md
 │   │   └── SKILL.md
 │   └── tool-defs-analysis/
 │       └── SKILL.md
