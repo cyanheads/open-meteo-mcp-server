@@ -21,6 +21,8 @@ import { setCanvas } from './services/canvas-accessor.js';
 import { initOpenMeteoService } from './services/open-meteo/open-meteo-service.js';
 
 await createApp({
+  name: 'open-meteo-mcp-server',
+  title: 'open-meteo-mcp-server',
   tools: [
     openmeteoGeocodeTool,
     openmeteoGetElevationTool,
