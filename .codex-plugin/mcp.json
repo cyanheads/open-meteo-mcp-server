@@ -1,5 +1,5 @@
 {
-  "@cyanheads/open-meteo-mcp-server": {
+  "open-meteo-mcp-server": {
     "command": "npx",
     "args": ["-y", "@cyanheads/open-meteo-mcp-server"],
     "env": {
