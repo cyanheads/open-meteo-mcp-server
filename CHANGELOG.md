@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-06-20
+
+mcp-ts-core ^0.10.9 maintenance — check-dependency-specifiers + plugin-manifest devcheck gates, ctx.content and invalid_sql skill sync, dependency refresh
+
 ## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-06-12 · 🛡️ Security
 
 mcp-ts-core ^0.10.6 adoption, dataframe_query system-catalog deny, Docker healthcheck + bundle cleaner
