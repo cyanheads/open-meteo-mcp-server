@@ -41,8 +41,8 @@ export interface WeatherEnvelope {
 export interface GeocodingResult {
   admin1?: string | null;
   admin2?: string | null;
-  country: string;
-  country_code: string;
+  country?: string | null;
+  country_code?: string | null;
   elevation: number | null;
   feature_code: string;
   id: number;
