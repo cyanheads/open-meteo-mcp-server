@@ -67,8 +67,14 @@ export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
               .describe(
                 'IANA timezone (e.g., "America/Los_Angeles") — pass to weather tools as the timezone parameter',
               ),
-            country: z.string().describe('Country name'),
-            country_code: z.string().describe('ISO 3166-1 alpha-2 country code'),
+            country: z
+              .string()
+              .nullable()
+              .describe('Country name (null for non-populated features like continents)'),
+            country_code: z
+              .string()
+              .nullable()
+              .describe('ISO 3166-1 alpha-2 country code (null for non-populated features)'),
             admin1: z.string().nullable().describe('State, province, or region'),
             admin2: z.string().nullable().describe('County or district'),
             population: z
@@ -100,8 +106,8 @@ export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
       longitude: r.longitude,
       elevation: r.elevation ?? null,
       timezone: r.timezone,
-      country: r.country,
-      country_code: r.country_code,
+      country: r.country ?? null,
+      country_code: r.country_code ?? null,
       admin1: r.admin1 ?? null,
       admin2: r.admin2 ?? null,
       population: r.population ?? null,
@@ -122,8 +128,11 @@ export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
       const region = [r.admin1, r.admin2].filter(Boolean).join(', ');
       const pop = r.population != null ? ` | pop. ${r.population.toLocaleString()}` : '';
       const elev = r.elevation != null ? ` | ${r.elevation}m` : '';
+      const countryPart = r.country ?? '';
+      const codePart = r.country_code ?? '';
+      const locLabel = [codePart, countryPart].filter(Boolean).join(' — ');
       lines.push(
-        `**${r.name}** (${r.country_code}) — ${r.country}${region ? `, ${region}` : ''} — ` +
+        `**${r.name}**${locLabel ? ` (${locLabel})` : ''}${region ? `, ${region}` : ''} — ` +
           `${r.latitude}, ${r.longitude}${elev}${pop}`,
         `  id: ${r.id} | timezone: ${r.timezone} | feature: ${r.feature_code}`,
       );
