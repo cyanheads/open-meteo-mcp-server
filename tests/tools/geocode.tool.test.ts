@@ -29,6 +29,37 @@ const SEATTLE_RESULT = {
   population: 780995,
 };
 
+/**
+ * Real upstream shape for a continent feature (search "Antarctica"): the API
+ * omits country, country_code, admin1, and admin2 entirely for feature_code CONT.
+ */
+const ANTARCTICA_CONT_RESULT = {
+  id: 6255152,
+  name: 'Antarctica',
+  latitude: -78.15856,
+  longitude: 16.40626,
+  elevation: 3199.0,
+  feature_code: 'CONT',
+  timezone: 'Antarctica/Syowa',
+  population: 1100,
+};
+
+/** Real upstream result for name="上海" under language="zh". */
+const SHANGHAI_ZH_RESULT = {
+  id: 1796236,
+  name: '上海',
+  latitude: 31.22222,
+  longitude: 121.45806,
+  elevation: 12.0,
+  feature_code: 'PPLA',
+  country_code: 'CN',
+  timezone: 'Asia/Shanghai',
+  population: 24874500,
+  country: '中国',
+  admin1: '上海市',
+  admin2: '上海市',
+};
+
 describe('openmeteoGeocodeTool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -64,6 +95,71 @@ describe('openmeteoGeocodeTool', () => {
     await expect(openmeteoGeocodeTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'no_results' },
     });
+  });
+
+  it('tolerates results missing country/country_code (continent features)', async () => {
+    mockGetGeocode.mockResolvedValue({ results: [ANTARCTICA_CONT_RESULT] });
+    const ctx = createMockContext();
+    const input = openmeteoGeocodeTool.input.parse({ name: 'Antarctica' });
+    const result = await openmeteoGeocodeTool.handler(input, ctx);
+
+    expect(result.count).toBe(1);
+    expect(result.results[0]?.country).toBeNull();
+    expect(result.results[0]?.country_code).toBeNull();
+    expect(result.results[0]?.admin1).toBeNull();
+    expect(result.results[0]?.timezone).toBe('Antarctica/Syowa');
+    // Output schema must accept the sparse shape
+    expect(() => openmeteoGeocodeTool.output.parse(result)).not.toThrow();
+  });
+
+  it('retries once with a script-inferred language when a non-ASCII query misses under default "en"', async () => {
+    mockGetGeocode
+      .mockResolvedValueOnce({ generationtime_ms: 0.1 }) // en pass: no results key
+      .mockResolvedValueOnce({ results: [SHANGHAI_ZH_RESULT] });
+    const ctx = createMockContext();
+    const input = openmeteoGeocodeTool.input.parse({ name: '上海' });
+    const result = await openmeteoGeocodeTool.handler(input, ctx);
+
+    expect(mockGetGeocode).toHaveBeenCalledTimes(2);
+    expect(mockGetGeocode).toHaveBeenNthCalledWith(1, '上海', 5, 'en', ctx);
+    expect(mockGetGeocode).toHaveBeenNthCalledWith(2, '上海', 5, 'zh', ctx);
+    expect(result.results[0]?.name).toBe('上海');
+    expect(result.results[0]?.country_code).toBe('CN');
+    expect(result.results[0]?.latitude).toBe(31.22222);
+  });
+
+  it('retry path survives sparse results missing country', async () => {
+    mockGetGeocode.mockResolvedValueOnce({ generationtime_ms: 0.1 }).mockResolvedValueOnce({
+      results: [{ ...SHANGHAI_ZH_RESULT, country: undefined, country_code: undefined }],
+    });
+    const ctx = createMockContext();
+    const input = openmeteoGeocodeTool.input.parse({ name: '上海' });
+    const result = await openmeteoGeocodeTool.handler(input, ctx);
+
+    expect(result.count).toBe(1);
+    expect(result.results[0]?.country).toBeNull();
+    expect(result.results[0]?.country_code).toBeNull();
+  });
+
+  it('does not retry an ASCII query — throws no_results after one pass', async () => {
+    mockGetGeocode.mockResolvedValue({ generationtime_ms: 0.1 });
+    const ctx = createMockContext({ errors: openmeteoGeocodeTool.errors });
+    const input = openmeteoGeocodeTool.input.parse({ name: 'zzzznotaplace' });
+    await expect(openmeteoGeocodeTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_results' },
+    });
+    expect(mockGetGeocode).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry when the caller set a non-default language', async () => {
+    mockGetGeocode.mockResolvedValue({ generationtime_ms: 0.1 });
+    const ctx = createMockContext({ errors: openmeteoGeocodeTool.errors });
+    const input = openmeteoGeocodeTool.input.parse({ name: '上海', language: 'de' });
+    await expect(openmeteoGeocodeTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_results' },
+    });
+    expect(mockGetGeocode).toHaveBeenCalledTimes(1);
+    expect(mockGetGeocode).toHaveBeenCalledWith('上海', 5, 'de', ctx);
   });
 
   it('normalises nullable fields', async () => {
@@ -106,5 +202,32 @@ describe('openmeteoGeocodeTool', () => {
     expect(blocks[0]?.type).toBe('text');
     expect(blocks[0]?.text).toContain('Seattle');
     expect(blocks[0]?.text).toContain('Open-Meteo.com');
+  });
+
+  it('format omits country markers instead of rendering null for sparse results', () => {
+    const blocks = openmeteoGeocodeTool.format!({
+      results: [
+        {
+          id: 6255152,
+          name: 'Antarctica',
+          latitude: -78.15856,
+          longitude: 16.40626,
+          elevation: 3199,
+          timezone: null,
+          country: null,
+          country_code: null,
+          admin1: null,
+          admin2: null,
+          population: 1100,
+          feature_code: 'CONT',
+        },
+      ],
+      count: 1,
+    });
+    const text = blocks[0]?.text ?? '';
+    expect(text).toContain('Antarctica');
+    expect(text).not.toContain('null');
+    expect(text).not.toContain('undefined');
+    expect(text).not.toContain('()');
   });
 });

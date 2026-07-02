@@ -37,12 +37,16 @@ export interface WeatherEnvelope {
   utc_offset_seconds: number;
 }
 
-/** Geocoding result item from Open-Meteo Geocoding API. */
+/**
+ * Geocoding result item from Open-Meteo Geocoding API.
+ * The API omits `country`/`country_code` for non-country features (continents,
+ * oceans — e.g. feature_code "CONT") and can omit `timezone` on some feature types.
+ */
 export interface GeocodingResult {
   admin1?: string | null;
   admin2?: string | null;
-  country: string;
-  country_code: string;
+  country?: string | null;
+  country_code?: string | null;
   elevation: number | null;
   feature_code: string;
   id: number;
@@ -50,7 +54,7 @@ export interface GeocodingResult {
   longitude: number;
   name: string;
   population?: number | null;
-  timezone: string;
+  timezone?: string | null;
 }
 
 /** Top-level geocoding response — results key is ABSENT on no-match. */
@@ -72,15 +76,16 @@ export interface ElevationResponse {
 export type TimeRecord = Record<string, number | string | null>;
 
 /**
- * Ensemble API response envelope — extends WeatherEnvelope with model metadata.
- * The `models` field names the ensemble system used; `members` is the count of
- * ensemble members, each appearing as separate columns in the hourly/daily blocks
- * (e.g. temperature_2m_member01, temperature_2m_member02, …).
+ * Ensemble API response envelope — extends WeatherEnvelope. The live API does NOT
+ * return top-level `models`/`members` fields; member identity lives only in the
+ * per-member column names of the hourly/daily blocks (e.g. temperature_2m_member01,
+ * temperature_2m_member02, …). The optional fields below are kept for forward-compat
+ * only — handlers must not depend on them being present.
  */
 export interface EnsembleEnvelope extends WeatherEnvelope {
-  /** Number of ensemble members in the response. */
+  /** Number of ensemble members — not returned by the live API. */
   members?: number;
-  /** Ensemble model identifier (e.g. "ecmwf_ifs025", "gfs025"). */
+  /** Ensemble model identifier — not returned by the live API. */
   models?: string;
 }
 
