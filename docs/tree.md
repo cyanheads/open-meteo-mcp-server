@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 12:19:41
+Generated on: 2026-07-02 08:27:12
 
 ```text
 open-meteo-mcp-server/
@@ -146,7 +146,8 @@ open-meteo-mcp-server/
 │   │       │   ├── get-historical.tool.ts
 │   │       │   ├── get-marine.tool.ts
 │   │       │   └── index.ts
-│   │       └── reshape-utils.ts
+│   │       ├── reshape-utils.ts
+│   │       └── upstream-error.ts
 │   ├── services/
 │   │   ├── open-meteo/
 │   │   │   ├── open-meteo-service.ts
@@ -168,7 +169,8 @@ open-meteo-mcp-server/
 │       ├── get-flood.tool.test.ts
 │       ├── get-forecast.tool.test.ts
 │       ├── get-historical.tool.test.ts
-│       └── get-marine.tool.test.ts
+│       ├── get-marine.tool.test.ts
+│       └── upstream-error.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore

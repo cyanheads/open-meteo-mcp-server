@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.8](changelog/0.1.x/0.1.8.md) — 2026-07-02
+
+Unknown-variable errors lead with actionable guidance instead of upstream Swift jargon; declared recovery hints now reach the wire at every ctx.fail site; canvas_id only returned when data actually spilled
+
 ## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-07-02 · 🛡️ Security
 
 openmeteo_geocode tolerates sparse results and retries native-script queries; openmeteo_get_ensemble populates model/member_count; mcp-ts-core ^0.10.10 clears the transitive js-yaml advisory
