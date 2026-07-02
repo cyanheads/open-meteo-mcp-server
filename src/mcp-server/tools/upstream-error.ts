@@ -23,8 +23,8 @@ const INVALID_VALUE_PATTERN = /from invalid String value (.+?)\.?$/;
  *
  * @param upstreamReason - Raw `reason` from the Open-Meteo error envelope.
  * @param label - What kind of name was rejected — "variable" for most tools,
- *   "variable or model" for the ensemble endpoint (its `models` parameter is
- *   rejected through the same envelope).
+ *   "variable or model" for the ensemble and climate endpoints (their `models`
+ *   parameter is rejected through the same envelope).
  */
 export function frameInvalidVariableMessage(
   upstreamReason: string | undefined,

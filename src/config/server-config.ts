@@ -36,6 +36,10 @@ const ServerConfigSchema = z.object({
     .string()
     .default('https://flood-api.open-meteo.com')
     .describe('Base URL for the Open-Meteo GloFAS Flood API'),
+  climateBaseUrl: z
+    .string()
+    .default('https://climate-api.open-meteo.com')
+    .describe('Base URL for the Open-Meteo Climate (CMIP6 projections) API'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -49,6 +53,7 @@ export function getServerConfig(): z.infer<typeof ServerConfigSchema> {
     geocodingBaseUrl: 'OPEN_METEO_GEOCODING_BASE_URL',
     ensembleBaseUrl: 'OPEN_METEO_ENSEMBLE_BASE_URL',
     floodBaseUrl: 'OPEN_METEO_FLOOD_BASE_URL',
+    climateBaseUrl: 'OPEN_METEO_CLIMATE_BASE_URL',
   });
   return _config;
 }

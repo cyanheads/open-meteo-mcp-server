@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-07-02 08:27:12
+Generated on: 2026-07-02 08:59:49
 
 ```text
 open-meteo-mcp-server/
@@ -20,6 +20,7 @@ open-meteo-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -139,6 +140,7 @@ open-meteo-mcp-server/
 │   │       │   ├── dataframe-query.tool.ts
 │   │       │   ├── geocode.tool.ts
 │   │       │   ├── get-air-quality.tool.ts
+│   │       │   ├── get-climate.tool.ts
 │   │       │   ├── get-elevation.tool.ts
 │   │       │   ├── get-ensemble.tool.ts
 │   │       │   ├── get-flood.tool.ts
@@ -164,6 +166,7 @@ open-meteo-mcp-server/
 │       ├── dataframe-query.tool.test.ts
 │       ├── geocode.tool.test.ts
 │       ├── get-air-quality.tool.test.ts
+│       ├── get-climate.tool.test.ts
 │       ├── get-elevation.tool.test.ts
 │       ├── get-ensemble.tool.test.ts
 │       ├── get-flood.tool.test.ts

@@ -10,8 +10,8 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
   description:
     'Run a read-only SQL SELECT against tables staged on a DataCanvas by ' +
-    'openmeteo_get_historical or openmeteo_get_ensemble. Pass the canvas_id returned ' +
-    'when either tool spills (truncated: true). ' +
+    'openmeteo_get_historical, openmeteo_get_ensemble, or openmeteo_get_climate. ' +
+    'Pass the canvas_id returned when any of those tools spills (truncated: true). ' +
     'Tables are named by the spillover helper (e.g. spilled_<id>); use openmeteo_dataframe_describe ' +
     'to list available tables and their columns before querying.',
   annotations: { readOnlyHint: true },
@@ -29,7 +29,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id is unknown or has expired (TTL is 24 h sliding)',
       recovery:
-        'Re-run openmeteo_get_historical or openmeteo_get_ensemble to stage a fresh canvas, then retry.',
+        'Re-run openmeteo_get_historical, openmeteo_get_ensemble, or openmeteo_get_climate to stage a fresh canvas, then retry.',
       retryable: false,
     },
     {
@@ -46,7 +46,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     canvas_id: z
       .string()
       .describe(
-        'Canvas ID returned by openmeteo_get_historical or openmeteo_get_ensemble when truncated: true.',
+        'Canvas ID returned by openmeteo_get_historical, openmeteo_get_ensemble, or openmeteo_get_climate when truncated: true.',
       ),
     sql: z
       .string()

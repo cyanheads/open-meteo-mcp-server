@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/open-meteo-mcp-server</h1>
   <p><b>Geocode places, fetch global weather forecasts, ERA5 historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP.</b>
-  <div>10 Tools</div>
+  <div>11 Tools</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.8-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Tools
 
-Ten tools covering geocoding, weather forecasts, historical climate, probabilistic ensemble forecasts, marine conditions, air quality, terrain elevation, river discharge, and SQL analytics over large datasets:
+Eleven tools covering geocoding, weather forecasts, historical climate, probabilistic ensemble forecasts, marine conditions, air quality, terrain elevation, river discharge, CMIP6 climate projections, and SQL analytics over large datasets:
 
 | Tool | Description |
 |:---|:---|
@@ -41,7 +41,8 @@ Ten tools covering geocoding, weather forecasts, historical climate, probabilist
 | `openmeteo_get_elevation` | Terrain elevation from Copernicus DEM (~90m resolution) for up to 100 coordinate pairs per call |
 | `openmeteo_get_ensemble` | Probabilistic ensemble forecast: per-member hourly/daily time series (up to 51 members, 16 days) for exceedance and uncertainty analysis |
 | `openmeteo_get_flood` | GloFAS river discharge forecast (up to 210 days) and reanalysis (1984–present); coordinate-based, snaps to nearest river |
-| `openmeteo_dataframe_describe` | List tables and columns on a DataCanvas staged by `openmeteo_get_historical` or `openmeteo_get_ensemble` |
+| `openmeteo_get_climate` | Bias-corrected daily CMIP6 climate projections (1950–2050) across up to 7 models; large ranges spill to DataCanvas |
+| `openmeteo_dataframe_describe` | List tables and columns on a DataCanvas staged by `openmeteo_get_historical`, `openmeteo_get_ensemble`, or `openmeteo_get_climate` |
 | `openmeteo_dataframe_query` | Run a read-only SQL SELECT against tables staged on a DataCanvas |
 
 ### `openmeteo_geocode`
@@ -140,6 +141,20 @@ GloFAS (Global Flood Awareness System) river discharge forecast and reanalysis v
 - Returns null for coordinates outside GloFAS coverage (e.g., open ocean or areas without river network data)
 - Discharge values reflect the GloFAS ensemble — percentile variables expose the uncertainty spread
 
+---
+
+### `openmeteo_get_climate`
+
+Long-range climate projections from bias-corrected daily CMIP6 models — the future-projection counterpart to `openmeteo_get_historical`.
+
+- Coverage: 1950-01-01 to 2050-12-31, daily resolution only
+- Available models: `CMCC_CM2_VHR4`, `FGOALS_f3_H`, `HiRAM_SIT_HR`, `MRI_AGCM3_2_S`, `EC_Earth3P_HR`, `MPI_ESM1_2_XR`, `NICAM16_8S`
+- With 2+ models, each variable appears once per model with the model name as column suffix (e.g. `temperature_2m_max_CMCC_CM2_VHR4`); a single or omitted model returns plain variable names
+- Common daily variables: `temperature_2m_max`, `temperature_2m_min`, `temperature_2m_mean`, `precipitation_sum`, `rain_sum`, `snowfall_sum`, `wind_speed_10m_mean`, `wind_speed_10m_max`, `shortwave_radiation_sum`, `cloud_cover_mean`, `relative_humidity_2m_mean`, `pressure_msl_mean`
+- Not all models carry all variables — missing combinations return null (e.g. `CMCC_CM2_VHR4` has no `shortwave_radiation_sum`)
+- Multi-decade daily pulls across several models spill to DataCanvas when `CANVAS_PROVIDER_TYPE=duckdb` — output includes `canvas_id` and `truncated: true`; query with `openmeteo_dataframe_query`
+- Configurable temperature, wind speed, and precipitation units
+
 ## Features
 
 Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
@@ -157,8 +172,8 @@ Open-Meteo–specific:
 - Self-contained geocoding: `openmeteo_geocode` resolves place names so agents don't need a separate geocoder
 - ERA5 archive from 1940 to present with same variable schema as the forecast API — direct past/forecast comparisons on one schema
 - Automatic columnar-to-record reshape: Open-Meteo returns parallel time/variable arrays; handlers convert to per-timestamp records with a `*_units` map
-- DataCanvas spillover for `openmeteo_get_historical` and `openmeteo_get_ensemble`: large queries that exceed the inline record limit register a DuckDB dataframe for SQL querying
-- Configurable base URLs for all seven API endpoints (forecast, archive, marine, air quality, geocoding, ensemble, flood) — override for testing or self-hosted deployments
+- DataCanvas spillover for `openmeteo_get_historical`, `openmeteo_get_ensemble`, and `openmeteo_get_climate`: large queries that exceed the inline record limit register a DuckDB dataframe for SQL querying
+- Configurable base URLs for all eight API endpoints (forecast, archive, marine, air quality, geocoding, ensemble, flood, climate) — override for testing or self-hosted deployments
 - **Attribution:** Weather data by [Open-Meteo.com](https://open-meteo.com/) (CC BY 4.0). Non-commercial use is free and keyless; commercial use requires Open-Meteo's paid API tier (~10,000 req/day, 5,000/hour fair-use ceiling for non-commercial)
 
 Agent-friendly output:
@@ -285,12 +300,15 @@ All configuration is validated at startup via Zod schemas. No API key is require
 | `MCP_GC_PRESSURE_INTERVAL_MS` | Opt-in forced-GC interval (ms, Bun only). Set to `60000` if heap growth is observed under sustained HTTP traffic. | `0` |
 | `LOGS_DIR` | Directory for log files (Node.js only) | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
-| `CANVAS_PROVIDER_TYPE` | Canvas engine for `openmeteo_get_historical` spillover: `duckdb` or `none` | `none` |
+| `CANVAS_PROVIDER_TYPE` | Canvas engine for `openmeteo_get_historical` / `openmeteo_get_ensemble` / `openmeteo_get_climate` spillover: `duckdb` or `none` | `none` |
 | `OPEN_METEO_API_BASE_URL` | Override for the main forecast + elevation API | `https://api.open-meteo.com` |
 | `OPEN_METEO_ARCHIVE_BASE_URL` | Override for the ERA5 historical archive API | `https://archive-api.open-meteo.com` |
 | `OPEN_METEO_MARINE_BASE_URL` | Override for the marine forecast API | `https://marine-api.open-meteo.com` |
 | `OPEN_METEO_AIR_QUALITY_BASE_URL` | Override for the CAMS air quality API | `https://air-quality-api.open-meteo.com` |
 | `OPEN_METEO_GEOCODING_BASE_URL` | Override for the geocoding API | `https://geocoding-api.open-meteo.com` |
+| `OPEN_METEO_ENSEMBLE_BASE_URL` | Override for the ensemble forecast API | `https://ensemble-api.open-meteo.com` |
+| `OPEN_METEO_FLOOD_BASE_URL` | Override for the GloFAS flood API | `https://flood-api.open-meteo.com` |
+| `OPEN_METEO_CLIMATE_BASE_URL` | Override for the CMIP6 climate projections API | `https://climate-api.open-meteo.com` |
 | `OTEL_ENABLED` | Enable OpenTelemetry tracing and metrics | `false` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
@@ -334,8 +352,8 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/index.ts` | `createApp()` entry point — registers tools, initializes the Open-Meteo service |
 | `src/config` | Server-specific environment variable parsing and validation with Zod |
 | `src/mcp-server/tools/definitions` | Tool definitions (`*.tool.ts`) — one file per tool; includes `dataframe-describe.tool.ts` and `dataframe-query.tool.ts` |
-| `src/services/open-meteo` | Open-Meteo HTTP client wrapping all six endpoints with retry, error classification, and columnar reshape |
-| `src/services/canvas-accessor.ts` | DataCanvas accessor for `openmeteo_get_historical` spillover |
+| `src/services/open-meteo` | Open-Meteo HTTP client wrapping all nine endpoints with retry, error classification, and columnar reshape |
+| `src/services/canvas-accessor.ts` | DataCanvas accessor for `openmeteo_get_historical` / `openmeteo_get_ensemble` / `openmeteo_get_climate` spillover |
 | `tests/` | Unit and integration tests mirroring `src/` |
 
 ## Development guide

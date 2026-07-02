@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-02
+
+New openmeteo_get_climate tool — bias-corrected daily CMIP6 climate projections (1950-01-01 to 2050-12-31, up to 7 selectable models) with DataCanvas spillover; new optional OPEN_METEO_CLIMATE_BASE_URL override
+
 ## [0.1.8](changelog/0.1.x/0.1.8.md) — 2026-07-02
 
 Unknown-variable errors lead with actionable guidance instead of upstream Swift jargon; declared recovery hints now reach the wire at every ctx.fail site; canvas_id only returned when data actually spilled

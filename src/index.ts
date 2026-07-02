@@ -10,6 +10,7 @@ import {
   openmeteoDataframeQueryTool,
   openmeteoGeocodeTool,
   openmeteoGetAirQualityTool,
+  openmeteoGetClimateTool,
   openmeteoGetElevationTool,
   openmeteoGetEnsembleTool,
   openmeteoGetFloodTool,
@@ -32,6 +33,7 @@ await createApp({
     openmeteoGetAirQualityTool,
     openmeteoGetEnsembleTool,
     openmeteoGetFloodTool,
+    openmeteoGetClimateTool,
     openmeteoDataframeQueryTool,
     openmeteoDataframeDescribeTool,
   ],
@@ -52,9 +54,10 @@ await createApp({
     '5. openmeteo_get_air_quality — CAMS modeled PM2.5, PM10, ozone, AQI (forecast only)\n' +
     '6. openmeteo_get_elevation — Copernicus DEM terrain elevation for up to 100 coordinate pairs\n' +
     '7. openmeteo_get_ensemble — probabilistic ensemble forecast (up to 51 members, 16 days); use for exceedance probabilities and uncertainty quantification\n' +
-    '8. openmeteo_get_flood — GloFAS river discharge forecast (up to 210 days) and reanalysis (from 1984); coordinate-based, snaps to nearest river\n\n' +
+    '8. openmeteo_get_flood — GloFAS river discharge forecast (up to 210 days) and reanalysis (from 1984); coordinate-based, snaps to nearest river\n' +
+    '9. openmeteo_get_climate — bias-corrected daily CMIP6 climate projections (1950–2050, up to 7 models); use for multi-decade "what will conditions look like" questions\n\n' +
     'DataCanvas workflow (requires CANVAS_PROVIDER_TYPE=duckdb):\n' +
-    '- openmeteo_get_historical or openmeteo_get_ensemble with a large query returns canvas_id + truncated: true\n' +
+    '- openmeteo_get_historical, openmeteo_get_ensemble, or openmeteo_get_climate with a large query returns canvas_id + truncated: true\n' +
     '- openmeteo_dataframe_describe — list tables and columns on the canvas\n' +
     '- openmeteo_dataframe_query — run SQL SELECT against staged tables\n\n' +
     'Notes:\n' +
@@ -62,5 +65,5 @@ await createApp({
     '- ERA5 has a variable lag (~1–5 days). For recent history, use openmeteo_get_forecast with past_days\n' +
     '- All responses use timezone=auto by default (localizes to the location)\n' +
     '- Variable names are exact API names: temperature_2m, pm2_5, wave_height, river_discharge, etc.\n' +
-    '- Large historical/ensemble queries spill to DataCanvas when CANVAS_PROVIDER_TYPE=duckdb',
+    '- Large historical/ensemble/climate queries spill to DataCanvas when CANVAS_PROVIDER_TYPE=duckdb',
 });

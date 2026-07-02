@@ -7,6 +7,7 @@ export { openmeteoDataframeDescribeTool } from './dataframe-describe.tool.js';
 export { openmeteoDataframeQueryTool } from './dataframe-query.tool.js';
 export { openmeteoGeocodeTool } from './geocode.tool.js';
 export { openmeteoGetAirQualityTool } from './get-air-quality.tool.js';
+export { openmeteoGetClimateTool } from './get-climate.tool.js';
 export { openmeteoGetElevationTool } from './get-elevation.tool.js';
 export { openmeteoGetEnsembleTool } from './get-ensemble.tool.js';
 export { openmeteoGetFloodTool } from './get-flood.tool.js';

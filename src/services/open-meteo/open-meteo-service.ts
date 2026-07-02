@@ -1,8 +1,8 @@
 /**
- * @fileoverview Open-Meteo API client. Wraps all eight endpoints (forecast, archive,
- * marine, air quality, geocoding, elevation, ensemble, flood) with retry logic, timeout, and error
- * envelope detection. Returns raw API responses — reshaping to per-timestamp records
- * is the tool handler's responsibility.
+ * @fileoverview Open-Meteo API client. Wraps all nine endpoints (forecast, archive,
+ * marine, air quality, geocoding, elevation, ensemble, flood, climate) with retry logic,
+ * timeout, and error envelope detection. Returns raw API responses — reshaping to
+ * per-timestamp records is the tool handler's responsibility.
  * @module services/open-meteo/open-meteo-service
  */
 
@@ -196,6 +196,17 @@ export interface FloodParams {
   timezone?: string | undefined;
 }
 
+export interface ClimateParams {
+  daily: string[];
+  end_date: string;
+  models?: string[] | undefined;
+  precipitation_unit?: string | undefined;
+  start_date: string;
+  temperature_unit?: string | undefined;
+  timezone?: string | undefined;
+  wind_speed_unit?: string | undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Public service class
 // ---------------------------------------------------------------------------
@@ -333,6 +344,44 @@ export class OpenMeteoService {
       end_date: params.end_date,
     });
     return withOpenMeteoRetry<FloodEnvelope>(url.toString(), ctx, 'flood');
+  }
+
+  /**
+   * Climate projection endpoint — bias-corrected daily CMIP6 model data, 1950–2050.
+   * With 2+ models, variable columns come back suffixed with the model name
+   * (e.g. temperature_2m_max_CMCC_CM2_VHR4); a single or omitted model returns
+   * unsuffixed columns. Daily-only — the API has no hourly resolution.
+   */
+  getClimate(
+    lat: number,
+    lon: number,
+    params: ClimateParams,
+    ctx: Context,
+  ): Promise<WeatherEnvelope> {
+    const { climateBaseUrl } = getServerConfig();
+    const url = new URL(`${climateBaseUrl}/v1/climate`);
+    url.searchParams.set('latitude', String(lat));
+    url.searchParams.set('longitude', String(lon));
+    url.searchParams.set('start_date', params.start_date);
+    url.searchParams.set('end_date', params.end_date);
+    url.searchParams.set('daily', params.daily.join(','));
+    if (params.models && params.models.length > 0) {
+      url.searchParams.set('models', params.models.join(','));
+    }
+    if (params.temperature_unit) url.searchParams.set('temperature_unit', params.temperature_unit);
+    if (params.wind_speed_unit) url.searchParams.set('wind_speed_unit', params.wind_speed_unit);
+    if (params.precipitation_unit)
+      url.searchParams.set('precipitation_unit', params.precipitation_unit);
+    url.searchParams.set('timezone', params.timezone ?? 'auto');
+
+    ctx.log.info('Fetching climate projections', {
+      lat,
+      lon,
+      start: params.start_date,
+      end: params.end_date,
+      models: params.models,
+    });
+    return withOpenMeteoRetry<WeatherEnvelope>(url.toString(), ctx, 'climate');
   }
 
   /** Elevation endpoint — up to 100 coordinate pairs. */

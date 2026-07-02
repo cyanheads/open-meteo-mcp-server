@@ -9,8 +9,8 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 
 export const openmeteoDataframeDescribeTool = tool('openmeteo_dataframe_describe', {
   description:
-    'List the tables and their columns on a DataCanvas staged by openmeteo_get_historical ' +
-    'or openmeteo_get_ensemble. ' +
+    'List the tables and their columns on a DataCanvas staged by openmeteo_get_historical, ' +
+    'openmeteo_get_ensemble, or openmeteo_get_climate. ' +
     'Call this first to discover table names before querying with openmeteo_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
@@ -27,7 +27,7 @@ export const openmeteoDataframeDescribeTool = tool('openmeteo_dataframe_describe
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id is unknown or has expired (TTL is 24 h sliding)',
       recovery:
-        'Re-run openmeteo_get_historical or openmeteo_get_ensemble to stage a fresh canvas, then retry.',
+        'Re-run openmeteo_get_historical, openmeteo_get_ensemble, or openmeteo_get_climate to stage a fresh canvas, then retry.',
       retryable: false,
     },
   ],
@@ -36,7 +36,7 @@ export const openmeteoDataframeDescribeTool = tool('openmeteo_dataframe_describe
     canvas_id: z
       .string()
       .describe(
-        'Canvas ID returned by openmeteo_get_historical or openmeteo_get_ensemble when truncated: true.',
+        'Canvas ID returned by openmeteo_get_historical, openmeteo_get_ensemble, or openmeteo_get_climate when truncated: true.',
       ),
   }),
 
