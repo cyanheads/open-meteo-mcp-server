@@ -84,7 +84,11 @@ describe('openmeteoGeocodeTool', () => {
     const input = openmeteoGeocodeTool.input.parse({ name: 'zzzznotaplace' });
     await expect(openmeteoGeocodeTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'no_results' },
+      data: {
+        reason: 'no_results',
+        // Declared contract recovery flows to the wire (data.recovery.hint)
+        recovery: { hint: expect.stringContaining('spelling') },
+      },
     });
   });
 

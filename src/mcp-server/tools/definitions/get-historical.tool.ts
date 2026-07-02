@@ -12,6 +12,7 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { frameInvalidVariableMessage } from '../upstream-error.js';
 
 /** Inline record limit before DataCanvas spillover. */
 const INLINE_LIMIT = 500;
@@ -157,7 +158,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token — present when record_count exceeded inline limit. Query with SQL using this token.',
+        'DataCanvas token — present only when truncated is true (data spilled). Query with SQL using this token.',
       ),
     truncated: z
       .boolean()
@@ -173,6 +174,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide at least one of hourly_variables or daily_variables.',
+        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -180,6 +182,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       throw ctx.fail(
         'date_order_invalid',
         `end_date (${input.end_date}) is before start_date (${input.start_date}).`,
+        ctx.recoveryFor('date_order_invalid'),
       );
     }
 
@@ -187,6 +190,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       throw ctx.fail(
         'date_out_of_range',
         `start_date ${input.start_date} predates ERA5 coverage (1940-01-01).`,
+        ctx.recoveryFor('date_out_of_range'),
       );
     }
 
@@ -210,9 +214,17 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     if (data.error) {
       const reason = data.reason ?? '';
       if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
-        throw ctx.fail('date_out_of_range', reason || 'Date out of ERA5 range.');
+        throw ctx.fail(
+          'date_out_of_range',
+          reason || 'Date out of ERA5 range.',
+          ctx.recoveryFor('date_out_of_range'),
+        );
       }
-      throw ctx.fail('invalid_variable', reason || 'Unknown variable or invalid request.');
+      throw ctx.fail(
+        'invalid_variable',
+        frameInvalidVariableMessage(data.reason),
+        ctx.recoveryFor('invalid_variable'),
+      );
     }
 
     const hourlyRecords = data.hourly ? reshapeColumnar(data.hourly) : undefined;
@@ -253,7 +265,10 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
           ) as Record<string, unknown>[],
           hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
           daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
-          canvas_id: instance.canvasId,
+          // Only point at the canvas when data actually spilled — spillover()
+          // stages a table only past its byte threshold, so a canvas_id on the
+          // non-spilled path would reference an empty canvas.
+          canvas_id: spilled.spilled ? instance.canvasId : undefined,
           truncated: spilled.spilled,
         };
       }

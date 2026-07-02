@@ -138,11 +138,14 @@ describe('openmeteoGetFloodTool', () => {
     });
   });
 
-  it('throws invalid_variable when API error envelope has non-date reason', async () => {
+  it('frames the upstream unknown-variable rejection with the offending name and recovery hint', async () => {
+    // Real upstream reason shape from the live flood endpoint (Swift type-init jargon).
+    // Non-date reasons must route to invalid_variable, not date_out_of_range.
     mockGetFlood.mockResolvedValue({
       ...MOCK_RESPONSE,
       error: true,
-      reason: 'Variable "bogus_discharge" is not a valid flood variable.',
+      reason:
+        "Data corrupted at path ''. Cannot initialize ForecastVariableDaily from invalid String value bogus_discharge.",
     });
     const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
@@ -152,7 +155,11 @@ describe('openmeteoGetFloodTool', () => {
     });
     await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      data: { reason: 'invalid_variable' },
+      message: expect.stringMatching(/^Unknown discharge variable name: bogus_discharge\./),
+      data: {
+        reason: 'invalid_variable',
+        recovery: { hint: expect.stringContaining('river_discharge') },
+      },
     });
   });
 

@@ -135,7 +135,9 @@ export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
           })
           .describe('A single geocoding result with coordinates and administrative context'),
       )
-      .describe('Ranked matches (most relevant first). Empty when no results match.'),
+      .describe(
+        'Ranked matches (most relevant first). Never empty — when nothing matches, the tool fails with no_results instead of returning an empty array.',
+      ),
     count: z.number().describe('Number of results returned'),
   }),
 
@@ -160,7 +162,11 @@ export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
     }
 
     if (results.length === 0) {
-      throw ctx.fail('no_results', `No places found matching "${input.name}".`);
+      throw ctx.fail(
+        'no_results',
+        `No places found matching "${input.name}".`,
+        ctx.recoveryFor('no_results'),
+      );
     }
 
     ctx.log.info('Geocode results', { name: input.name, count: results.length });

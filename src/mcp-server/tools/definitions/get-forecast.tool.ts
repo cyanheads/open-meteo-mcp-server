@@ -9,6 +9,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { frameInvalidVariableMessage } from '../upstream-error.js';
 
 export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
   description:
@@ -149,6 +150,7 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide at least one of hourly_variables or daily_variables.',
+        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -171,7 +173,11 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
 
     // API returns error envelope for unknown variable names
     if (data.error) {
-      throw ctx.fail('invalid_variable', data.reason ?? 'Unknown variable name requested.');
+      throw ctx.fail(
+        'invalid_variable',
+        frameInvalidVariableMessage(data.reason),
+        ctx.recoveryFor('invalid_variable'),
+      );
     }
 
     return {

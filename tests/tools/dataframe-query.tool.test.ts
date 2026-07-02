@@ -3,7 +3,7 @@
  * @module tests/tools/dataframe-query.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoDataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
@@ -36,6 +36,31 @@ describe('openmeteoDataframeQueryTool', () => {
     await expect(openmeteoDataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.InternalError,
       data: { reason: 'canvas_not_enabled' },
+    });
+  });
+
+  it('rethrows the framework acquire() NotFound as canvas_not_found with the tool recovery', async () => {
+    mockCanvasInstance = {
+      acquire: vi.fn().mockRejectedValue(
+        notFound('Canvas not found or expired. Omit canvas_id to start a new canvas.', {
+          canvasId: 'totallyfakecanvas999',
+        }),
+      ),
+    };
+    const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
+    const input = openmeteoDataframeQueryTool.input.parse({
+      canvas_id: 'totallyfakecanvas999',
+      sql: 'SELECT 1',
+    });
+    await expect(openmeteoDataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: expect.not.stringContaining('Omit canvas_id'),
+      data: {
+        reason: 'canvas_not_found',
+        recovery: {
+          hint: expect.stringContaining('openmeteo_get_historical or openmeteo_get_ensemble'),
+        },
+      },
     });
   });
 

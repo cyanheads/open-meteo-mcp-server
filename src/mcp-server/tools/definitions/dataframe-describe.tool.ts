@@ -4,12 +4,13 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
 export const openmeteoDataframeDescribeTool = tool('openmeteo_dataframe_describe', {
   description:
-    'List the tables and their columns on a DataCanvas staged by openmeteo_get_historical. ' +
+    'List the tables and their columns on a DataCanvas staged by openmeteo_get_historical ' +
+    'or openmeteo_get_ensemble. ' +
     'Call this first to discover table names before querying with openmeteo_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
@@ -25,7 +26,8 @@ export const openmeteoDataframeDescribeTool = tool('openmeteo_dataframe_describe
       reason: 'canvas_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id is unknown or has expired (TTL is 24 h sliding)',
-      recovery: 'Re-run openmeteo_get_historical to stage a fresh canvas, then retry.',
+      recovery:
+        'Re-run openmeteo_get_historical or openmeteo_get_ensemble to stage a fresh canvas, then retry.',
       retryable: false,
     },
   ],
@@ -33,7 +35,9 @@ export const openmeteoDataframeDescribeTool = tool('openmeteo_dataframe_describe
   input: z.object({
     canvas_id: z
       .string()
-      .describe('Canvas ID returned by openmeteo_get_historical when truncated: true.'),
+      .describe(
+        'Canvas ID returned by openmeteo_get_historical or openmeteo_get_ensemble when truncated: true.',
+      ),
   }),
 
   output: z.object({
@@ -69,10 +73,24 @@ export const openmeteoDataframeDescribeTool = tool('openmeteo_dataframe_describe
       throw ctx.fail(
         'canvas_not_enabled',
         'DataCanvas is not enabled. Set CANVAS_PROVIDER_TYPE=duckdb and restart.',
+        ctx.recoveryFor('canvas_not_enabled'),
       );
     }
 
-    const instance = await canvas.acquire(input.canvas_id, ctx);
+    // Rethrow the framework's acquire() NotFound under the tool's own contract —
+    // its generic "omit canvas_id" guidance is wrong here (canvas_id is required
+    // and this tool never creates canvases).
+    const instance = await canvas.acquire(input.canvas_id, ctx).catch((err: unknown) => {
+      if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+        throw ctx.fail(
+          'canvas_not_found',
+          `Canvas "${input.canvas_id}" not found or expired (24 h sliding TTL).`,
+          ctx.recoveryFor('canvas_not_found'),
+          { cause: err },
+        );
+      }
+      throw err;
+    });
     const tableInfos = await instance.describe();
 
     ctx.log.info('Dataframe describe executed', {

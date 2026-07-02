@@ -122,7 +122,10 @@ describe('openmeteoGetHistoricalTool', () => {
     });
     await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      data: { reason: 'date_out_of_range' },
+      data: {
+        reason: 'date_out_of_range',
+        recovery: { hint: expect.stringContaining('past_days') },
+      },
     });
   });
 
@@ -149,10 +152,13 @@ describe('openmeteoGetHistoricalTool', () => {
   it('throws invalid_variable (not date_out_of_range) when API error envelope has non-date reason', async () => {
     // Regression: the handler catch-all previously mapped ALL API errors to date_out_of_range,
     // including invalid variable names. Non-date errors must produce invalid_variable.
+    // Real upstream reason shape from the live archive endpoint (Swift type-init jargon).
+    const upstreamReason =
+      "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_historical_var.";
     mockGetHistorical.mockResolvedValue({
       ...MOCK_RESPONSE,
       error: true,
-      reason: 'Variable "bogus_historical_var" is not a valid historical variable.',
+      reason: upstreamReason,
     });
     const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
@@ -164,7 +170,11 @@ describe('openmeteoGetHistoricalTool', () => {
     });
     await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      data: { reason: 'invalid_variable' },
+      message: expect.stringMatching(/^Unknown variable name: bogus_historical_var\./),
+      data: {
+        reason: 'invalid_variable',
+        recovery: { hint: expect.stringContaining('Open-Meteo docs') },
+      },
     });
   });
 
@@ -233,6 +243,49 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(result.truncated).toBe(true);
     expect(result.canvas_id).toBe('canvas-test-123');
     expect(result.record_count).toBe(days);
+  });
+
+  it('omits canvas_id when records exceed INLINE_LIMIT but spillover stays under its byte threshold', async () => {
+    // Regression: 500–~2000 records trigger the spillover path but stay under the
+    // ~80 KB preview threshold, so nothing is staged (spilled: false). The handler
+    // must not return a canvas_id pointing at an empty canvas.
+    const days = 502;
+    const time = Array.from({ length: days }, (_, i) => {
+      const d = new Date('2022-01-01');
+      d.setDate(d.getDate() + i);
+      return d.toISOString().slice(0, 10);
+    });
+    const temperature_2m_max = Array.from({ length: days }, (_, i) => 10 + (i % 20));
+
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      daily_units: { time: 'iso8601', temperature_2m_max: '°C' },
+      daily: { time, temperature_2m_max },
+    });
+
+    // Everything fit inline — previewRows carry the full dataset, no table staged
+    mockSpillover.mockResolvedValue({
+      spilled: false,
+      previewRows: time.map((t, i) => ({ time: t, temperature_2m_max: 10 + (i % 20) })),
+    });
+
+    const mockInstance = { canvasId: 'canvas-unused-1' };
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2022-01-01',
+      end_date: '2023-05-17',
+      daily_variables: ['temperature_2m_max'],
+    });
+
+    const result = await openmeteoGetHistoricalTool.handler(input, ctx);
+    expect(result.truncated).toBe(false);
+    expect(result.canvas_id).toBeUndefined();
+    expect(result.record_count).toBe(days);
+    expect(result.daily).toHaveLength(days);
   });
 
   it('returns inline result without canvas when records are within INLINE_LIMIT', async () => {

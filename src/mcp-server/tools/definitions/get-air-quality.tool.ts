@@ -9,6 +9,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { frameInvalidVariableMessage } from '../upstream-error.js';
 
 export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
   description:
@@ -92,6 +93,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide hourly_variables with at least one air quality variable.',
+        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -110,7 +112,8 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     if (data.error) {
       throw ctx.fail(
         'invalid_variable',
-        data.reason ?? 'Unknown air quality variable name requested.',
+        frameInvalidVariableMessage(data.reason),
+        ctx.recoveryFor('invalid_variable'),
       );
     }
 

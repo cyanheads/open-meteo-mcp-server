@@ -177,20 +177,47 @@ describe('openmeteoGetEnsembleTool', () => {
     });
   });
 
-  it('throws invalid_variable when API returns error envelope', async () => {
+  it('frames the upstream unknown-variable rejection with the offending name and recovery hint', async () => {
+    // Real upstream reason shape from the live ensemble endpoint
     mockGetEnsemble.mockResolvedValue({
       ...MOCK_RESPONSE,
       error: true,
-      reason: 'Variable "bogus_var" is not supported by the ensemble endpoint.',
+      reason:
+        "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_ens_xyz.",
     });
     const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
-      hourly_variables: ['bogus_var'],
+      hourly_variables: ['bogus_ens_xyz'],
     });
     await expect(openmeteoGetEnsembleTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringMatching(/^Unknown variable or model name: bogus_ens_xyz\./),
+      data: {
+        reason: 'invalid_variable',
+        recovery: { hint: expect.stringContaining('ecmwf_ifs025') },
+      },
+    });
+  });
+
+  it('frames an unsupported-model rejection the same way', async () => {
+    // Real upstream reason shape when models=<bogus> is rejected
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason:
+        "Data corrupted at path ''. Cannot initialize MultiDomains from invalid String value not_a_model.",
+    });
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'not_a_model',
+    });
+    await expect(openmeteoGetEnsembleTool.handler(input, ctx)).rejects.toMatchObject({
+      message: expect.stringMatching(/^Unknown variable or model name: not_a_model\./),
       data: { reason: 'invalid_variable' },
     });
   });
@@ -259,6 +286,44 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(result.record_count).toBe(count);
     // Spillover path also derives member_count from the source columns
     expect(result.member_count).toBe(1);
+  });
+
+  it('omits canvas_id when records exceed INLINE_LIMIT but spillover stays under its byte threshold', async () => {
+    // Regression: spillover() stages a table only past its byte threshold — when it
+    // returns spilled: false, no canvas_id must be surfaced (it would be empty).
+    const count = 502;
+    const time = Array.from({ length: count }, (_, i) => {
+      const d = new Date('2026-06-01T00:00');
+      d.setHours(d.getHours() + i);
+      return d.toISOString().slice(0, 16);
+    });
+    const temperature_2m_member01 = Array.from({ length: count }, () => 15.0);
+
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: { time, temperature_2m_member01 },
+    });
+
+    mockSpillover.mockResolvedValue({
+      spilled: false,
+      previewRows: time.map((t) => ({ time: t, temperature_2m_member01: 15.0 })),
+    });
+
+    const mockInstance = { canvasId: 'canvas-unused-2' };
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      forecast_days: 16,
+    });
+
+    const result = await openmeteoGetEnsembleTool.handler(input, ctx);
+    expect(result.truncated).toBe(false);
+    expect(result.canvas_id).toBeUndefined();
+    expect(result.record_count).toBe(count);
   });
 
   it('returns inline without canvas when records are within INLINE_LIMIT', async () => {

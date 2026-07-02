@@ -61,6 +61,7 @@ export const openmeteoGetElevationTool = tool('openmeteo_get_elevation', {
       throw ctx.fail(
         'coordinate_count_mismatch',
         `latitudes length (${input.latitudes.length}) ≠ longitudes length (${input.longitudes.length}).`,
+        ctx.recoveryFor('coordinate_count_mismatch'),
       );
     }
 

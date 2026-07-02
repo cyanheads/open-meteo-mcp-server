@@ -92,11 +92,13 @@ describe('openmeteoGetMarineTool', () => {
     });
   });
 
-  it('throws invalid_variable when API returns error envelope', async () => {
+  it('frames the upstream unknown-variable rejection with the offending name and recovery hint', async () => {
+    // Real upstream reason shape from the live marine endpoint
     mockGetMarine.mockResolvedValue({
       ...MOCK_RESPONSE,
       error: true,
-      reason: 'Variable "bogus_wave" is not a valid marine variable.',
+      reason:
+        "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_wave.",
     });
     const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
@@ -106,7 +108,11 @@ describe('openmeteoGetMarineTool', () => {
     });
     await expect(openmeteoGetMarineTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      data: { reason: 'invalid_variable' },
+      message: expect.stringMatching(/^Unknown variable name: bogus_wave\./),
+      data: {
+        reason: 'invalid_variable',
+        recovery: { hint: expect.stringContaining('wave_height') },
+      },
     });
   });
 

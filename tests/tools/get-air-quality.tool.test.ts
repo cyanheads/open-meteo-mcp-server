@@ -73,11 +73,13 @@ describe('openmeteoGetAirQualityTool', () => {
     });
   });
 
-  it('throws invalid_variable when API returns error envelope', async () => {
+  it('frames the upstream unknown-variable rejection with the offending name and recovery hint', async () => {
+    // Real upstream reason shape from the live air-quality endpoint
     mockGetAirQuality.mockResolvedValue({
       ...MOCK_RESPONSE,
       error: true,
-      reason: 'Variable "bogus_aqi" is not a valid air quality variable.',
+      reason:
+        "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_aqi.",
     });
     const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
@@ -87,7 +89,11 @@ describe('openmeteoGetAirQualityTool', () => {
     });
     await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      data: { reason: 'invalid_variable' },
+      message: expect.stringMatching(/^Unknown variable name: bogus_aqi\./),
+      data: {
+        reason: 'invalid_variable',
+        recovery: { hint: expect.stringContaining('pm2_5') },
+      },
     });
   });
 

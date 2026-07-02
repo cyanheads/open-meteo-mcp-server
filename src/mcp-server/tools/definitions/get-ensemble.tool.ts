@@ -12,6 +12,7 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { type ColumnarBlock, toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { frameInvalidVariableMessage } from '../upstream-error.js';
 
 /** Inline record limit before DataCanvas spillover. */
 const INLINE_LIMIT = 500;
@@ -181,7 +182,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token — present when record_count exceeded inline limit. Query with SQL using this token.',
+        'DataCanvas token — present only when truncated is true (data spilled). Query with SQL using this token.',
       ),
     truncated: z
       .boolean()
@@ -197,6 +198,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide at least one of hourly_variables or daily_variables.',
+        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -221,7 +223,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     if (data.error) {
       throw ctx.fail(
         'invalid_variable',
-        data.reason ?? 'Unknown variable name or unsupported model requested.',
+        frameInvalidVariableMessage(data.reason, 'variable or model'),
+        ctx.recoveryFor('invalid_variable'),
       );
     }
 
@@ -265,7 +268,10 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
           ) as Record<string, unknown>[],
           hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
           daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
-          canvas_id: instance.canvasId,
+          // Only point at the canvas when data actually spilled — spillover()
+          // stages a table only past its byte threshold, so a canvas_id on the
+          // non-spilled path would reference an empty canvas.
+          canvas_id: spilled.spilled ? instance.canvasId : undefined,
           truncated: spilled.spilled,
         };
       }

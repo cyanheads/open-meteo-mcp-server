@@ -3,7 +3,7 @@
  * @module tests/tools/dataframe-describe.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoDataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
@@ -42,6 +42,40 @@ describe('openmeteoDataframeDescribeTool', () => {
       code: JsonRpcErrorCode.InternalError,
       data: { reason: 'canvas_not_enabled' },
     });
+  });
+
+  it('rethrows the framework acquire() NotFound as canvas_not_found with the tool recovery', async () => {
+    // Framework message on unknown/expired id — its "omit canvas_id" guidance is
+    // wrong for this tool (canvas_id is required) and must not leak through.
+    mockCanvasInstance = {
+      acquire: vi.fn().mockRejectedValue(
+        notFound('Canvas not found or expired. Omit canvas_id to start a new canvas.', {
+          canvasId: 'totallyfakecanvas999',
+        }),
+      ),
+    };
+    const ctx = createMockContext({ errors: openmeteoDataframeDescribeTool.errors });
+    const input = openmeteoDataframeDescribeTool.input.parse({
+      canvas_id: 'totallyfakecanvas999',
+    });
+    await expect(openmeteoDataframeDescribeTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: expect.not.stringContaining('Omit canvas_id'),
+      data: {
+        reason: 'canvas_not_found',
+        recovery: {
+          hint: expect.stringContaining('openmeteo_get_historical or openmeteo_get_ensemble'),
+        },
+      },
+    });
+  });
+
+  it('passes non-NotFound acquire() errors through unchanged', async () => {
+    const upstream = new McpError(JsonRpcErrorCode.InternalError, 'DuckDB init failed.');
+    mockCanvasInstance = { acquire: vi.fn().mockRejectedValue(upstream) };
+    const ctx = createMockContext({ errors: openmeteoDataframeDescribeTool.errors });
+    const input = openmeteoDataframeDescribeTool.input.parse({ canvas_id: 'anycanvasid' });
+    await expect(openmeteoDataframeDescribeTool.handler(input, ctx)).rejects.toBe(upstream);
   });
 
   it('returns tables with columns and expiry', async () => {

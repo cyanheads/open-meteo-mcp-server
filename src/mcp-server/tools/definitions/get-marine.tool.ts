@@ -9,6 +9,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { frameInvalidVariableMessage } from '../upstream-error.js';
 
 export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
   description:
@@ -110,6 +111,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide at least one of hourly_variables or daily_variables.',
+        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -127,7 +129,11 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     );
 
     if (data.error) {
-      throw ctx.fail('invalid_variable', data.reason ?? 'Unknown marine variable name requested.');
+      throw ctx.fail(
+        'invalid_variable',
+        frameInvalidVariableMessage(data.reason),
+        ctx.recoveryFor('invalid_variable'),
+      );
     }
 
     return {

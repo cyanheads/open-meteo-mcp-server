@@ -10,6 +10,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { frameInvalidVariableMessage } from '../upstream-error.js';
 
 export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
   description:
@@ -119,6 +120,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide daily_variables with at least one discharge variable.',
+        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -126,6 +128,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       throw ctx.fail(
         'date_order_invalid',
         `end_date (${input.end_date}) is before start_date (${input.start_date}).`,
+        ctx.recoveryFor('date_order_invalid'),
       );
     }
 
@@ -133,6 +136,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       throw ctx.fail(
         'date_out_of_range',
         `start_date ${input.start_date} predates GloFAS reanalysis coverage (1984-01-01).`,
+        ctx.recoveryFor('date_out_of_range'),
       );
     }
 
@@ -153,11 +157,16 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     if (data.error) {
       const reason = data.reason ?? '';
       if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
-        throw ctx.fail('date_out_of_range', reason || 'Date out of GloFAS range.');
+        throw ctx.fail(
+          'date_out_of_range',
+          reason || 'Date out of GloFAS range.',
+          ctx.recoveryFor('date_out_of_range'),
+        );
       }
       throw ctx.fail(
         'invalid_variable',
-        reason || 'Unknown discharge variable or invalid request.',
+        frameInvalidVariableMessage(data.reason, 'discharge variable'),
+        ctx.recoveryFor('invalid_variable'),
       );
     }
 
