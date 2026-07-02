@@ -10,11 +10,28 @@ import { spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
-import { toUnitsMap } from '@/services/open-meteo/types.js';
+import { type ColumnarBlock, toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 
 /** Inline record limit before DataCanvas spillover. */
 const INLINE_LIMIT = 500;
+
+/**
+ * Count distinct ensemble members from per-member column names (_memberNN suffix).
+ * The API envelope carries no top-level member metadata — column names are the
+ * only member identity. Returns undefined when no member columns exist.
+ */
+function countMembers(...blocks: (ColumnarBlock | undefined)[]): number | undefined {
+  const members = new Set<string>();
+  for (const block of blocks) {
+    if (!block) continue;
+    for (const key of Object.keys(block)) {
+      const suffix = /_member(\d+)$/.exec(key)?.[1];
+      if (suffix) members.add(suffix);
+    }
+  }
+  return members.size > 0 ? members.size : undefined;
+}
 
 export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
   description:
@@ -121,8 +138,18 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     longitude: z.number().describe('Snapped longitude'),
     elevation: z.number().describe('Terrain elevation at grid point (meters)'),
     timezone: z.string().describe('Resolved IANA timezone'),
-    model: z.string().optional().describe('Ensemble model used (e.g. "ecmwf_ifs025")'),
-    member_count: z.number().optional().describe('Number of ensemble members in the response'),
+    model: z
+      .string()
+      .optional()
+      .describe(
+        'Ensemble model used (e.g. "ecmwf_ifs025") — echoes the requested models parameter. Absent when models was omitted (API default blend; the API reports no provenance).',
+      ),
+    member_count: z
+      .number()
+      .optional()
+      .describe(
+        'Number of distinct perturbed ensemble members in the response, counted from the _memberNN column suffixes. The unsuffixed base column (the control run) is not included in this count.',
+      ),
     hourly: z
       .array(z.record(z.string(), z.unknown()))
       .optional()
@@ -202,6 +229,13 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : undefined;
     const totalRecords = (hourlyRecords?.length ?? 0) + (dailyRecords?.length ?? 0);
 
+    /*
+     * The API envelope has no top-level model/member metadata: echo the requested
+     * model and derive the member count from the per-member column names.
+     */
+    const model = input.models;
+    const memberCount = countMembers(data.hourly, data.daily);
+
     // DataCanvas spillover for large multi-member datasets
     if (totalRecords > INLINE_LIMIT) {
       const canvas = getCanvas();
@@ -220,8 +254,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
           longitude: data.longitude,
           elevation: data.elevation,
           timezone: data.timezone,
-          model: data.models,
-          member_count: data.members,
+          model,
+          member_count: memberCount,
           record_count: spilled.spilled ? spilled.handle.rowCount : allRecords.length,
           hourly: spilled.previewRows.filter(
             (r) => typeof r.time === 'string' && r.time.includes('T'),
@@ -242,8 +276,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       longitude: data.longitude,
       elevation: data.elevation,
       timezone: data.timezone,
-      model: data.models,
-      member_count: data.members,
+      model,
+      member_count: memberCount,
       record_count: totalRecords,
       hourly: hourlyRecords,
       daily: dailyRecords,
@@ -259,8 +293,11 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       '## Ensemble weather forecast',
       `**Location:** ${result.latitude}, ${result.longitude} | **Elevation:** ${result.elevation}m | **Timezone:** ${result.timezone}`,
     ];
-    if (result.model)
-      lines.push(`**Model:** ${result.model} | **Members:** ${result.member_count ?? 'unknown'}`);
+    if (result.model || result.member_count != null) {
+      lines.push(
+        `**Model:** ${result.model ?? 'default blend'} | **Members:** ${result.member_count ?? 'unknown'}`,
+      );
+    }
     lines.push(`**Records:** ${result.record_count} | **Truncated:** ${result.truncated}`);
 
     if (result.truncated && result.canvas_id) {
