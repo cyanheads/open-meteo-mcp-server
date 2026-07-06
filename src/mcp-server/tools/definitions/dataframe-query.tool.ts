@@ -40,6 +40,14 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
         'List tables and columns with openmeteo_dataframe_describe instead — system catalogs are blocked so callers cannot enumerate other staged canvases.',
       retryable: false,
     },
+    {
+      reason: 'missing_table',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The SQL references a table that is not staged on this canvas — a mistyped name, or one that expired (24 h sliding TTL) or was dropped',
+      recovery:
+        'List the staged tables and columns with openmeteo_dataframe_describe, then reference an existing name — or re-run openmeteo_get_historical, openmeteo_get_ensemble, or openmeteo_get_climate to stage a fresh canvas.',
+      retryable: false,
+    },
   ],
 
   input: z.object({
@@ -88,10 +96,37 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
       }
       throw err;
     });
-    const result = await instance.query(input.sql, {
-      signal: ctx.signal,
-      denySystemCatalogs: true,
-    });
+    // Rewrap the framework's query-level errors under this tool's own contracts so
+    // the declared recovery hints reach the wire. The framework's system_catalog_access
+    // throw carries no recovery of its own, and its missing_table recovery names
+    // framework methods (registerTable()/describe()) instead of this server's tools.
+    // Every other McpError (invalid_sql, non_select_statement, a TTL-expired
+    // canvas_not_found, …) passes through unchanged so consumers keep the original
+    // code and data.reason.
+    const result = await instance
+      .query(input.sql, { signal: ctx.signal, denySystemCatalogs: true })
+      .catch((err: unknown) => {
+        if (err instanceof McpError && err.data?.reason === 'system_catalog_access') {
+          throw ctx.fail(
+            'system_catalog_access',
+            err.message,
+            ctx.recoveryFor('system_catalog_access'),
+            { cause: err },
+          );
+        }
+        if (err instanceof McpError && err.data?.reason === 'missing_table') {
+          const tableName = err.data.tableName;
+          const named =
+            typeof tableName === 'string' ? `Table "${tableName}"` : 'The referenced table';
+          throw ctx.fail(
+            'missing_table',
+            `${named} is not staged on canvas "${input.canvas_id}" — it may have expired (24 h sliding TTL) or been dropped.`,
+            ctx.recoveryFor('missing_table'),
+            { cause: err },
+          );
+        }
+        throw err;
+      });
 
     ctx.log.info('Dataframe query executed', {
       canvas_id: instance.canvasId,

@@ -3,7 +3,7 @@
  * @module tests/tools/dataframe-query.tool.test
  */
 
-import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoDataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
@@ -63,6 +63,110 @@ describe('openmeteoDataframeQueryTool', () => {
           ),
         },
       },
+    });
+  });
+
+  it('rewraps the framework system_catalog_access error with the declared recovery hint', async () => {
+    // Real framework throw shape (sqlGate.assertNoSystemCatalogs): a ValidationError
+    // with data.reason but NO recovery of its own — the tool's declared recovery is
+    // the only possible source of a hint on this path.
+    const mockInstance = {
+      canvasId: 'testcanvas01',
+      query: vi
+        .fn()
+        .mockRejectedValue(
+          validationError(
+            'Canvas query references a system catalog: information_schema. System catalogs are not permitted when denySystemCatalogs is enabled.',
+            { reason: 'system_catalog_access', catalog: 'information_schema' },
+          ),
+        ),
+    };
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
+
+    const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
+    const input = openmeteoDataframeQueryTool.input.parse({
+      canvas_id: 'testcanvas01',
+      sql: 'SELECT * FROM information_schema.tables',
+    });
+    await expect(openmeteoDataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'system_catalog_access',
+        recovery: { hint: expect.stringContaining('openmeteo_dataframe_describe') },
+      },
+    });
+  });
+
+  it('rewraps the framework missing_table error to name openmeteo_dataframe_describe, not framework methods', async () => {
+    // Real framework throw shape (DuckdbProvider query() prepare-error path): a
+    // NotFound whose default recovery names registerTable()/describe(). The tool must
+    // replace that with caller-facing guidance and preserve the offending table name.
+    const mockInstance = {
+      canvasId: 'testcanvas01',
+      query: vi.fn().mockRejectedValue(
+        notFound(
+          'Canvas table "spillover_0" does not exist. The table may have expired or been dropped — re-stage it or call describe() to inspect the canvas.',
+          {
+            reason: 'missing_table',
+            tableName: 'spillover_0',
+            recovery: {
+              hint: 'Re-stage the table via registerTable() or call describe() to see what tables are currently available.',
+            },
+          },
+        ),
+      ),
+    };
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
+
+    const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
+    const input = openmeteoDataframeQueryTool.input.parse({
+      canvas_id: 'testcanvas01',
+      sql: 'SELECT COUNT(*) FROM spillover_0',
+    });
+
+    const err = (await openmeteoDataframeQueryTool
+      .handler(input, ctx)
+      .catch((e: unknown) => e)) as {
+      code: number;
+      message: string;
+      data: { reason: string; recovery: { hint: string } };
+    };
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.data.reason).toBe('missing_table');
+    expect(err.message).toContain('spillover_0');
+    expect(err.data.recovery.hint).toContain('openmeteo_dataframe_describe');
+    // The framework leak is gone from both the message and the recovery hint.
+    expect(err.data.recovery.hint).not.toContain('registerTable');
+    expect(err.data.recovery.hint).not.toContain('describe()');
+    expect(err.message).not.toContain('describe()');
+  });
+
+  it('passes non-target query errors (invalid_sql) through unchanged', async () => {
+    // A ValidationError with a different reason must not be reclassified — consumers
+    // key on code + data.reason, and the binder detail must survive.
+    const mockInstance = {
+      canvasId: 'testcanvas01',
+      query: vi.fn().mockRejectedValue(
+        validationError(
+          'Canvas query failed to prepare: Referenced column "tempxyz" not found in FROM clause!',
+          {
+            reason: 'invalid_sql',
+            statementType: 'UNKNOWN',
+            binderMessage: 'Referenced column "tempxyz" not found in FROM clause!',
+          },
+        ),
+      ),
+    };
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
+
+    const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
+    const input = openmeteoDataframeQueryTool.input.parse({
+      canvas_id: 'testcanvas01',
+      sql: 'SELECT tempxyz FROM spilled_testcanvas01',
+    });
+    await expect(openmeteoDataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_sql', binderMessage: expect.stringContaining('tempxyz') },
     });
   });
 
