@@ -212,11 +212,16 @@ export interface ClimateParams {
 // ---------------------------------------------------------------------------
 
 export class OpenMeteoService {
-  /** Geocode a place name; returns the raw API response (results key absent on no-match). */
+  /**
+   * Geocode a place name; returns the raw API response (results key absent on no-match).
+   * `country` is an optional ISO 3166-1 alpha-2 code (uppercase) mapped to the upstream
+   * `countryCode` filter — narrows matches to that country; omit for a global search.
+   */
   getGeocode(
     name: string,
     count: number,
     language: string,
+    country: string | undefined,
     ctx: Context,
   ): Promise<GeocodingResponse> {
     const { geocodingBaseUrl } = getServerConfig();
@@ -224,8 +229,9 @@ export class OpenMeteoService {
     url.searchParams.set('name', name);
     url.searchParams.set('count', String(count));
     url.searchParams.set('language', language);
+    if (country) url.searchParams.set('countryCode', country);
     url.searchParams.set('format', 'json');
-    ctx.log.info('Geocoding place', { name, count, language });
+    ctx.log.info('Geocoding place', { name, count, language, country });
     return withOpenMeteoRetry<GeocodingResponse>(url.toString(), ctx, 'geocode');
   }
 

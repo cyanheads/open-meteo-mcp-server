@@ -53,8 +53,12 @@ export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
   description:
     'Resolve a place name to ranked coordinate matches with country, region, elevation, ' +
     'timezone, and population. Required prerequisite for name-based queries — all weather ' +
-    'tools take latitude/longitude, not place names. Returns up to 10 matches ranked by ' +
-    'population/relevance; use country or admin1 to disambiguate when multiple cities share a name.',
+    'tools take latitude/longitude, not place names. Search by a bare place name (city, ' +
+    'region, or landmark); never fold a qualifier into it — pass "Baoding", not "Baoding ' +
+    'Hebei", and "Paris", not "Paris, France". To disambiguate places that share a name, set ' +
+    'the country input (ISO 3166-1 alpha-2, e.g. "US") and/or read the admin1 and country ' +
+    'fields on each ranked result — admin1 is a result field for choosing among matches, not a ' +
+    'search input. Returns up to 10 matches ranked by population/relevance.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -63,7 +67,7 @@ export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The search returned no matching places',
       recovery:
-        'Check the spelling, try a broader term (e.g., region instead of street), or set language to match the script of name (e.g. language "zh" for a Chinese place name).',
+        'If a region or country qualifier was folded into name, drop it and search the bare place name ("Baoding", not "Baoding Hebei") — use the country input or read admin1 on the results to disambiguate. The index covers populated places only: a physical feature or landmark ("Sahara Desert") often will not resolve, so search the nearest town or city instead. Otherwise check the spelling, or set language to match the script of name (e.g. "zh" for a Chinese place name).',
       retryable: false,
     },
   ],
@@ -74,7 +78,14 @@ export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
       .min(1)
       .max(100)
       .describe(
-        'Place name to search. Can be a city, region, or landmark (e.g., "Seattle", "Mount Rainier"). Weather tools require coordinates — use the lat/lon from this result.',
+        'Place name to search — a bare city, region, or landmark ("Seattle", "Mount Rainier"). Do not fold in a region or country qualifier ("Baoding", not "Baoding Hebei"); use the country input to disambiguate. Weather tools require coordinates — use the lat/lon from this result.',
+      ),
+    country: z
+      .string()
+      .regex(/^[A-Za-z]{2}$/)
+      .optional()
+      .describe(
+        'ISO 3166-1 alpha-2 country code (e.g. "US", "FR") to disambiguate places that share a name. Omit for a global search.',
       ),
     count: z
       .number()
@@ -143,7 +154,14 @@ export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
 
   async handler(input, ctx) {
     const service = getOpenMeteoService();
-    const response = await service.getGeocode(input.name, input.count, input.language, ctx);
+    const country = input.country?.toUpperCase();
+    const response = await service.getGeocode(
+      input.name,
+      input.count,
+      input.language,
+      country,
+      ctx,
+    );
     let results = normalizeResults(response.results);
 
     // Native-script fallback: the "en" index has no entry for e.g. "上海", so an
@@ -156,7 +174,7 @@ export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
           name: input.name,
           language: inferred,
         });
-        const retry = await service.getGeocode(input.name, input.count, inferred, ctx);
+        const retry = await service.getGeocode(input.name, input.count, inferred, country, ctx);
         results = normalizeResults(retry.results);
       }
     }

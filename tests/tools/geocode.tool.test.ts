@@ -60,6 +60,37 @@ const SHANGHAI_ZH_RESULT = {
   admin2: '上海市',
 };
 
+/** Ambiguous name spanning countries — "Paris" resolves to France and the US. */
+const PARIS_FR = {
+  id: 2988507,
+  name: 'Paris',
+  latitude: 48.85341,
+  longitude: 2.3488,
+  elevation: 42.0,
+  feature_code: 'PPLC',
+  country_code: 'FR',
+  country: 'France',
+  admin1: 'Île-de-France',
+  admin2: 'Paris',
+  timezone: 'Europe/Paris',
+  population: 2138551,
+};
+
+const PARIS_US = {
+  id: 4717560,
+  name: 'Paris',
+  latitude: 33.66094,
+  longitude: -95.55551,
+  elevation: 183.0,
+  feature_code: 'PPLA2',
+  country_code: 'US',
+  country: 'United States',
+  admin1: 'Texas',
+  admin2: 'Lamar',
+  timezone: 'America/Chicago',
+  population: 25171,
+};
+
 describe('openmeteoGeocodeTool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -101,6 +132,22 @@ describe('openmeteoGeocodeTool', () => {
     });
   });
 
+  it('no_results recovery covers both dropping an admin qualifier and querying the nearest town for a physical feature', async () => {
+    mockGetGeocode.mockResolvedValue({ generationtime_ms: 0.1 });
+    const ctx = createMockContext({ errors: openmeteoGeocodeTool.errors });
+    const input = openmeteoGeocodeTool.input.parse({ name: 'Baoding Hebei' });
+    const err = (await openmeteoGeocodeTool.handler(input, ctx).catch((e: unknown) => e)) as {
+      data: { recovery: { hint: string } };
+    };
+    const hint = err.data.recovery.hint;
+    // Administrative-qualifier strand: drop the qualifier, search the bare name.
+    expect(hint).toMatch(/Baoding/);
+    expect(hint).toMatch(/drop|bare place name|qualifier/i);
+    // Gazetteer-feature strand: populated-places-only, query the nearest town instead.
+    expect(hint).toMatch(/populated places/i);
+    expect(hint).toMatch(/nearest town/i);
+  });
+
   it('tolerates results missing country/country_code (continent features)', async () => {
     mockGetGeocode.mockResolvedValue({ results: [ANTARCTICA_CONT_RESULT] });
     const ctx = createMockContext();
@@ -125,8 +172,8 @@ describe('openmeteoGeocodeTool', () => {
     const result = await openmeteoGeocodeTool.handler(input, ctx);
 
     expect(mockGetGeocode).toHaveBeenCalledTimes(2);
-    expect(mockGetGeocode).toHaveBeenNthCalledWith(1, '上海', 5, 'en', ctx);
-    expect(mockGetGeocode).toHaveBeenNthCalledWith(2, '上海', 5, 'zh', ctx);
+    expect(mockGetGeocode).toHaveBeenNthCalledWith(1, '上海', 5, 'en', undefined, ctx);
+    expect(mockGetGeocode).toHaveBeenNthCalledWith(2, '上海', 5, 'zh', undefined, ctx);
     expect(result.results[0]?.name).toBe('上海');
     expect(result.results[0]?.country_code).toBe('CN');
     expect(result.results[0]?.latitude).toBe(31.22222);
@@ -163,7 +210,45 @@ describe('openmeteoGeocodeTool', () => {
       data: { reason: 'no_results' },
     });
     expect(mockGetGeocode).toHaveBeenCalledTimes(1);
-    expect(mockGetGeocode).toHaveBeenCalledWith('上海', 5, 'de', ctx);
+    expect(mockGetGeocode).toHaveBeenCalledWith('上海', 5, 'de', undefined, ctx);
+  });
+
+  it('narrows an ambiguous name to the requested country and changes the top match', async () => {
+    // Upstream filters to countryCode when set; "Paris" spans FR + US unfiltered.
+    mockGetGeocode.mockImplementation((...args: unknown[]) => {
+      const country = args[3] as string | undefined;
+      return Promise.resolve({ results: country === 'US' ? [PARIS_US] : [PARIS_FR, PARIS_US] });
+    });
+    const ctx = createMockContext();
+
+    const unfiltered = await openmeteoGeocodeTool.handler(
+      openmeteoGeocodeTool.input.parse({ name: 'Paris' }),
+      ctx,
+    );
+    const filtered = await openmeteoGeocodeTool.handler(
+      openmeteoGeocodeTool.input.parse({ name: 'Paris', country: 'US' }),
+      ctx,
+    );
+
+    expect(unfiltered.results[0]?.country_code).toBe('FR');
+    expect(filtered.results[0]?.country_code).toBe('US');
+    // Identity change, not merely a narrower count.
+    expect(filtered.results[0]?.country_code).not.toBe(unfiltered.results[0]?.country_code);
+  });
+
+  it('uppercases a lowercase country code before querying upstream', async () => {
+    mockGetGeocode.mockResolvedValue({ results: [PARIS_US] });
+    const ctx = createMockContext();
+    const input = openmeteoGeocodeTool.input.parse({ name: 'Paris', country: 'us' });
+    await openmeteoGeocodeTool.handler(input, ctx);
+    // Lowercase accepted by the schema, normalized to uppercase for the upstream countryCode filter.
+    expect(mockGetGeocode).toHaveBeenCalledWith('Paris', 5, 'en', 'US', ctx);
+  });
+
+  it('rejects a malformed country code at the schema boundary', () => {
+    // Three- and one-letter codes fail validation instead of silently returning no_results.
+    expect(() => openmeteoGeocodeTool.input.parse({ name: 'Paris', country: 'USA' })).toThrow();
+    expect(() => openmeteoGeocodeTool.input.parse({ name: 'Paris', country: 'U' })).toThrow();
   });
 
   it('normalises nullable fields', async () => {
