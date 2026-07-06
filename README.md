@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -50,9 +50,10 @@ Eleven tools covering geocoding, weather forecasts, historical climate, probabil
 Resolve a free-text place name to ranked coordinate matches. Required first step for name-based queries — all weather tools accept latitude/longitude, not place names.
 
 - Returns name, country, admin1/admin2, latitude, longitude, elevation, IANA timezone, population, and GeoNames feature code
-- Up to 10 ranked matches (default 5), most relevant first — use `count` for disambiguation when common names (e.g., "Springfield") may match multiple cities
+- Search by a bare place name — a city, region, or landmark ("Baoding", not "Baoding Hebei"; "Paris", not "Paris, France"); a compound "City Region" or "City, Country" string matches nothing
+- Disambiguate same-named places (e.g., "Springfield") with the optional `country` filter (ISO 3166-1 alpha-2, e.g. `US`) or by raising `count` (default 5, up to 10) and reading the `admin1`/`country` fields on each result — those are output fields for choosing among matches, not search inputs
 - Pass the timezone from a geocode result directly to weather tools as the `timezone` parameter
-- Returns an empty `results` array (not an error) when no places match
+- Fails with a `no_results` error (not an empty array) when nothing matches — retry the bare place name without qualifiers, or for a physical feature/landmark search the nearest populated place instead
 
 ---
 
