@@ -1,0 +1,12 @@
+# Supply-chain install guard (adopted from @cyanheads/mcp-ts-core templates).
+[install]
+# Hold freshly published versions for 3 days before they can be installed — a
+# window against compromised just-published packages. Existing bun.lock entries
+# are unaffected.
+minimumReleaseAge = 259200
+# Exempt the framework so same-day @cyanheads/mcp-ts-core releases still install.
+minimumReleaseAgeExcludes = ["@cyanheads/mcp-ts-core"]
+
+[install.security]
+# Scan every package for malware, typosquats, and known CVEs before install.
+scanner = "@socketsecurity/bun-security-scanner"
