@@ -301,9 +301,17 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
 
     if (result.daily.length > 0) {
       const shown = Math.min(result.daily.length, 30);
-      lines.push('', `### Daily projections (first ${shown} of ${result.daily.length})`);
+      // When truncated, result.daily is a preview slice — its length is NOT the
+      // dataset size. Reference record_count (the full staged total) so text-only
+      // clients don't read the preview length as the row count.
+      lines.push(
+        '',
+        result.truncated
+          ? `### Daily projections (preview — ${shown} shown of ${result.record_count} total rows on canvas)`
+          : `### Daily projections (first ${shown} of ${result.daily.length})`,
+      );
       for (const rec of result.daily.slice(0, shown)) lines.push(formatRecord(rec));
-      if (result.daily.length > shown) {
+      if (!result.truncated && result.daily.length > shown) {
         lines.push(`_...and ${result.daily.length - shown} more daily records._`);
       }
     }

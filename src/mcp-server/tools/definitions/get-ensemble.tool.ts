@@ -17,6 +17,9 @@ import { frameInvalidVariableMessage } from '../upstream-error.js';
 /** Inline record limit before DataCanvas spillover. */
 const INLINE_LIMIT = 500;
 
+/** Character budget for the inline preview — mirrors the spillover previewChars budget. */
+const PREVIEW_CHARS = 80_000;
+
 /**
  * Count distinct ensemble members from per-member column names (_memberNN suffix).
  * The API envelope carries no top-level member metadata — column names are the
@@ -32,6 +35,36 @@ function countMembers(...blocks: (ColumnarBlock | undefined)[]): number | undefi
     }
   }
   return members.size > 0 ? members.size : undefined;
+}
+
+/** True when a record carries a non-null value in any column other than `time`. */
+function hasNonNullValue(record: Record<string, unknown>): boolean {
+  for (const [key, value] of Object.entries(record)) {
+    if (key !== 'time' && value != null) return true;
+  }
+  return false;
+}
+
+/**
+ * Build a byte-bounded inline preview that begins at the first record carrying data.
+ *
+ * Ensemble responses with past_days lead with all-null placeholder rows — the models
+ * don't hindcast — so the chronological head that spillover()'s byte-drain returns can
+ * be entirely null while the staged canvas holds the useful forecast rows. Skip the
+ * leading all-null run for the *preview only*; spillover still stages every row in
+ * chronological order on the canvas.
+ */
+function selectPreviewRows(records: Record<string, unknown>[]): Record<string, unknown>[] {
+  const firstUseful = records.findIndex(hasNonNullValue);
+  const start = firstUseful < 0 ? 0 : firstUseful;
+  const rows: Record<string, unknown>[] = [];
+  let chars = 0;
+  for (const row of records.slice(start)) {
+    chars += JSON.stringify(row).length;
+    if (chars > PREVIEW_CHARS && rows.length > 0) break;
+    rows.push(row);
+  }
+  return rows;
 }
 
 export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
@@ -245,12 +278,25 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       if (canvas) {
         const instance = await canvas.acquire(input.canvas_id, ctx);
         const allRecords = [...(hourlyRecords ?? []), ...(dailyRecords ?? [])];
+        // Stage the full chronological set — spillover preserves source order on the
+        // canvas. The inline preview is selected separately below (see #14).
         const spilled = await spillover({
           canvas: instance,
           source: allRecords,
-          previewChars: 80_000,
+          previewChars: PREVIEW_CHARS,
           signal: ctx.signal,
         });
+
+        // Inline preview: when spilled, favor rows with data — past_days responses
+        // lead with all-null placeholder rows, so a raw chronological head can be
+        // entirely null. When not spilled the whole set fit inline, so return it
+        // complete. Either way the canvas holds every row in chronological order.
+        const hourlyPreview = spilled.spilled
+          ? selectPreviewRows(hourlyRecords ?? [])
+          : (hourlyRecords ?? []);
+        const dailyPreview = spilled.spilled
+          ? selectPreviewRows(dailyRecords ?? [])
+          : (dailyRecords ?? []);
 
         return {
           latitude: data.latitude,
@@ -260,12 +306,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
           model,
           member_count: memberCount,
           record_count: spilled.spilled ? spilled.handle.rowCount : allRecords.length,
-          hourly: spilled.previewRows.filter(
-            (r) => typeof r.time === 'string' && r.time.includes('T'),
-          ) as Record<string, unknown>[],
-          daily: spilled.previewRows.filter(
-            (r) => typeof r.time === 'string' && !r.time.includes('T'),
-          ) as Record<string, unknown>[],
+          hourly: hourlyPreview,
+          daily: dailyPreview,
           hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
           daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
           // Only point at the canvas when data actually spilled — spillover()
@@ -309,6 +351,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     if (result.truncated && result.canvas_id) {
       lines.push(
         `\n⚠️ Large result — full data staged on canvas \`${result.canvas_id}\`. Query with SQL via dataframe_query.`,
+        `_Preview favors rows with data: any leading all-null rows (e.g. past_days placeholders the models don't hindcast) are omitted here but staged in full chronological order on the canvas._`,
       );
     }
 
@@ -322,9 +365,16 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
 
     if (result.hourly && result.hourly.length > 0) {
       const shown = Math.min(result.hourly.length, 24);
-      lines.push('', `### Hourly ensemble (first ${shown} of ${result.hourly.length})`);
+      // When truncated, result.hourly is a preview slice — its length is NOT the
+      // dataset size. Reference record_count (the full staged total).
+      lines.push(
+        '',
+        result.truncated
+          ? `### Hourly ensemble (preview — ${shown} shown of ${result.record_count} total rows on canvas)`
+          : `### Hourly ensemble (first ${shown} of ${result.hourly.length})`,
+      );
       for (const rec of result.hourly.slice(0, shown)) lines.push(formatRecord(rec));
-      if (result.hourly.length > shown) {
+      if (!result.truncated && result.hourly.length > shown) {
         lines.push(`_...and ${result.hourly.length - shown} more hourly records._`);
       }
     }

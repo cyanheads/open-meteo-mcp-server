@@ -313,9 +313,17 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
 
     if (result.hourly && result.hourly.length > 0) {
       const shown = Math.min(result.hourly.length, 48);
-      lines.push('', `### Hourly (first ${shown} of ${result.hourly.length})`);
+      // When truncated, result.hourly is a preview slice — its length is NOT the
+      // dataset size. Reference record_count (the full staged total) so text-only
+      // clients don't read the preview length as the row count.
+      lines.push(
+        '',
+        result.truncated
+          ? `### Hourly (preview — ${shown} shown of ${result.record_count} total rows on canvas)`
+          : `### Hourly (first ${shown} of ${result.hourly.length})`,
+      );
       for (const rec of result.hourly.slice(0, shown)) lines.push(formatRecord(rec));
-      if (result.hourly.length > shown) {
+      if (!result.truncated && result.hourly.length > shown) {
         lines.push(`_...and ${result.hourly.length - shown} more hourly records._`);
       }
     }

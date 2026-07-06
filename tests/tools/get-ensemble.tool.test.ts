@@ -371,6 +371,76 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(blocks[0]?.text).toContain('Open-Meteo.com');
   });
 
+  it('surfaces non-null rows in the truncated preview when past_days leads with nulls, and reports the staged total in the heading', async () => {
+    // Issue repro: past_days=10 → the ensemble models don't hindcast, so the earliest
+    // rows are all-null placeholders. A chronological head-drain preview would be all
+    // null while the staged canvas holds the useful forecast rows.
+    const total = 624;
+    const nullLead = 240; // leading all-null past-day rows
+    const time = Array.from({ length: total }, (_, i) => {
+      const d = new Date('2026-06-18T00:00');
+      d.setHours(d.getHours() + i);
+      return d.toISOString().slice(0, 16);
+    });
+    const temperature_2m_member01 = Array.from({ length: total }, (_, i) =>
+      i < nullLead ? null : 15 + (i % 10),
+    );
+    const temperature_2m_member02 = Array.from({ length: total }, (_, i) =>
+      i < nullLead ? null : 14 + (i % 8),
+    );
+
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: { time, temperature_2m_member01, temperature_2m_member02 },
+      hourly_units: {
+        time: 'iso8601',
+        temperature_2m_member01: '°C',
+        temperature_2m_member02: '°C',
+      },
+    });
+
+    // spillover stages the full chronological set; its byte-drained previewRows would
+    // be all-null here — the handler must build the inline preview independently.
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: total, tableName: 'spilled_ens789' },
+      previewRows: time.slice(0, 5).map((t) => ({ time: t, temperature_2m_member01: null })),
+    });
+
+    const mockInstance = { canvasId: 'Ij7fx6D3bo' };
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m'],
+      models: 'gfs025',
+      forecast_days: 16,
+      past_days: 10,
+    });
+    const result = await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.record_count).toBe(total);
+    // #14: the preview no longer leads with the all-null past-day rows — it starts at
+    // the first row carrying data (index nullLead), with real member values.
+    expect(result.hourly!.length).toBeGreaterThan(0);
+    expect(result.hourly![0]?.time).toBe(time[nullLead]);
+    expect(result.hourly![0]?.temperature_2m_member01).toBe(15);
+    expect(result.hourly![0]?.temperature_2m_member02).toBe(14);
+    // The staged canvas keeps every row; the preview is a strict subset of them.
+    expect(result.hourly!.length).toBeLessThan(total);
+
+    const text = openmeteoGetEnsembleTool.format!(result)[0]?.text ?? '';
+    // #13: heading references the staged total (624), not the preview length.
+    expect(text).toContain(`of ${total} total`);
+    // #14: discloses that omitted preview rows may be null past-day rows.
+    expect(text).toContain('past_days');
+    // Shown preview rows carry real values, not nulls.
+    expect(text).not.toContain('temperature_2m_member01: null');
+  });
+
   it('formats member count for the default blend (no model)', () => {
     const blocks = openmeteoGetEnsembleTool.format!({
       latitude: 47.6,

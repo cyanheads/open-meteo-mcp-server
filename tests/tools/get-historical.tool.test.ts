@@ -357,4 +357,30 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(blocks[0]?.text).toContain('Truncated:');
     expect(blocks[0]?.text).toContain('true');
   });
+
+  it('reports the staged total (record_count), not the preview length, in the truncated hourly heading', () => {
+    // #13: with truncation, result.hourly is a preview slice — the heading must not
+    // read the preview length as the dataset size. A 2-row preview of a 2184-row
+    // staged table should say "of 2184 total", never "of 2".
+    const blocks = openmeteoGetHistoricalTool.format!({
+      latitude: 47.6,
+      longitude: -122.3,
+      elevation: 59,
+      timezone: 'America/Los_Angeles',
+      date_range: { start: '2024-01-01', end: '2024-03-31' },
+      record_count: 2184,
+      hourly: [
+        { time: '2024-01-01T00:00', temperature_2m: 5.2 },
+        { time: '2024-01-01T01:00', temperature_2m: 4.8 },
+      ],
+      daily: undefined,
+      hourly_units: { temperature_2m: '°C' },
+      daily_units: undefined,
+      canvas_id: 'canvas-hist-1',
+      truncated: true,
+    });
+    const text = blocks[0]?.text ?? '';
+    expect(text).toContain('2 shown of 2184 total');
+    expect(text).not.toMatch(/### Hourly \(first \d+ of 2\)/);
+  });
 });

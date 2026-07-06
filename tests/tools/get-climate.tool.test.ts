@@ -464,5 +464,9 @@ describe('openmeteoGetClimateTool', () => {
     // Format uses bold label: **Truncated:** true
     expect(blocks[0]?.text).toContain('Truncated:');
     expect(blocks[0]?.text).toContain('true');
+    // #13: the truncated heading reports record_count (11322), not the 1-row preview
+    // length — text-only clients must not read the preview size as the dataset total.
+    expect(blocks[0]?.text).toContain('1 shown of 11322 total');
+    expect(blocks[0]?.text).not.toMatch(/### Daily projections \(first \d+ of 1\)/);
   });
 });
