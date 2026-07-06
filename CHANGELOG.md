@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-07-06
+
+openmeteo_dataframe_query surfaces declared recovery hints and points missing-table errors at dataframe_describe; truncated preview headings report the staged record_count; get_ensemble previews skip leading null past_days rows; mcp-ts-core ^0.10.14
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-02
 
 New openmeteo_get_climate tool — bias-corrected daily CMIP6 climate projections (1950-01-01 to 2050-12-31, up to 7 selectable models) with DataCanvas spillover; new optional OPEN_METEO_CLIMATE_BASE_URL override
