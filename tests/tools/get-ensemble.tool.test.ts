@@ -284,6 +284,7 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(result.truncated).toBe(true);
     expect(result.canvas_id).toBe('canvas-ens-456');
     expect(result.record_count).toBe(count);
+    expect(result.table_name).toBe('spilled_ens123'); // #18: exact staged table name surfaced
     // Spillover path also derives member_count from the source columns
     expect(result.member_count).toBe(1);
   });
@@ -324,6 +325,7 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(result.truncated).toBe(false);
     expect(result.canvas_id).toBeUndefined();
     expect(result.record_count).toBe(count);
+    expect(result.table_name).toBeUndefined(); // #18: no table name when spillover did not spill
   });
 
   it('returns inline without canvas when records are within INLINE_LIMIT', async () => {
@@ -350,6 +352,7 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(result.truncated).toBe(false);
     expect(result.canvas_id).toBeUndefined();
     expect(result.record_count).toBe(500);
+    expect(result.table_name).toBeUndefined(); // #18: no table name on the non-spill path
   });
 
   it('formats output with model info and attribution', () => {
@@ -423,6 +426,7 @@ describe('openmeteoGetEnsembleTool', () => {
 
     expect(result.truncated).toBe(true);
     expect(result.record_count).toBe(total);
+    expect(result.table_name).toBe('spilled_ens789'); // #18: exact staged table name surfaced
     // #14: the preview no longer leads with the all-null past-day rows — it starts at
     // the first row carrying data (index nullLead), with real member values.
     expect(result.hourly!.length).toBeGreaterThan(0);
@@ -455,5 +459,30 @@ describe('openmeteoGetEnsembleTool', () => {
     });
     expect(blocks[0]?.text).toContain('default blend');
     expect(blocks[0]?.text).toContain('**Members:** 30');
+  });
+
+  it('renders every hourly row (non-truncated) with no cap or "…and N more" (format parity)', () => {
+    // 30 rows is above the former 24-row render cap.
+    const hourly = Array.from({ length: 30 }, (_, i) => ({
+      time: `2026-06-03T00:00+${i}`,
+      temperature_2m_member01: 1000 + i,
+    }));
+    const text =
+      openmeteoGetEnsembleTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        elevation: 59,
+        timezone: 'America/Los_Angeles',
+        model: 'gfs025',
+        member_count: 1,
+        record_count: 30,
+        truncated: false,
+        hourly,
+        hourly_units: { temperature_2m_member01: '°C' },
+      })[0]?.text ?? '';
+    expect(text).toContain('### Hourly ensemble (30 records)');
+    expect(text).toContain('temperature_2m_member01: 1000');
+    expect(text).toContain('temperature_2m_member01: 1029'); // last row — not sliced at 24
+    expect(text).not.toMatch(/and \d+ more/);
   });
 });

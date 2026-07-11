@@ -76,15 +76,31 @@ describe('openmeteoGetFloodTool', () => {
     expect(result.daily[0]?.river_discharge).toBeNull();
   });
 
-  it('throws no_variables_requested when daily_variables is empty', async () => {
+  it('throws no_variables_requested (reason + recovery hint) when daily_variables is empty', async () => {
     const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
-    // Input schema requires min(1) so we bypass parse and pass manually
-    await expect(
-      openmeteoGetFloodTool.handler(
-        { latitude: 47.6, longitude: -122.3, daily_variables: [], timezone: 'auto' },
-        ctx,
-      ),
-    ).rejects.toMatchObject({
+    // Schema now accepts [] (optional, .min(1) dropped), so the input parses and the
+    // declared recovery fires instead of a generic Zod rejection — no bypass needed.
+    const input = openmeteoGetFloodTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: [],
+    });
+    await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'no_variables_requested',
+        recovery: { hint: expect.stringContaining('daily_variables') },
+      },
+    });
+  });
+
+  it('throws no_variables_requested when daily_variables is omitted entirely', async () => {
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const input = openmeteoGetFloodTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+    });
+    await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'no_variables_requested' },
     });
@@ -199,5 +215,25 @@ describe('openmeteoGetFloodTool', () => {
       daily: [],
     });
     expect(blocks[0]?.text).toContain('GloFAS coverage');
+  });
+
+  it('renders every daily row in content[] with no cap or "…and N more" (format parity)', () => {
+    // 35 rows is above the former 30-row render cap.
+    const daily = Array.from({ length: 35 }, (_, i) => ({
+      time: `2026-06-${String(i + 1).padStart(2, '0')}`,
+      river_discharge: 1000 + i,
+    }));
+    const text =
+      openmeteoGetFloodTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        timezone: 'America/Los_Angeles',
+        daily,
+        daily_units: { river_discharge: 'm³/s' },
+      })[0]?.text ?? '';
+    expect(text).toContain('### Daily discharge (35 records)');
+    expect(text).toContain('river_discharge: 1000');
+    expect(text).toContain('river_discharge: 1034'); // last row — not sliced at 30
+    expect(text).not.toMatch(/and \d+ more/);
   });
 });

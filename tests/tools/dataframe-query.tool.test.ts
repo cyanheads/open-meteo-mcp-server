@@ -194,6 +194,30 @@ describe('openmeteoDataframeQueryTool', () => {
     );
   });
 
+  it('caps returned rows to the 100-row preview while row_count reflects the full result', async () => {
+    // Handler-side symmetric cap (#16): the canvas may hold up to its 10k row limit,
+    // but the tool returns at most a 100-row preview on both surfaces. row_count stays
+    // the true total so the agent knows to page the rest with SQL LIMIT / OFFSET.
+    const fullRows = Array.from({ length: 250 }, (_, i) => ({ i, v: i * 2 }));
+    const mockInstance = {
+      canvasId: 'testcanvas01',
+      query: vi.fn().mockResolvedValue({ rows: fullRows, rowCount: 250 }),
+    };
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
+
+    const ctx = createMockContext();
+    const input = openmeteoDataframeQueryTool.input.parse({
+      canvas_id: 'testcanvas01',
+      sql: 'SELECT i, v FROM spilled_testcanvas01',
+    });
+    const result = await openmeteoDataframeQueryTool.handler(input, ctx);
+
+    expect(result.rows).toHaveLength(100); // preview cap, not the 250 materialized rows
+    expect(result.row_count).toBe(250); // true total preserved for paging guidance
+    expect(result.rows[0]).toEqual({ i: 0, v: 0 });
+    expect(result.rows[99]).toEqual({ i: 99, v: 198 });
+  });
+
   it('passes canvas_id to canvas.acquire', async () => {
     const mockInstance = {
       canvasId: 'mycanvasid1',
@@ -250,6 +274,7 @@ describe('openmeteoDataframeQueryTool', () => {
       row_count: 150,
     });
     const text = blocks[0]?.text ?? '';
-    expect(text).toContain('Showing 100 of 150 rows');
+    expect(text).toContain('Showing first 100 of 150 rows');
+    expect(text).toContain('LIMIT / OFFSET');
   });
 });

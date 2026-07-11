@@ -211,21 +211,34 @@ describe('openmeteoGetClimateTool', () => {
     });
   });
 
-  it('throws no_variables_requested when daily_variables is empty (form-client shape)', async () => {
+  it('throws no_variables_requested (reason + recovery hint) when daily_variables is empty', async () => {
     const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
-    // Bypass input.parse — Zod .min(1) rejects this, but form-based clients can
-    // still reach the handler with an empty array; the handler guard must hold.
-    const input = {
+    // Schema now accepts [] (optional, .min(1) dropped), so the input parses and the
+    // declared recovery fires instead of a generic Zod rejection — no bypass needed.
+    const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
       start_date: '2049-01-01',
       end_date: '2049-01-02',
-      daily_variables: [] as string[],
-      temperature_unit: 'celsius' as const,
-      wind_speed_unit: 'kmh' as const,
-      precipitation_unit: 'mm' as const,
-      timezone: 'auto',
-    };
+      daily_variables: [],
+    });
+    await expect(openmeteoGetClimateTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'no_variables_requested',
+        recovery: { hint: expect.stringContaining('daily_variables') },
+      },
+    });
+  });
+
+  it('throws no_variables_requested when daily_variables is omitted entirely', async () => {
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.33,
+      start_date: '2049-01-01',
+      end_date: '2049-01-02',
+    });
     await expect(openmeteoGetClimateTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'no_variables_requested' },
@@ -374,6 +387,7 @@ describe('openmeteoGetClimateTool', () => {
     expect(result.canvas_id).toBe('canvas-test-123');
     expect(result.record_count).toBe(days);
     expect(result.daily).toEqual(previewRows);
+    expect(result.table_name).toBe('spilled_abc123'); // #18: exact staged table name surfaced
   });
 
   it('omits canvas_id when records exceed INLINE_LIMIT but spillover stays under its byte threshold', async () => {
@@ -418,6 +432,7 @@ describe('openmeteoGetClimateTool', () => {
     expect(result.canvas_id).toBeUndefined();
     expect(result.record_count).toBe(days);
     expect(result.daily).toHaveLength(days);
+    expect(result.table_name).toBeUndefined(); // #18: no table name when spillover did not spill
   });
 
   it('formats output with models line and attribution', () => {
@@ -457,9 +472,11 @@ describe('openmeteoGetClimateTool', () => {
       daily: [{ time: '2020-01-01', temperature_2m_max: 5.0 }],
       daily_units: { temperature_2m_max: '°C' },
       canvas_id: 'canvas-xyz-789',
+      table_name: 'spilled_clim789',
       truncated: true,
     });
     expect(blocks[0]?.text).toContain('canvas-xyz-789');
+    expect(blocks[0]?.text).toContain('spilled_clim789'); // #18: table name named in the hint
     expect(blocks[0]?.text).toContain('API default');
     // Format uses bold label: **Truncated:** true
     expect(blocks[0]?.text).toContain('Truncated:');
@@ -468,5 +485,32 @@ describe('openmeteoGetClimateTool', () => {
     // length — text-only clients must not read the preview size as the dataset total.
     expect(blocks[0]?.text).toContain('1 shown of 11322 total');
     expect(blocks[0]?.text).not.toMatch(/### Daily projections \(first \d+ of 1\)/);
+  });
+
+  it('renders every daily row in content[] with no cap or "…and N more" (format parity)', () => {
+    // 35 rows is above the former 30-row render cap.
+    const daily = Array.from({ length: 35 }, (_, i) => ({
+      time: `2049-01-${String(i + 1).padStart(2, '0')}`,
+      temperature_2m_max: 1000 + i,
+    }));
+    const text =
+      openmeteoGetClimateTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        elevation: 17,
+        timezone: 'GMT',
+        models: undefined,
+        date_range: { start: '2049-01-01', end: '2049-02-04' },
+        record_count: 35,
+        daily,
+        daily_units: { temperature_2m_max: '°C' },
+        canvas_id: undefined,
+        table_name: undefined,
+        truncated: false,
+      })[0]?.text ?? '';
+    expect(text).toContain('### Daily projections (35 records)');
+    expect(text).toContain('temperature_2m_max: 1000');
+    expect(text).toContain('temperature_2m_max: 1034'); // last row — not sliced at 30
+    expect(text).not.toMatch(/and \d+ more/);
   });
 });

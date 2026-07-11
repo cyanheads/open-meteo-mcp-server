@@ -243,6 +243,7 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(result.truncated).toBe(true);
     expect(result.canvas_id).toBe('canvas-test-123');
     expect(result.record_count).toBe(days);
+    expect(result.table_name).toBe('spilled_abc123'); // #18: exact staged table name surfaced
   });
 
   it('omits canvas_id when records exceed INLINE_LIMIT but spillover stays under its byte threshold', async () => {
@@ -286,6 +287,7 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(result.canvas_id).toBeUndefined();
     expect(result.record_count).toBe(days);
     expect(result.daily).toHaveLength(days);
+    expect(result.table_name).toBeUndefined(); // #18: no table name when spillover did not spill
   });
 
   it('returns inline result without canvas when records are within INLINE_LIMIT', async () => {
@@ -318,6 +320,7 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(result.canvas_id).toBeUndefined();
     expect(result.record_count).toBe(500);
     expect(result.daily).toHaveLength(500);
+    expect(result.table_name).toBeUndefined(); // #18: no table name on the non-spill path
   });
 
   it('formats output with attribution', () => {
@@ -350,9 +353,11 @@ describe('openmeteoGetHistoricalTool', () => {
       hourly_units: undefined,
       daily_units: { temperature_2m_max: '°C' },
       canvas_id: 'canvas-xyz-789',
+      table_name: 'spilled_hist789',
       truncated: true,
     });
     expect(blocks[0]?.text).toContain('canvas-xyz-789');
+    expect(blocks[0]?.text).toContain('spilled_hist789'); // #18: table name named in the hint
     // Format uses bold label: **Truncated:** true
     expect(blocks[0]?.text).toContain('Truncated:');
     expect(blocks[0]?.text).toContain('true');
@@ -377,10 +382,69 @@ describe('openmeteoGetHistoricalTool', () => {
       hourly_units: { temperature_2m: '°C' },
       daily_units: undefined,
       canvas_id: 'canvas-hist-1',
+      table_name: 'spilled_hist1',
       truncated: true,
     });
     const text = blocks[0]?.text ?? '';
     expect(text).toContain('2 shown of 2184 total');
     expect(text).not.toMatch(/### Hourly \(first \d+ of 2\)/);
+  });
+
+  it('renders every hourly row (non-truncated) with no cap or "…and N more" (format parity)', () => {
+    // 60 rows is above the former 48-row render cap.
+    const hourly = Array.from({ length: 60 }, (_, i) => ({
+      time: `2024-07-01T00:00+${i}`,
+      temperature_2m: 1000 + i,
+    }));
+    const text =
+      openmeteoGetHistoricalTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        elevation: 59,
+        timezone: 'America/Los_Angeles',
+        date_range: { start: '2024-07-01', end: '2024-07-03' },
+        record_count: 60,
+        hourly,
+        daily: undefined,
+        hourly_units: { temperature_2m: '°C' },
+        daily_units: undefined,
+        canvas_id: undefined,
+        table_name: undefined,
+        truncated: false,
+      })[0]?.text ?? '';
+    expect(text).toContain('### Hourly (60 records)');
+    expect(text).toContain('temperature_2m: 1000');
+    expect(text).toContain('temperature_2m: 1059'); // last row — not sliced at 48
+    expect(text).not.toMatch(/and \d+ more/);
+  });
+
+  it('renders the full spillover preview (truncated) — shown count is the preview length, not the old 48 cap', () => {
+    // 60-row preview of a 5000-row staged table: every preview row renders and the
+    // heading reports the staged total (record_count), not the preview length.
+    const hourly = Array.from({ length: 60 }, (_, i) => ({
+      time: `2024-07-01T00:00+${i}`,
+      temperature_2m: 2000 + i,
+    }));
+    const text =
+      openmeteoGetHistoricalTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        elevation: 59,
+        timezone: 'America/Los_Angeles',
+        date_range: { start: '2024-01-01', end: '2024-12-31' },
+        record_count: 5000,
+        hourly,
+        daily: undefined,
+        hourly_units: { temperature_2m: '°C' },
+        daily_units: undefined,
+        canvas_id: 'canvas-hist-big',
+        table_name: 'spilled_histbig',
+        truncated: true,
+      })[0]?.text ?? '';
+    expect(text).toContain('### Hourly (preview — 60 shown of 5000 total rows on canvas)');
+    expect(text).toContain('temperature_2m: 2000');
+    expect(text).toContain('temperature_2m: 2059'); // full preview rendered, not capped at 48
+    expect(text).toContain('spilled_histbig'); // #18: table name in the hint
+    expect(text).not.toMatch(/and \d+ more/);
   });
 });

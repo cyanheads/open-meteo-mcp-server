@@ -149,4 +149,24 @@ describe('openmeteoGetMarineTool', () => {
     expect(blocks[0]?.text).toContain('Marine');
     expect(blocks[0]?.text).toContain('Open-Meteo.com');
   });
+
+  it('renders every hourly row in content[] with no cap or "…and N more" (format parity)', () => {
+    // 50 rows is above the former 48-row render cap.
+    const hourly = Array.from({ length: 50 }, (_, i) => ({
+      time: `2026-05-30T00:00+${i}`,
+      wave_height: 1000 + i,
+    }));
+    const text =
+      openmeteoGetMarineTool.format!({
+        latitude: 47.8,
+        longitude: -122.5,
+        timezone: 'America/Los_Angeles',
+        hourly,
+        hourly_units: { wave_height: 'm' },
+      })[0]?.text ?? '';
+    expect(text).toContain('### Hourly marine (50 records)');
+    expect(text).toContain('wave_height: 1000');
+    expect(text).toContain('wave_height: 1049'); // last row — not sliced at 48
+    expect(text).not.toMatch(/and \d+ more/);
+  });
 });

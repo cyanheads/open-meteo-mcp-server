@@ -163,12 +163,8 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     }
 
     if (result.hourly && result.hourly.length > 0) {
-      const shown = Math.min(result.hourly.length, 48);
-      lines.push('', `### Hourly marine (first ${shown} of ${result.hourly.length})`);
-      for (const rec of result.hourly.slice(0, shown)) lines.push(formatRecord(rec));
-      if (result.hourly.length > shown) {
-        lines.push(`_...and ${result.hourly.length - shown} more hourly records._`);
-      }
+      lines.push('', `### Hourly marine (${result.hourly.length} records)`);
+      for (const rec of result.hourly) lines.push(formatRecord(rec));
     }
 
     lines.push('', '_Weather data by Open-Meteo.com_');

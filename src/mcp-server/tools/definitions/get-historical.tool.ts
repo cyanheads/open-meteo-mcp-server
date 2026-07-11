@@ -160,6 +160,12 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .describe(
         'DataCanvas token — present only when truncated is true (data spilled). Query with SQL using this token.',
       ),
+    table_name: z
+      .string()
+      .optional()
+      .describe(
+        'DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only when truncated is true.',
+      ),
     truncated: z
       .boolean()
       .describe(
@@ -269,6 +275,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
           // stages a table only past its byte threshold, so a canvas_id on the
           // non-spilled path would reference an empty canvas.
           canvas_id: spilled.spilled ? instance.canvasId : undefined,
+          table_name: spilled.spilled ? spilled.handle.tableName : undefined,
           truncated: spilled.spilled,
         };
       }
@@ -286,6 +293,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
       daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
       canvas_id: undefined,
+      table_name: undefined,
       truncated: false,
     };
   },
@@ -299,7 +307,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
 
     if (result.truncated && result.canvas_id) {
       lines.push(
-        `\n⚠️ Large result — full data staged on canvas \`${result.canvas_id}\`. Query with SQL via dataframe_query.`,
+        `\n⚠️ Large result — full data staged on canvas \`${result.canvas_id}\`, table \`${result.table_name}\`. Query with SQL via openmeteo_dataframe_query.`,
       );
     }
 
@@ -307,25 +315,29 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     if (result.daily_units) lines.push(`**Daily units:** ${formatUnits(result.daily_units)}`);
 
     if (result.daily && result.daily.length > 0) {
-      lines.push('', '### Daily summary (first 30)');
-      for (const rec of result.daily.slice(0, 30)) lines.push(formatRecord(rec));
-    }
-
-    if (result.hourly && result.hourly.length > 0) {
-      const shown = Math.min(result.hourly.length, 48);
-      // When truncated, result.hourly is a preview slice — its length is NOT the
-      // dataset size. Reference record_count (the full staged total) so text-only
-      // clients don't read the preview length as the row count.
+      // When truncated, result.daily is the spillover preview array — render all of
+      // it so content[] matches structuredContent.daily; the heading references
+      // record_count (the full staged total), not the preview length.
       lines.push(
         '',
         result.truncated
-          ? `### Hourly (preview — ${shown} shown of ${result.record_count} total rows on canvas)`
-          : `### Hourly (first ${shown} of ${result.hourly.length})`,
+          ? `### Daily summary (preview — ${result.daily.length} shown of ${result.record_count} total rows on canvas)`
+          : `### Daily summary (${result.daily.length} records)`,
       );
-      for (const rec of result.hourly.slice(0, shown)) lines.push(formatRecord(rec));
-      if (!result.truncated && result.hourly.length > shown) {
-        lines.push(`_...and ${result.hourly.length - shown} more hourly records._`);
-      }
+      for (const rec of result.daily) lines.push(formatRecord(rec));
+    }
+
+    if (result.hourly && result.hourly.length > 0) {
+      // When truncated, result.hourly is the spillover preview array — render all of
+      // it so content[] matches structuredContent.hourly; the heading references
+      // record_count (the full staged total), not the preview length.
+      lines.push(
+        '',
+        result.truncated
+          ? `### Hourly (preview — ${result.hourly.length} shown of ${result.record_count} total rows on canvas)`
+          : `### Hourly (${result.hourly.length} records)`,
+      );
+      for (const rec of result.hourly) lines.push(formatRecord(rec));
     }
 
     lines.push('', '_Weather data by Open-Meteo.com_');

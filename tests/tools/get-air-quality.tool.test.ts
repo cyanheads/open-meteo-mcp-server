@@ -121,4 +121,25 @@ describe('openmeteoGetAirQualityTool', () => {
     expect(blocks[0]?.text).toContain('CAMS');
     expect(blocks[0]?.text).toContain('Open-Meteo.com');
   });
+
+  it('renders every hourly row in content[] with no cap or "…and N more" (format parity)', () => {
+    // 50 rows is above the former 48-row render cap.
+    const hourly = Array.from({ length: 50 }, (_, i) => ({
+      time: `2026-05-30T00:00+${i}`,
+      pm2_5: 1000 + i,
+    }));
+    const text =
+      openmeteoGetAirQualityTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        timezone: 'America/Los_Angeles',
+        hourly,
+        hourly_units: { pm2_5: 'μg/m³' },
+        data_source: 'CAMS',
+      })[0]?.text ?? '';
+    expect(text).toContain('### Hourly air quality (50 records)');
+    expect(text).toContain('pm2_5: 1000');
+    expect(text).toContain('pm2_5: 1049'); // last row — not sliced at 48
+    expect(text).not.toMatch(/and \d+ more/);
+  });
 });

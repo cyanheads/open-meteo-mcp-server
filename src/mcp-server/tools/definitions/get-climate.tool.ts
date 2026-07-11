@@ -89,8 +89,8 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       ),
     daily_variables: z
       .array(z.string())
-      .min(1)
       .max(50)
+      .optional()
       .describe(
         'Daily climate variables to fetch (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_mean", "shortwave_radiation_sum"]). Required — the Climate API is daily-only.',
       ),
@@ -157,6 +157,12 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       .describe(
         'DataCanvas token — present only when truncated is true (data spilled). Query with SQL using this token.',
       ),
+    table_name: z
+      .string()
+      .optional()
+      .describe(
+        'DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only when truncated is true.',
+      ),
     truncated: z
       .boolean()
       .describe(
@@ -165,7 +171,8 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
   }),
 
   async handler(input, ctx) {
-    if ((input.daily_variables?.length ?? 0) === 0) {
+    const dailyVariables = input.daily_variables;
+    if (!dailyVariables || dailyVariables.length === 0) {
       throw ctx.fail(
         'no_variables_requested',
         'Provide daily_variables with at least one climate variable.',
@@ -204,7 +211,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       {
         start_date: input.start_date,
         end_date: input.end_date,
-        daily: input.daily_variables,
+        daily: dailyVariables,
         models: input.models,
         temperature_unit: input.temperature_unit,
         wind_speed_unit: input.wind_speed_unit,
@@ -263,6 +270,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
           // stages a table only past its byte threshold, so a canvas_id on the
           // non-spilled path would reference an empty canvas.
           canvas_id: spilled.spilled ? instance.canvasId : undefined,
+          table_name: spilled.spilled ? spilled.handle.tableName : undefined,
           truncated: spilled.spilled,
         };
       }
@@ -279,6 +287,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       daily: dailyRecords,
       daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
       canvas_id: undefined,
+      table_name: undefined,
       truncated: false,
     };
   },
@@ -293,27 +302,23 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
 
     if (result.truncated && result.canvas_id) {
       lines.push(
-        `\n⚠️ Large result — full data staged on canvas \`${result.canvas_id}\`. Query with SQL via dataframe_query.`,
+        `\n⚠️ Large result — full data staged on canvas \`${result.canvas_id}\`, table \`${result.table_name}\`. Query with SQL via openmeteo_dataframe_query.`,
       );
     }
 
     if (result.daily_units) lines.push(`\n**Daily units:** ${formatUnits(result.daily_units)}`);
 
     if (result.daily.length > 0) {
-      const shown = Math.min(result.daily.length, 30);
-      // When truncated, result.daily is a preview slice — its length is NOT the
-      // dataset size. Reference record_count (the full staged total) so text-only
-      // clients don't read the preview length as the row count.
+      // When truncated, result.daily is the spillover preview array — render all of
+      // it so content[] matches structuredContent.daily; the heading references
+      // record_count (the full staged total), not the preview length.
       lines.push(
         '',
         result.truncated
-          ? `### Daily projections (preview — ${shown} shown of ${result.record_count} total rows on canvas)`
-          : `### Daily projections (first ${shown} of ${result.daily.length})`,
+          ? `### Daily projections (preview — ${result.daily.length} shown of ${result.record_count} total rows on canvas)`
+          : `### Daily projections (${result.daily.length} records)`,
       );
-      for (const rec of result.daily.slice(0, shown)) lines.push(formatRecord(rec));
-      if (!result.truncated && result.daily.length > shown) {
-        lines.push(`_...and ${result.daily.length - shown} more daily records._`);
-      }
+      for (const rec of result.daily) lines.push(formatRecord(rec));
     }
 
     lines.push('', '_Weather data by Open-Meteo.com_');

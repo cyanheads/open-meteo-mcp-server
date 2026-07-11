@@ -69,8 +69,8 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
     daily_variables: z
       .array(z.string())
-      .min(1)
       .max(20)
+      .optional()
       .describe(
         'Daily discharge variables to fetch (e.g., ["river_discharge", "river_discharge_p25", "river_discharge_p75", "river_discharge_min", "river_discharge_max"]). Required.',
       ),
@@ -116,7 +116,8 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
   }),
 
   async handler(input, ctx) {
-    if ((input.daily_variables?.length ?? 0) === 0) {
+    const dailyVariables = input.daily_variables;
+    if (!dailyVariables || dailyVariables.length === 0) {
       throw ctx.fail(
         'no_variables_requested',
         'Provide daily_variables with at least one discharge variable.',
@@ -145,7 +146,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       input.latitude,
       input.longitude,
       {
-        daily: input.daily_variables,
+        daily: dailyVariables,
         forecast_days: input.forecast_days,
         start_date: input.start_date,
         end_date: input.end_date,
@@ -189,12 +190,8 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     if (result.daily_units) lines.push(`**Daily units:** ${formatUnits(result.daily_units)}`);
 
     if (result.daily.length > 0) {
-      const shown = Math.min(result.daily.length, 30);
-      lines.push('', `### Daily discharge (first ${shown} of ${result.daily.length})`);
-      for (const rec of result.daily.slice(0, shown)) lines.push(formatRecord(rec));
-      if (result.daily.length > shown) {
-        lines.push(`_...and ${result.daily.length - shown} more daily records._`);
-      }
+      lines.push('', `### Daily discharge (${result.daily.length} records)`);
+      for (const rec of result.daily) lines.push(formatRecord(rec));
     } else {
       lines.push('_No discharge data returned — coordinates may be outside GloFAS coverage._');
     }

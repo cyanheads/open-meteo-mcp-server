@@ -224,4 +224,27 @@ describe('openmeteoGetForecastTool', () => {
     expect(blocks[0]?.text).toContain('Weather forecast');
     expect(blocks[0]?.text).toContain('Open-Meteo.com');
   });
+
+  it('renders every hourly row in content[] with no cap or "…and N more" (format parity)', () => {
+    // 50 rows is above the former 48-row render cap — content[] must carry the same
+    // rows as structuredContent.hourly, with an honest count in the heading.
+    const hourly = Array.from({ length: 50 }, (_, i) => ({
+      time: `2026-05-30T00:00+${i}`,
+      temperature_2m: 1000 + i,
+    }));
+    const text =
+      openmeteoGetForecastTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        elevation: 59,
+        timezone: 'America/Los_Angeles',
+        utc_offset_seconds: -25200,
+        hourly,
+        hourly_units: { temperature_2m: '°C' },
+      })[0]?.text ?? '';
+    expect(text).toContain('### Hourly (50 records)');
+    expect(text).toContain('temperature_2m: 1000'); // first row
+    expect(text).toContain('temperature_2m: 1049'); // last row — not sliced at 48
+    expect(text).not.toMatch(/and \d+ more/);
+  });
 });

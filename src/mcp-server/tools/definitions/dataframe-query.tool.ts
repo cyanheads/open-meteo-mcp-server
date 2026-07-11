@@ -7,13 +7,21 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
+/**
+ * Inline row cap for both response surfaces. The full result stays on the canvas —
+ * rows beyond this are reached by re-issuing the SQL with LIMIT / OFFSET. Capping in
+ * the handler keeps content[] (format) and structuredContent (rows) carrying the
+ * identical preview.
+ */
+const PREVIEW_ROW_LIMIT = 100;
+
 export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
   description:
     'Run a read-only SQL SELECT against tables staged on a DataCanvas by ' +
     'openmeteo_get_historical, openmeteo_get_ensemble, or openmeteo_get_climate. ' +
-    'Pass the canvas_id returned when any of those tools spills (truncated: true). ' +
-    'Tables are named by the spillover helper (e.g. spilled_<id>); use openmeteo_dataframe_describe ' +
-    'to list available tables and their columns before querying.',
+    'Pass the canvas_id returned when any of those tools spills (truncated: true), and ' +
+    'reference the exact table_name those tools return alongside it. Call ' +
+    'openmeteo_dataframe_describe to list staged tables and their columns when you need to discover names.',
   annotations: { readOnlyHint: true },
 
   errors: [
@@ -67,7 +75,9 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
   output: z.object({
     rows: z
       .array(z.record(z.string(), z.unknown()))
-      .describe('Result rows (capped at the canvas row limit, default 10 000).'),
+      .describe(
+        'Result rows — a preview capped at 100. When row_count exceeds this, page the rest by re-issuing the SQL with LIMIT / OFFSET.',
+      ),
     row_count: z.number().describe('Total rows in the full result before any cap.'),
     canvas_id: z.string().describe('Canvas ID that was queried.'),
   }),
@@ -120,7 +130,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
             typeof tableName === 'string' ? `Table "${tableName}"` : 'The referenced table';
           throw ctx.fail(
             'missing_table',
-            `${named} is not staged on canvas "${input.canvas_id}" — it may have expired (24 h sliding TTL) or been dropped.`,
+            `${named} is not staged on canvas "${input.canvas_id}". Use the exact table_name returned by openmeteo_get_historical, openmeteo_get_ensemble, or openmeteo_get_climate, or call openmeteo_dataframe_describe to list staged tables. It may also have expired (24 h sliding TTL) or been dropped.`,
             ctx.recoveryFor('missing_table'),
             { cause: err },
           );
@@ -134,7 +144,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     });
 
     return {
-      rows: result.rows,
+      rows: result.rows.slice(0, PREVIEW_ROW_LIMIT),
       row_count: result.rowCount,
       canvas_id: instance.canvasId,
     };
@@ -153,11 +163,14 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
       const headers = Object.keys(firstRow);
       lines.push('', `| ${headers.join(' | ')} |`);
       lines.push(`| ${headers.map(() => '---').join(' | ')} |`);
-      for (const row of result.rows.slice(0, 100)) {
+      for (const row of result.rows) {
         lines.push(`| ${headers.map((h) => String(row[h] ?? '')).join(' | ')} |`);
       }
-      if (result.row_count > 100) {
-        lines.push(``, `_Showing 100 of ${result.row_count} rows._`);
+      if (result.row_count > result.rows.length) {
+        lines.push(
+          ``,
+          `_Showing first ${result.rows.length} of ${result.row_count} rows — add LIMIT / OFFSET to your SQL to page further._`,
+        );
       }
     }
 
