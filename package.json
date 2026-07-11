@@ -1,7 +1,7 @@
 {
   "name": "@cyanheads/open-meteo-mcp-server",
   "mcpName": "io.github.cyanheads/open-meteo-mcp-server",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Geocode places, fetch global weather forecasts, ERA5 historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP.",
   "type": "module",
   "bin": {
@@ -61,7 +61,7 @@
   "author": "Casey Hand <casey@caseyjhand.com> (https://caseyjhand.com)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cyanheads/open-meteo-mcp-server"
+    "url": "git+https://github.com/cyanheads/open-meteo-mcp-server.git"
   },
   "homepage": "https://github.com/cyanheads/open-meteo-mcp-server#readme",
   "bugs": {
@@ -83,14 +83,14 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.2",
+    "@biomejs/biome": "^2.5.3",
     "@socketsecurity/bun-security-scanner": "^1.1.2",
-    "@types/node": "^26.1.0",
+    "@types/node": "^26.1.1",
     "depcheck": "^1.4.7",
     "ignore": "^7.0.5",
-    "tsc-alias": "^1.8.17",
+    "tsc-alias": "^1.9.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.10"
   },
   "trustedDependencies": ["@socketsecurity/bun-security-scanner"]
 }

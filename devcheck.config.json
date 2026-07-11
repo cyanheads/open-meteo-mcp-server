@@ -12,7 +12,7 @@
     "ignorePatterns": []
   },
   "outdated": {
-    "allowlist": []
+    "allowlist": ["typescript"]
   },
   "packaging": {
     "pluginManifests": true

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-07-11
+
+content[]/structuredContent row parity across all seven time-series tools and dataframe_query's preview cap; flood/climate accept empty daily_variables; historical/ensemble/climate spill results carry the exact staged table_name
+
 ## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-07-06
 
 openmeteo_geocode description and no_results recovery no longer imply nonexistent country/admin1 inputs; adds an optional country filter (ISO 3166-1 alpha-2) mapped to the upstream countryCode param for real input-side disambiguation
