@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.4](changelog/0.2.x/0.2.4.md) — 2026-07-15
+
+DataCanvas spill fixes: eligibility is serialized payload size rather than row count, and staged tables keep numeric column types and daily-only columns.
+
 ## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-07-11
 
 content[]/structuredContent row parity across all seven time-series tools and dataframe_query's preview cap; flood/climate accept empty daily_variables; historical/ensemble/climate spill results carry the exact staged table_name

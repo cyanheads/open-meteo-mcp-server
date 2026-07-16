@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -78,7 +78,7 @@ Historical weather from the ERA5 reanalysis archive, covering 1940 to approximat
 - Requires `start_date` and `end_date` (YYYY-MM-DD); ERA5 has a variable ~1–5 day lag
 - Same variable vocabulary as `openmeteo_get_forecast` — past and forecast data are directly comparable on one schema
 - At least one of `hourly_variables` or `daily_variables` is required
-- Large date ranges (multi-year hourly queries) spill to DataCanvas when `CANVAS_PROVIDER_TYPE=duckdb` — output includes `canvas_id` and `truncated: true` when the inline record limit is exceeded
+- Large date ranges (multi-year hourly queries) spill to DataCanvas when `CANVAS_PROVIDER_TYPE=duckdb` — output includes `canvas_id` and `truncated: true` whenever a result is too large to return inline, which a wide multi-variable pull can be at any row count
 - Spill → query workflow: call `openmeteo_dataframe_describe` with the `canvas_id` to list tables, then `openmeteo_dataframe_query` to run SQL SELECT against the staged data
 
 ---
@@ -173,7 +173,7 @@ Open-Meteo–specific:
 - Self-contained geocoding: `openmeteo_geocode` resolves place names so agents don't need a separate geocoder
 - ERA5 archive from 1940 to present with same variable schema as the forecast API — direct past/forecast comparisons on one schema
 - Automatic columnar-to-record reshape: Open-Meteo returns parallel time/variable arrays; handlers convert to per-timestamp records with a `*_units` map
-- DataCanvas spillover for `openmeteo_get_historical`, `openmeteo_get_ensemble`, and `openmeteo_get_climate`: large queries that exceed the inline record limit register a DuckDB dataframe for SQL querying
+- DataCanvas spillover for `openmeteo_get_historical`, `openmeteo_get_ensemble`, and `openmeteo_get_climate`: a result too large to return inline registers a DuckDB dataframe for SQL querying, staging every hourly and daily row with its upstream numeric type intact
 - Configurable base URLs for all eight API endpoints (forecast, archive, marine, air quality, geocoding, ensemble, flood, climate) — override for testing or self-hosted deployments
 - **Attribution:** Weather data by [Open-Meteo.com](https://open-meteo.com/) (CC BY 4.0). Non-commercial use is free and keyless; commercial use requires Open-Meteo's paid API tier (~10,000 req/day, 5,000/hour fair-use ceiling for non-commercial)
 
