@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.5](changelog/0.2.x/0.2.5.md) — 2026-07-16
+
+openmeteo_get_flood gains DataCanvas spillover for wide reanalysis pulls and guards its mutually-exclusive forecast/reanalysis date modes; openmeteo_dataframe_query renders struct and list cells as JSON with escaped pipes, and formatUnits keeps the time unit in content[].
+
 ## [0.2.4](changelog/0.2.x/0.2.4.md) — 2026-07-15
 
 DataCanvas spill fixes: eligibility is serialized payload size rather than row count, and staged tables keep numeric column types and daily-only columns.
