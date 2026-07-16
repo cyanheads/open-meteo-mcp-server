@@ -15,13 +15,40 @@ vi.mock('@/services/open-meteo/open-meteo-service.js', () => ({
   getOpenMeteoService: () => ({ getHistorical: mockGetHistorical }),
 }));
 
-// Mock the canvas spillover helper — allows per-test control over spill behaviour
-vi.mock('@cyanheads/mcp-ts-core/canvas', () => ({
+// Mock the canvas spillover helper — allows per-test control over spill behaviour.
+// The real inferSchemaFromRows backs deriveSpillSchema, so the schema the handler
+// hands to spillover() is genuinely derived, not stubbed.
+vi.mock('@cyanheads/mcp-ts-core/canvas', async (importActual) => ({
+  ...(await importActual<typeof import('@cyanheads/mcp-ts-core/canvas')>()),
   spillover: (...args: unknown[]) => mockSpillover(...args),
 }));
 
 // Canvas mock — returns undefined by default; individual tests can override
 let mockCanvasInstance: unknown;
+
+/** The schema the handler handed to spillover(). */
+const spilledSchema = (): { name: string; type: string }[] => {
+  const [opts] = mockSpillover.mock.calls[0] as [{ schema?: { name: string; type: string }[] }];
+  return opts.schema ?? [];
+};
+
+const spilledSchemaType = (name: string) => spilledSchema().find((c) => c.name === name)?.type;
+
+/** `count` consecutive ISO dates from `from`. */
+const dailyDates = (count: number, from = '2022-01-01'): string[] =>
+  Array.from({ length: count }, (_, i) => {
+    const d = new Date(from);
+    d.setDate(d.getDate() + i);
+    return d.toISOString().slice(0, 10);
+  });
+
+/** `count` consecutive hourly ISO timestamps from `from`. */
+const hourlyTimes = (count: number, from = '2023-01-01T00:00'): string[] =>
+  Array.from({ length: count }, (_, i) => {
+    const d = new Date(from);
+    d.setHours(d.getHours() + i);
+    return d.toISOString().slice(0, 16);
+  });
 
 vi.mock('@/services/canvas-accessor.js', () => ({
   getCanvas: () => mockCanvasInstance,
@@ -198,15 +225,10 @@ describe('openmeteoGetHistoricalTool', () => {
     });
   });
 
-  it('spills to DataCanvas and sets truncated=true when records exceed INLINE_LIMIT', async () => {
-    // Build a response with 502 daily records (> INLINE_LIMIT of 500)
-    const days = 502;
-    const time = Array.from({ length: days }, (_, i) => {
-      const d = new Date('2022-01-01');
-      d.setDate(d.getDate() + i);
-      return d.toISOString().slice(0, 10);
-    });
-    const temperature_2m_max = Array.from({ length: days }, (_, i) => 10 + (i % 20));
+  it('spills to DataCanvas and sets truncated=true when the payload exceeds the inline budget', async () => {
+    const days = 2000;
+    const time = dailyDates(days);
+    const temperature_2m_max = Array.from({ length: days }, (_, i) => 10 + (i % 20) + 0.5);
 
     mockGetHistorical.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -246,17 +268,12 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(result.table_name).toBe('spilled_abc123'); // #18: exact staged table name surfaced
   });
 
-  it('omits canvas_id when records exceed INLINE_LIMIT but spillover stays under its byte threshold', async () => {
-    // Regression: 500–~2000 records trigger the spillover path but stay under the
-    // ~80 KB preview threshold, so nothing is staged (spilled: false). The handler
-    // must not return a canvas_id pointing at an empty canvas.
-    const days = 502;
-    const time = Array.from({ length: days }, (_, i) => {
-      const d = new Date('2022-01-01');
-      d.setDate(d.getDate() + i);
-      return d.toISOString().slice(0, 10);
-    });
-    const temperature_2m_max = Array.from({ length: days }, (_, i) => 10 + (i % 20));
+  it('returns no canvas handles when spillover declines to stage a table', async () => {
+    // The handler must never surface a canvas_id pointing at an empty canvas —
+    // spilled.handle only exists on the spilled branch of the union.
+    const days = 2000;
+    const time = dailyDates(days);
+    const temperature_2m_max = Array.from({ length: days }, (_, i) => 10 + (i % 20) + 0.5);
 
     mockGetHistorical.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -264,10 +281,9 @@ describe('openmeteoGetHistoricalTool', () => {
       daily: { time, temperature_2m_max },
     });
 
-    // Everything fit inline — previewRows carry the full dataset, no table staged
     mockSpillover.mockResolvedValue({
       spilled: false,
-      previewRows: time.map((t, i) => ({ time: t, temperature_2m_max: 10 + (i % 20) })),
+      previewRows: time.map((t, i) => ({ time: t, temperature_2m_max: 10 + (i % 20) + 0.5 })),
     });
 
     const mockInstance = { canvasId: 'canvas-unused-1' };
@@ -278,7 +294,7 @@ describe('openmeteoGetHistoricalTool', () => {
       latitude: 47.6062,
       longitude: -122.3321,
       start_date: '2022-01-01',
-      end_date: '2023-05-17',
+      end_date: '2027-06-23',
       daily_variables: ['temperature_2m_max'],
     });
 
@@ -290,14 +306,9 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(result.table_name).toBeUndefined(); // #18: no table name when spillover did not spill
   });
 
-  it('returns inline result without canvas when records are within INLINE_LIMIT', async () => {
-    // Exactly 500 daily records — at the limit, not over
+  it('returns inline without touching a canvas when the payload fits', async () => {
     const days = 500;
-    const time = Array.from({ length: days }, (_, i) => {
-      const d = new Date('2023-01-01');
-      d.setDate(d.getDate() + i);
-      return d.toISOString().slice(0, 10);
-    });
+    const time = dailyDates(days, '2023-01-01');
     const temperature_2m_max = Array.from({ length: days }, () => 15.0);
 
     mockGetHistorical.mockResolvedValue({
@@ -305,6 +316,9 @@ describe('openmeteoGetHistoricalTool', () => {
       daily_units: { time: 'iso8601', temperature_2m_max: '°C' },
       daily: { time, temperature_2m_max },
     });
+
+    const acquire = vi.fn();
+    mockCanvasInstance = { acquire };
 
     const ctx = createMockContext();
     const input = openmeteoGetHistoricalTool.input.parse({
@@ -321,6 +335,89 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(result.record_count).toBe(500);
     expect(result.daily).toHaveLength(500);
     expect(result.table_name).toBeUndefined(); // #18: no table name on the non-spill path
+    // A result that fits must not mint a canvas — an acquired-but-unused canvas
+    // holds a per-tenant slot the caller never learns about.
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it('spills a wide multi-variable pull that sits below 500 rows', async () => {
+    // #23: 480 hourly rows × 18 variables — the old row-count gate let this return
+    // ~188 KB inline with no canvas_id and no retrieval path.
+    const rows = 480;
+    const time = hourlyTimes(rows);
+    const hourly: Record<string, unknown> = { time };
+    for (let v = 0; v < 18; v++) {
+      hourly[`weather_variable_number_${v}`] = time.map((_, i) => 100.5 + v + (i % 7));
+    }
+
+    mockGetHistorical.mockResolvedValue({ ...MOCK_RESPONSE, daily: undefined, hourly });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: rows, tableName: 'spilled_wide' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-wide' }) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2023-01-01',
+      end_date: '2023-01-20',
+      hourly_variables: ['temperature_2m'],
+    });
+
+    const result = await openmeteoGetHistoricalTool.handler(input, ctx);
+    expect(rows).toBeLessThan(500);
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-wide');
+    expect(result.table_name).toBe('spilled_wide');
+  });
+
+  it('covers both cadences in the spill schema when hourly and daily are requested', async () => {
+    // #22: hourly records are concatenated ahead of daily ones, so a preview-sized
+    // sniff window never reaches a daily row and precipitation_sum is never created.
+    const hourlyTime = hourlyTimes(2160);
+    const dailyTime = dailyDates(90, '2023-01-01');
+
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', temperature_2m: '°C' },
+      daily_units: { time: 'iso8601', precipitation_sum: 'mm', sunrise: 'iso8601' },
+      hourly: { time: hourlyTime, temperature_2m: hourlyTime.map((_, i) => 3.5 + (i % 10)) },
+      daily: {
+        time: dailyTime,
+        // Live shape: precipitation is mostly whole zeros with fractional readings
+        // mixed in, and sunrise is an ISO 8601 string rather than a number.
+        precipitation_sum: dailyTime.map((_, i) => (i % 3 === 0 ? 0.5 : 0)),
+        sunrise: dailyTime.map((d) => `${d}T08:57`),
+      },
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: hourlyTime.length + dailyTime.length, tableName: 'spilled_union' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-union' }) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2023-01-01',
+      end_date: '2023-04-01',
+      hourly_variables: ['temperature_2m'],
+      daily_variables: ['precipitation_sum', 'sunrise'],
+    });
+    await openmeteoGetHistoricalTool.handler(input, ctx);
+
+    const columns = spilledSchema().map((c) => c.name);
+    expect(columns).toEqual(['time', 'temperature_2m', 'precipitation_sum', 'sunrise']);
+    expect(spilledSchemaType('temperature_2m')).toBe('DOUBLE');
+    // Daily-only column survives, and keeps a numeric type despite its leading zeros.
+    expect(spilledSchemaType('precipitation_sum')).toBe('DOUBLE');
+    // A genuinely string-valued daily variable stays VARCHAR.
+    expect(spilledSchemaType('sunrise')).toBe('VARCHAR');
   });
 
   it('formats output with attribution', () => {

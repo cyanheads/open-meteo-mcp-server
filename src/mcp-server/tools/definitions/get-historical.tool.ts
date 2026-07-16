@@ -12,10 +12,8 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { deriveSpillSchema, exceedsInlineBudget, PREVIEW_CHARS } from '../spill-utils.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
-
-/** Inline record limit before DataCanvas spillover. */
-const INLINE_LIMIT = 500;
 
 export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
   description:
@@ -112,7 +110,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token for multi-year or multi-variable queries. When a query exceeds ~500 records, results spill to this canvas for SQL querying. Omit to create a fresh canvas.',
+        'DataCanvas token for multi-year or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas for SQL querying. Omit to create a fresh canvas.',
       ),
   }),
 
@@ -169,7 +167,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     truncated: z
       .boolean()
       .describe(
-        'True when the response exceeded inline record limit and data spilled to canvas_id. Query the canvas for the full dataset.',
+        'True when the response was too large to return inline and data spilled to canvas_id. Query the canvas for the full dataset — it holds every hourly and daily row, including any column the preview omits.',
       ),
   }),
 
@@ -236,23 +234,25 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     const hourlyRecords = data.hourly ? reshapeColumnar(data.hourly) : undefined;
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : undefined;
 
-    const totalRecords = (hourlyRecords?.length ?? 0) + (dailyRecords?.length ?? 0);
     const records = hourlyRecords ?? dailyRecords;
+    const allRecords = [...(hourlyRecords ?? []), ...(dailyRecords ?? [])];
     const dateRange = {
       start: (records?.[0]?.time as string) ?? input.start_date,
       end: (records?.[records.length - 1]?.time as string) ?? input.end_date,
     };
 
-    // DataCanvas spillover for large datasets
-    if (totalRecords > INLINE_LIMIT) {
+    // DataCanvas spillover for payloads too large to return inline
+    if (exceedsInlineBudget(allRecords)) {
       const canvas = getCanvas();
       if (canvas) {
         const instance = await canvas.acquire(input.canvas_id, ctx);
-        const allRecords = [...(hourlyRecords ?? []), ...(dailyRecords ?? [])];
+        // Explicit schema over every staged row — hourly records lead, so a sniffed
+        // window would never reach a daily row. See deriveSpillSchema.
         const spilled = await spillover({
           canvas: instance,
           source: allRecords,
-          previewChars: 80_000,
+          schema: deriveSpillSchema(allRecords),
+          previewChars: PREVIEW_CHARS,
           signal: ctx.signal,
         });
 
@@ -287,7 +287,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       elevation: data.elevation,
       timezone: data.timezone,
       date_range: dateRange,
-      record_count: totalRecords,
+      record_count: allRecords.length,
       hourly: hourlyRecords,
       daily: dailyRecords,
       hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),

@@ -12,13 +12,8 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { type ColumnarBlock, toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { deriveSpillSchema, exceedsInlineBudget, PREVIEW_CHARS } from '../spill-utils.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
-
-/** Inline record limit before DataCanvas spillover. */
-const INLINE_LIMIT = 500;
-
-/** Character budget for the inline preview — mirrors the spillover previewChars budget. */
-const PREVIEW_CHARS = 80_000;
 
 /**
  * Count distinct ensemble members from per-member column names (_memberNN suffix).
@@ -163,7 +158,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token for large multi-member queries. When records exceed ~500, results spill to this canvas for SQL querying. Omit to create a fresh canvas.',
+        'DataCanvas token for large multi-member queries. When a result is too large to return inline — driven by total payload size, so a wide member fan-out can spill at any row count — it spills to this canvas for SQL querying. Omit to create a fresh canvas.',
       ),
   }),
 
@@ -226,7 +221,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     truncated: z
       .boolean()
       .describe(
-        'True when the response exceeded the inline record limit and data spilled to canvas_id. Query the canvas for the full dataset.',
+        'True when the response was too large to return inline and data spilled to canvas_id. Query the canvas for the full dataset — it holds every hourly and daily row, including any column the preview omits.',
       ),
   }),
 
@@ -269,7 +264,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
 
     const hourlyRecords = data.hourly ? reshapeColumnar(data.hourly) : undefined;
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : undefined;
-    const totalRecords = (hourlyRecords?.length ?? 0) + (dailyRecords?.length ?? 0);
+    const allRecords = [...(hourlyRecords ?? []), ...(dailyRecords ?? [])];
 
     /*
      * The API envelope has no top-level model/member metadata: echo the requested
@@ -278,17 +273,20 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     const model = input.models;
     const memberCount = countMembers(data.hourly, data.daily);
 
-    // DataCanvas spillover for large multi-member datasets
-    if (totalRecords > INLINE_LIMIT) {
+    // DataCanvas spillover for payloads too large to return inline
+    if (exceedsInlineBudget(allRecords)) {
       const canvas = getCanvas();
       if (canvas) {
         const instance = await canvas.acquire(input.canvas_id, ctx);
-        const allRecords = [...(hourlyRecords ?? []), ...(dailyRecords ?? [])];
         // Stage the full chronological set — spillover preserves source order on the
-        // canvas. The inline preview is selected separately below (see #14).
+        // canvas. The inline preview is selected separately below (see #14). Explicit
+        // schema over every staged row — a past_days response opens with an all-null
+        // run that would leave a sniffed window typing every member VARCHAR. See
+        // deriveSpillSchema.
         const spilled = await spillover({
           canvas: instance,
           source: allRecords,
+          schema: deriveSpillSchema(allRecords),
           previewChars: PREVIEW_CHARS,
           signal: ctx.signal,
         });
@@ -333,7 +331,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       timezone: data.timezone,
       model,
       member_count: memberCount,
-      record_count: totalRecords,
+      record_count: allRecords.length,
       hourly: hourlyRecords,
       daily: dailyRecords,
       hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),

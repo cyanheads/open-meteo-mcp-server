@@ -15,11 +15,52 @@ vi.mock('@/services/open-meteo/open-meteo-service.js', () => ({
   getOpenMeteoService: () => ({ getEnsemble: mockGetEnsemble }),
 }));
 
-vi.mock('@cyanheads/mcp-ts-core/canvas', () => ({
+// Mock spillover only — the real inferSchemaFromRows backs deriveSpillSchema, so the
+// schema the handler hands to spillover() is genuinely derived, not stubbed.
+vi.mock('@cyanheads/mcp-ts-core/canvas', async (importActual) => ({
+  ...(await importActual<typeof import('@cyanheads/mcp-ts-core/canvas')>()),
   spillover: (...args: unknown[]) => mockSpillover(...args),
 }));
 
 let mockCanvasInstance: unknown;
+
+/** Column type by name from the schema handed to spillover(). */
+const spilledSchemaType = (name: string): string | undefined => {
+  const [opts] = mockSpillover.mock.calls[0] as [{ schema?: { name: string; type: string }[] }];
+  return opts.schema?.find((c) => c.name === name)?.type;
+};
+
+/** Column names in the schema handed to spillover(). */
+const spilledSchemaNames = (): string[] => {
+  const [opts] = mockSpillover.mock.calls[0] as [{ schema?: { name: string }[] }];
+  return (opts.schema ?? []).map((c) => c.name);
+};
+
+/**
+ * A gfs025-shaped hourly block: 31 member columns per variable. Wide enough that a
+ * real 16-day pull overflows the inline budget, matching the live repro.
+ */
+const memberBlock = (
+  time: string[],
+  valueAt: (row: number, member: number) => number | null,
+  variable = 'temperature_2m',
+): Record<string, (number | null)[] | string[]> => {
+  const block: Record<string, (number | null)[] | string[]> = { time };
+  for (let m = 1; m <= 31; m++) {
+    block[`${variable}_member${String(m).padStart(2, '0')}`] = time.map((_, row) =>
+      valueAt(row, m),
+    );
+  }
+  return block;
+};
+
+/** `count` consecutive hourly ISO timestamps. */
+const hourlyTimes = (count: number, from = '2026-06-18T00:00'): string[] =>
+  Array.from({ length: count }, (_, i) => {
+    const d = new Date(from);
+    d.setHours(d.getHours() + i);
+    return d.toISOString().slice(0, 16);
+  });
 
 vi.mock('@/services/canvas-accessor.js', () => ({
   getCanvas: () => mockCanvasInstance,
@@ -242,18 +283,12 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(result.hourly![0]?.temperature_2m_member02).toBe(14.9);
   });
 
-  it('spills to DataCanvas and sets truncated=true when records exceed INLINE_LIMIT', async () => {
-    const count = 502;
-    const time = Array.from({ length: count }, (_, i) => {
-      const d = new Date('2026-06-01T00:00');
-      d.setHours(d.getHours() + i);
-      return d.toISOString().slice(0, 16);
-    });
-    const temperature_2m_member01 = Array.from({ length: count }, (_, i) => 10 + (i % 20));
+  it('spills to DataCanvas and sets truncated=true when the payload exceeds the inline budget', async () => {
+    const time = hourlyTimes(384, '2026-06-01T00:00');
 
     mockGetEnsemble.mockResolvedValue({
       ...MOCK_RESPONSE,
-      hourly: { time, temperature_2m_member01 },
+      hourly: memberBlock(time, (row, m) => 10 + ((row + m) % 20) + m / 100),
       hourly_units: { time: 'iso8601', temperature_2m_member01: '°C' },
     });
 
@@ -262,7 +297,7 @@ describe('openmeteoGetEnsembleTool', () => {
       .map((t, i) => ({ time: t, temperature_2m_member01: 10 + i }));
     mockSpillover.mockResolvedValue({
       spilled: true,
-      handle: { rowCount: count, tableName: 'spilled_ens123' },
+      handle: { rowCount: time.length, tableName: 'spilled_ens123' },
       previewRows,
     });
 
@@ -283,35 +318,58 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(mockSpillover).toHaveBeenCalled();
     expect(result.truncated).toBe(true);
     expect(result.canvas_id).toBe('canvas-ens-456');
-    expect(result.record_count).toBe(count);
+    expect(result.record_count).toBe(time.length);
     expect(result.table_name).toBe('spilled_ens123'); // #18: exact staged table name surfaced
     // Spillover path also derives member_count from the source columns
-    expect(result.member_count).toBe(1);
+    expect(result.member_count).toBe(31);
   });
 
-  it('omits canvas_id when records exceed INLINE_LIMIT but spillover stays under its byte threshold', async () => {
-    // Regression: spillover() stages a table only past its byte threshold — when it
-    // returns spilled: false, no canvas_id must be surfaced (it would be empty).
-    const count = 502;
-    const time = Array.from({ length: count }, (_, i) => {
-      const d = new Date('2026-06-01T00:00');
-      d.setHours(d.getHours() + i);
-      return d.toISOString().slice(0, 16);
-    });
-    const temperature_2m_member01 = Array.from({ length: count }, () => 15.0);
-
+  it('spills a wide member fan-out that sits far below 500 rows', async () => {
+    // #23: 384 rows × 31 member columns — the old row-count gate let this return
+    // ~376 KB inline with no canvas_id and no retrieval path.
+    const time = hourlyTimes(384, '2026-06-01T00:00');
     mockGetEnsemble.mockResolvedValue({
       ...MOCK_RESPONSE,
-      hourly: { time, temperature_2m_member01 },
+      hourly: memberBlock(time, (row, m) => 10 + ((row + m) % 20) + m / 100),
+    });
+
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: time.length, tableName: 'spilled_wide' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-wide' }) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'gfs025',
+      forecast_days: 16,
+    });
+
+    const result = await openmeteoGetEnsembleTool.handler(input, ctx);
+    expect(time.length).toBeLessThan(500);
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-wide');
+    expect(result.table_name).toBe('spilled_wide');
+  });
+
+  it('returns no canvas handles when spillover declines to stage a table', async () => {
+    // The handler must never surface a canvas_id pointing at an empty canvas —
+    // spilled.handle only exists on the spilled branch of the union.
+    const time = hourlyTimes(600, '2026-06-01T00:00');
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: memberBlock(time, () => 15.0),
     });
 
     mockSpillover.mockResolvedValue({
       spilled: false,
       previewRows: time.map((t) => ({ time: t, temperature_2m_member01: 15.0 })),
     });
-
-    const mockInstance = { canvasId: 'canvas-unused-2' };
-    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-unused-2' }) };
 
     const ctx = createMockContext();
     const input = openmeteoGetEnsembleTool.input.parse({
@@ -324,23 +382,18 @@ describe('openmeteoGetEnsembleTool', () => {
     const result = await openmeteoGetEnsembleTool.handler(input, ctx);
     expect(result.truncated).toBe(false);
     expect(result.canvas_id).toBeUndefined();
-    expect(result.record_count).toBe(count);
-    expect(result.table_name).toBeUndefined(); // #18: no table name when spillover did not spill
+    expect(result.table_name).toBeUndefined();
   });
 
-  it('returns inline without canvas when records are within INLINE_LIMIT', async () => {
-    const count = 500;
-    const time = Array.from({ length: count }, (_, i) => {
-      const d = new Date('2026-06-01T00:00');
-      d.setHours(d.getHours() + i);
-      return d.toISOString().slice(0, 16);
-    });
-    const temperature_2m_member01 = Array.from({ length: count }, () => 15.0);
-
+  it('returns inline without touching a canvas when the payload fits', async () => {
+    const time = hourlyTimes(500, '2026-06-01T00:00');
     mockGetEnsemble.mockResolvedValue({
       ...MOCK_RESPONSE,
-      hourly: { time, temperature_2m_member01 },
+      hourly: { time, temperature_2m_member01: time.map(() => 15.0) },
     });
+
+    const acquire = vi.fn();
+    mockCanvasInstance = { acquire };
 
     const ctx = createMockContext();
     const input = openmeteoGetEnsembleTool.input.parse({
@@ -353,6 +406,86 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(result.canvas_id).toBeUndefined();
     expect(result.record_count).toBe(500);
     expect(result.table_name).toBeUndefined(); // #18: no table name on the non-spill path
+    // A result that fits must not mint a canvas — an acquired-but-unused canvas
+    // holds a per-tenant slot the caller never learns about.
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it('types member columns from real values when past_days leads with an all-null run', async () => {
+    // #21: the leading placeholder rows exhaust spillover()'s own sniff window, so
+    // every member column would be typed VARCHAR and its numbers String()-coerced.
+    const total = 624;
+    const nullLead = 240;
+    const time = hourlyTimes(total);
+
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: memberBlock(time, (row, m) => (row < nullLead ? null : 15 + ((row + m) % 10) + 0.9)),
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: total, tableName: 'spilled_types' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-types' }) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m'],
+      models: 'gfs025',
+      forecast_days: 16,
+      past_days: 10,
+    });
+    await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    // An explicit schema is passed at all — spillover() must never infer here.
+    const [opts] = mockSpillover.mock.calls[0] as [{ schema?: unknown }];
+    expect(opts.schema).toBeDefined();
+    expect(spilledSchemaType('temperature_2m_member01')).toBe('DOUBLE');
+    expect(spilledSchemaType('temperature_2m_member31')).toBe('DOUBLE');
+    expect(spilledSchemaType('time')).toBe('VARCHAR');
+  });
+
+  it('covers both cadences in the spill schema when hourly and daily are requested', async () => {
+    // #22: hourly records are concatenated ahead of daily ones, so a preview-sized
+    // sniff window never reaches a daily row and daily-only columns are never created.
+    const hourlyTime = hourlyTimes(400);
+    const dailyTime = Array.from(
+      { length: 16 },
+      (_, i) => `2026-06-${String(i + 1).padStart(2, '0')}`,
+    );
+
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: memberBlock(hourlyTime, (row, m) => 10 + ((row + m) % 20) + 0.5),
+      daily: memberBlock(dailyTime, (row, m) => 20 + ((row + m) % 8) + 0.5, 'temperature_2m_max'),
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: hourlyTime.length + dailyTime.length, tableName: 'spilled_union' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-union' }) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m'],
+      daily_variables: ['temperature_2m_max'],
+      models: 'gfs025',
+      forecast_days: 16,
+      past_days: 10,
+    });
+    await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    const columns = spilledSchemaNames();
+    expect(columns).toContain('temperature_2m_member01');
+    expect(columns).toContain('temperature_2m_max_member01'); // daily-only column survives
+    expect(columns).toContain('temperature_2m_max_member31');
+    expect(spilledSchemaType('temperature_2m_max_member01')).toBe('DOUBLE');
   });
 
   it('formats output with model info and attribution', () => {
@@ -380,21 +513,17 @@ describe('openmeteoGetEnsembleTool', () => {
     // null while the staged canvas holds the useful forecast rows.
     const total = 624;
     const nullLead = 240; // leading all-null past-day rows
-    const time = Array.from({ length: total }, (_, i) => {
-      const d = new Date('2026-06-18T00:00');
-      d.setHours(d.getHours() + i);
-      return d.toISOString().slice(0, 16);
-    });
-    const temperature_2m_member01 = Array.from({ length: total }, (_, i) =>
-      i < nullLead ? null : 15 + (i % 10),
-    );
-    const temperature_2m_member02 = Array.from({ length: total }, (_, i) =>
-      i < nullLead ? null : 14 + (i % 8),
-    );
+    const time = hourlyTimes(total);
+
+    // member01 starts at 15 and member02 at 14 on the first row carrying data.
+    const valueAt = (row: number, member: number) => {
+      if (row < nullLead) return null;
+      return member === 1 ? 15 + (row % 10) : 14 + (row % 8);
+    };
 
     mockGetEnsemble.mockResolvedValue({
       ...MOCK_RESPONSE,
-      hourly: { time, temperature_2m_member01, temperature_2m_member02 },
+      hourly: memberBlock(time, valueAt),
       hourly_units: {
         time: 'iso8601',
         temperature_2m_member01: '°C',

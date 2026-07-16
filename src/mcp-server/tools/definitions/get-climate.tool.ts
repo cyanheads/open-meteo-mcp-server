@@ -13,10 +13,8 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { deriveSpillSchema, exceedsInlineBudget, PREVIEW_CHARS } from '../spill-utils.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
-
-/** Inline record limit before DataCanvas spillover. */
-const INLINE_LIMIT = 500;
 
 export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
   description:
@@ -118,7 +116,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token for multi-decade or multi-model queries. When a query exceeds ~500 records, results spill to this canvas for SQL querying. Omit to create a fresh canvas.',
+        'DataCanvas token for multi-decade or multi-model queries. When a result is too large to return inline — driven by total payload size, so a wide multi-model pull can spill at any row count — it spills to this canvas for SQL querying. Omit to create a fresh canvas.',
       ),
   }),
 
@@ -166,7 +164,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     truncated: z
       .boolean()
       .describe(
-        'True when the response exceeded inline record limit and data spilled to canvas_id. Query the canvas for the full dataset.',
+        'True when the response was too large to return inline and data spilled to canvas_id. Query the canvas for the full dataset.',
       ),
   }),
 
@@ -244,15 +242,18 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       end: (dailyRecords[dailyRecords.length - 1]?.time as string) ?? input.end_date,
     };
 
-    // DataCanvas spillover for multi-decade / multi-model datasets
-    if (dailyRecords.length > INLINE_LIMIT) {
+    // DataCanvas spillover for payloads too large to return inline
+    if (exceedsInlineBudget(dailyRecords)) {
       const canvas = getCanvas();
       if (canvas) {
         const instance = await canvas.acquire(input.canvas_id, ctx);
+        // Explicit schema over every staged row — a variable a model doesn't carry is
+        // null for that model's whole column. See deriveSpillSchema.
         const spilled = await spillover({
           canvas: instance,
           source: dailyRecords,
-          previewChars: 80_000,
+          schema: deriveSpillSchema(dailyRecords),
+          previewChars: PREVIEW_CHARS,
           signal: ctx.signal,
         });
 

@@ -341,7 +341,7 @@ errors: [
   timezone: z.string().default('auto')
     .describe('IANA timezone or "auto". Default "auto".'),
   canvas_id: z.string().optional()
-    .describe('DataCanvas token for multi-year or multi-variable queries. When a query exceeds ~500 records, results spill to this canvas for SQL querying. Omit to create a fresh canvas.'),
+    .describe('DataCanvas token for multi-year or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas for SQL querying. Omit to create a fresh canvas.'),
 }
 ```
 
@@ -366,9 +366,9 @@ errors: [
   daily_units: z.record(z.string()).optional()
     .describe('Variable → unit string for daily data.'),
   canvas_id: z.string().optional()
-    .describe('DataCanvas token — present when record_count exceeded inline limit. Query with SQL using this token.'),
+    .describe('DataCanvas token — present only when truncated is true (data spilled). Query with SQL using this token.'),
   truncated: z.boolean()
-    .describe('True when the response exceeded inline record limit and data spilled to canvas_id. Query the canvas for the full dataset.'),
+    .describe('True when the response was too large to return inline and data spilled to canvas_id. Query the canvas for the full dataset — it holds every hourly and daily row, including any column the preview omits.'),
 }
 ```
 
@@ -546,7 +546,13 @@ Each tool is independently testable. The reshape helper is the only shared inter
 
 **No resources.** Weather time-series has no stable URI — it changes by the hour, is keyed by coordinates + variables + timezone, and doesn't map to addressable entities. Resources add no value here.
 
-**DataCanvas for historical only.** `openmeteo_get_historical` is the only tool where response size is unbounded (multi-year hourly = tens of thousands of rows). Forecast (max 16 days × 24h = 384 rows), marine (max 7 days × 24h = 168 rows), and air quality (max 7 days × 24h = 168 rows) fit inline. Historical gets optional `canvas_id` input and `truncated`/`canvas_id` output.
+**DataCanvas for historical, ensemble, and climate.** These three are the tools whose response size is unbounded: multi-year hourly archive pulls reach tens of thousands of rows, and ensemble and climate fan a variable out into one column per member or per model, so a payload grows by width as well as by length. Marine (max 7 days × 24h = 168 rows) and air quality (same) fit inline. Each of the three gets an optional `canvas_id` input plus `truncated`/`canvas_id`/`table_name` output.
+
+**Spill eligibility is payload size, not row count.** The three tools measure the serialized size of the records they are about to return against one budget (`PREVIEW_CHARS` in `src/mcp-server/tools/spill-utils.ts`) and spill past it. That budget is the same number handed to `spillover()` as `previewChars`, which is what makes the precheck agree with the helper exactly: a result that would not spill never acquires a canvas. A row-count gate can only disagree — it misses a wide result that overflows the budget in a few hundred rows (a 16-day ensemble fan-out is ~376 KB in 384 rows), and it acquires a canvas for a narrow result that `spillover()` then declines to stage, burning a per-tenant canvas slot the caller never learns about because `canvas_id` is only surfaced on a real spill.
+
+**Spill schemas are derived from the full record set, never sniffed.** The three tools pass `spillover()` an explicit `schema` built from every staged row. Left to infer, `spillover()` samples only its own preview buffer, and two real response shapes defeat that window: an ensemble `past_days` response opens with a long run of all-null placeholder rows (the models don't hindcast), leaving every column with no non-null evidence and typing them all VARCHAR; and hourly records are concatenated ahead of daily ones, so a large hourly pull exhausts the window before a daily row is sampled — and a column missing from the schema is never created on the table at all. Types come from every observed value rather than the first non-null one: `precipitation` arrives as `[0, 0.5, 0]`, whose leading `0` alone would type the column integer and truncate every fractional reading, and `sunrise`/`sunset` are ISO 8601 strings, so a blanket "weather columns are numeric" rule would corrupt them.
+
+**One union table, not per-cadence tables.** Hourly and daily records stage into a single table under a union schema. The tools' output exposes one `table_name`, so separate tables would need a second handle; and the canvas append path treats a key missing from a row exactly like an explicit null, so ragged rows need no padding. Callers separate cadences by timestamp shape — hourly is `YYYY-MM-DDTHH:MM`, daily is `YYYY-MM-DD` (`WHERE time LIKE '%T%'`) — the same guarantee the tools' own preview-splitting relies on, so a dedicated discriminator column would be redundant.
 
 **Marine `daily_variables` included.** Live probe confirmed the marine API supports `daily` alongside `hourly`. Surfacing both mirrors the forecast/historical UX and lets agents get daily wave summaries without parsing 168 hourly records.
 

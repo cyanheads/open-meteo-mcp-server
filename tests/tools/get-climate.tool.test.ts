@@ -15,8 +15,11 @@ vi.mock('@/services/open-meteo/open-meteo-service.js', () => ({
   getOpenMeteoService: () => ({ getClimate: mockGetClimate }),
 }));
 
-// Mock the canvas spillover helper — allows per-test control over spill behaviour
-vi.mock('@cyanheads/mcp-ts-core/canvas', () => ({
+// Mock the canvas spillover helper — allows per-test control over spill behaviour.
+// The real inferSchemaFromRows backs deriveSpillSchema, so the schema the handler
+// hands to spillover() is genuinely derived, not stubbed.
+vi.mock('@cyanheads/mcp-ts-core/canvas', async (importActual) => ({
+  ...(await importActual<typeof import('@cyanheads/mcp-ts-core/canvas')>()),
   spillover: (...args: unknown[]) => mockSpillover(...args),
 }));
 
@@ -26,6 +29,44 @@ let mockCanvasInstance: unknown;
 vi.mock('@/services/canvas-accessor.js', () => ({
   getCanvas: () => mockCanvasInstance,
 }));
+
+/** Column type by name from the schema the handler handed to spillover(). */
+const spilledSchemaType = (name: string): string | undefined => {
+  const [opts] = mockSpillover.mock.calls[0] as [{ schema?: { name: string; type: string }[] }];
+  return opts.schema?.find((c) => c.name === name)?.type;
+};
+
+/** `count` consecutive ISO dates from `from`. */
+const dailyDates = (count: number, from = '2049-01-01'): string[] =>
+  Array.from({ length: count }, (_, i) => {
+    const d = new Date(from);
+    d.setDate(d.getDate() + i);
+    return d.toISOString().slice(0, 10);
+  });
+
+/** All seven CMIP6 models, the widest fan-out the tool accepts. */
+const ALL_MODELS = [
+  'CMCC_CM2_VHR4',
+  'FGOALS_f3_H',
+  'HiRAM_SIT_HR',
+  'MRI_AGCM3_2_S',
+  'EC_Earth3P_HR',
+  'MPI_ESM1_2_XR',
+  'NICAM16_8S',
+];
+
+/** A per-model suffixed daily block — one column per model, as the live API returns. */
+const modelBlock = (
+  time: string[],
+  valueAt: (row: number, model: number) => number | null,
+  variable = 'temperature_2m_max',
+): Record<string, (number | null)[] | string[]> => {
+  const block: Record<string, (number | null)[] | string[]> = { time };
+  ALL_MODELS.forEach((model, m) => {
+    block[`${variable}_${model}`] = time.map((_, row) => valueAt(row, m));
+  });
+  return block;
+};
 
 /**
  * Live multi-model response shape (2049-01-01…05, models=CMCC_CM2_VHR4,MRI_AGCM3_2_S,
@@ -336,16 +377,11 @@ describe('openmeteoGetClimateTool', () => {
     });
   });
 
-  it('spills to DataCanvas and sets truncated=true when records exceed INLINE_LIMIT', async () => {
-    // Build a response with 502 daily records (> INLINE_LIMIT of 500)
-    const days = 502;
-    const time = Array.from({ length: days }, (_, i) => {
-      const d = new Date('2049-01-01');
-      d.setDate(d.getDate() + i);
-      return d.toISOString().slice(0, 10);
-    });
-    const temperature_2m_max_CMCC_CM2_VHR4 = Array.from({ length: days }, (_, i) => 10 + (i % 20));
-    const temperature_2m_max_MRI_AGCM3_2_S = Array.from({ length: days }, (_, i) => 8 + (i % 20));
+  it('spills to DataCanvas and sets truncated=true when the payload exceeds the inline budget', async () => {
+    const days = 2000;
+    const time = dailyDates(days, '2045-01-01');
+    const temperature_2m_max_CMCC_CM2_VHR4 = time.map((_, i) => 10 + (i % 20) + 0.5);
+    const temperature_2m_max_MRI_AGCM3_2_S = time.map((_, i) => 8 + (i % 20) + 0.5);
 
     mockGetClimate.mockResolvedValue({
       ...MOCK_MULTI_MODEL_RESPONSE,
@@ -373,8 +409,8 @@ describe('openmeteoGetClimateTool', () => {
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
-      start_date: '2049-01-01',
-      end_date: '2050-05-17',
+      start_date: '2045-01-01',
+      end_date: '2050-06-23',
       daily_variables: ['temperature_2m_max'],
       models: ['CMCC_CM2_VHR4', 'MRI_AGCM3_2_S'],
     });
@@ -390,18 +426,90 @@ describe('openmeteoGetClimateTool', () => {
     expect(result.table_name).toBe('spilled_abc123'); // #18: exact staged table name surfaced
   });
 
-  it('omits canvas_id when records exceed INLINE_LIMIT but spillover stays under its byte threshold', async () => {
-    // Regression parity with get-historical: 500–~2000 records trigger the spillover
-    // path but can stay under the ~80 KB preview threshold, so nothing is staged
-    // (spilled: false). The handler must not return a canvas_id pointing at an
-    // empty canvas.
-    const days = 502;
-    const time = Array.from({ length: days }, (_, i) => {
-      const d = new Date('2049-01-01');
-      d.setDate(d.getDate() + i);
-      return d.toISOString().slice(0, 10);
+  it('spills a wide multi-model pull that sits at 500 rows', async () => {
+    // #23: 500 rows × 7 model columns — the old row-count gate (> 500) let this
+    // return ~147 KB inline with no canvas_id and no retrieval path.
+    const days = 500;
+    const time = dailyDates(days, '2030-01-01');
+
+    mockGetClimate.mockResolvedValue({
+      ...MOCK_MULTI_MODEL_RESPONSE,
+      daily: modelBlock(time, (row, m) => 10 + ((row + m) % 20) + 0.5),
     });
-    const temperature_2m_max = Array.from({ length: days }, (_, i) => 10 + (i % 20));
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: days, tableName: 'spilled_wide' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-wide' }) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.33,
+      start_date: '2030-01-01',
+      end_date: '2031-05-15',
+      daily_variables: ['temperature_2m_max'],
+      models: ALL_MODELS,
+    });
+
+    const result = await openmeteoGetClimateTool.handler(input, ctx);
+    expect(days).not.toBeGreaterThan(500); // the old gate required > 500
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-wide');
+    expect(result.table_name).toBe('spilled_wide');
+  });
+
+  it('types a model column the requested variable is missing from without VARCHAR-ing its peers', async () => {
+    // #21: a variable a model doesn't carry is null for that model's whole column.
+    // Deriving from a leading window would see no non-null evidence for it — and on
+    // a wide enough pull, for every column — and fall back to VARCHAR.
+    const days = 1200;
+    const time = dailyDates(days, '2045-01-01');
+
+    mockGetClimate.mockResolvedValue({
+      ...MOCK_MULTI_MODEL_RESPONSE,
+      daily: {
+        time,
+        // CMCC_CM2_VHR4 does not carry shortwave_radiation_sum — null for every row.
+        shortwave_radiation_sum_CMCC_CM2_VHR4: time.map(() => null),
+        shortwave_radiation_sum_MRI_AGCM3_2_S: time.map((_, i) => 12.5 + (i % 8)),
+        precipitation_sum_MRI_AGCM3_2_S: time.map((_, i) => (i % 3 === 0 ? 0.5 : 0)),
+      },
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: days, tableName: 'spilled_sparse' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-sparse' }) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.33,
+      start_date: '2045-01-01',
+      end_date: '2048-04-14',
+      daily_variables: ['shortwave_radiation_sum', 'precipitation_sum'],
+      models: ['CMCC_CM2_VHR4', 'MRI_AGCM3_2_S'],
+    });
+    await openmeteoGetClimateTool.handler(input, ctx);
+
+    // The model that carries the variable keeps a numeric type…
+    expect(spilledSchemaType('shortwave_radiation_sum_MRI_AGCM3_2_S')).toBe('DOUBLE');
+    // …and precipitation stays numeric despite its leading whole zeros.
+    expect(spilledSchemaType('precipitation_sum_MRI_AGCM3_2_S')).toBe('DOUBLE');
+    // The genuinely all-null column has no evidence to type it — VARCHAR is the
+    // framework's documented fallback, and every cell in it is null regardless.
+    expect(spilledSchemaType('shortwave_radiation_sum_CMCC_CM2_VHR4')).toBe('VARCHAR');
+  });
+
+  it('returns no canvas handles when spillover declines to stage a table', async () => {
+    // The handler must never surface a canvas_id pointing at an empty canvas —
+    // spilled.handle only exists on the spilled branch of the union.
+    const days = 2000;
+    const time = dailyDates(days, '2045-01-01');
+    const temperature_2m_max = time.map((_, i) => 10 + (i % 20) + 0.5);
 
     mockGetClimate.mockResolvedValue({
       ...MOCK_MULTI_MODEL_RESPONSE,
@@ -412,7 +520,7 @@ describe('openmeteoGetClimateTool', () => {
     // Everything fit inline — previewRows carry the full dataset, no table staged
     mockSpillover.mockResolvedValue({
       spilled: false,
-      previewRows: time.map((t, i) => ({ time: t, temperature_2m_max: 10 + (i % 20) })),
+      previewRows: time.map((t, i) => ({ time: t, temperature_2m_max: 10 + (i % 20) + 0.5 })),
     });
 
     const mockInstance = { canvasId: 'canvas-unused-1' };
@@ -422,8 +530,8 @@ describe('openmeteoGetClimateTool', () => {
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
-      start_date: '2049-01-01',
-      end_date: '2050-05-17',
+      start_date: '2045-01-01',
+      end_date: '2050-06-23',
       daily_variables: ['temperature_2m_max'],
     });
 
@@ -433,6 +541,38 @@ describe('openmeteoGetClimateTool', () => {
     expect(result.record_count).toBe(days);
     expect(result.daily).toHaveLength(days);
     expect(result.table_name).toBeUndefined(); // #18: no table name when spillover did not spill
+  });
+
+  it('returns inline without touching a canvas when the payload fits', async () => {
+    const days = 500;
+    const time = dailyDates(days, '2049-01-01');
+
+    mockGetClimate.mockResolvedValue({
+      ...MOCK_MULTI_MODEL_RESPONSE,
+      daily_units: { time: 'iso8601', temperature_2m_max: '°C' },
+      daily: { time, temperature_2m_max: time.map(() => 15.0) },
+    });
+
+    const acquire = vi.fn();
+    mockCanvasInstance = { acquire };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.33,
+      start_date: '2049-01-01',
+      end_date: '2050-05-15',
+      daily_variables: ['temperature_2m_max'],
+    });
+
+    const result = await openmeteoGetClimateTool.handler(input, ctx);
+    expect(result.truncated).toBe(false);
+    expect(result.canvas_id).toBeUndefined();
+    expect(result.record_count).toBe(days);
+    expect(result.table_name).toBeUndefined();
+    // A result that fits must not mint a canvas — an acquired-but-unused canvas
+    // holds a per-tenant slot the caller never learns about.
+    expect(acquire).not.toHaveBeenCalled();
   });
 
   it('formats output with models line and attribution', () => {
