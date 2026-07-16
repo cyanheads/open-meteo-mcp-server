@@ -40,7 +40,7 @@
         },
         {
           "name": "CANVAS_PROVIDER_TYPE",
-          "description": "Canvas engine for openmeteo_get_historical / openmeteo_get_ensemble / openmeteo_get_climate spillover. Set to 'duckdb' to enable DataCanvas and the dataframe_query / dataframe_describe tools. Default 'none' (spillover disabled).",
+          "description": "Canvas engine for openmeteo_get_historical / openmeteo_get_ensemble / openmeteo_get_flood / openmeteo_get_climate spillover. Set to 'duckdb' to enable DataCanvas and the dataframe_query / dataframe_describe tools. Default 'none' (spillover disabled).",
           "format": "string",
           "isRequired": false,
           "default": "none"
@@ -104,7 +104,7 @@
         },
         {
           "name": "CANVAS_PROVIDER_TYPE",
-          "description": "Canvas engine for openmeteo_get_historical / openmeteo_get_ensemble / openmeteo_get_climate spillover. Set to 'duckdb' to enable DataCanvas and the dataframe_query / dataframe_describe tools. Default 'none' (spillover disabled).",
+          "description": "Canvas engine for openmeteo_get_historical / openmeteo_get_ensemble / openmeteo_get_flood / openmeteo_get_climate spillover. Set to 'duckdb' to enable DataCanvas and the dataframe_query / dataframe_describe tools. Default 'none' (spillover disabled).",
           "format": "string",
           "isRequired": false,
           "default": "none"

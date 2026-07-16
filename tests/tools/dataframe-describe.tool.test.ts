@@ -65,7 +65,7 @@ describe('openmeteoDataframeDescribeTool', () => {
         reason: 'canvas_not_found',
         recovery: {
           hint: expect.stringContaining(
-            'openmeteo_get_historical, openmeteo_get_ensemble, or openmeteo_get_climate',
+            'openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate',
           ),
         },
       },

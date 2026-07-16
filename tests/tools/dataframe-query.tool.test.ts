@@ -59,7 +59,7 @@ describe('openmeteoDataframeQueryTool', () => {
         reason: 'canvas_not_found',
         recovery: {
           hint: expect.stringContaining(
-            'openmeteo_get_historical, openmeteo_get_ensemble, or openmeteo_get_climate',
+            'openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate',
           ),
         },
       },
@@ -261,6 +261,64 @@ describe('openmeteoDataframeQueryTool', () => {
     expect(text).toContain('avg_temp');
     expect(text).toContain('-1.5');
     expect(text).toContain('2.1');
+  });
+
+  it('serializes struct and list cells instead of coercing them to strings (#20)', () => {
+    // Real shape from `SELECT struct_pack(temp := ..., rain := ...) AS nested,
+    // [temperature_2m, precipitation] AS values`. String() renders the struct as
+    // [object Object] and flattens the list to a bare comma join — content[] must
+    // carry the same values structuredContent.rows does.
+    const text =
+      openmeteoDataframeQueryTool.format!({
+        canvas_id: 'testcanvas01',
+        rows: [
+          { nested: { temp: 3.6, rain: 0 }, values: [3.6, 0] },
+          { nested: { temp: 3.2, rain: 0 }, values: [3.2, 0] },
+        ],
+        row_count: 2,
+      })[0]?.text ?? '';
+    expect(text).toContain('| {"temp":3.6,"rain":0} | [3.6,0] |');
+    expect(text).toContain('| {"temp":3.2,"rain":0} | [3.2,0] |');
+    expect(text).not.toContain('[object Object]');
+  });
+
+  it('escapes literal pipes so a cell cannot break the table row', () => {
+    // A pipe is not JSON-significant, so JSON.stringify passes it through verbatim;
+    // unescaped it ends the cell early and misaligns the row's column count. Plain
+    // string cells carry the same hazard.
+    const text =
+      openmeteoDataframeQueryTool.format!({
+        canvas_id: 'testcanvas01',
+        rows: [{ nested: { note: 'pipe|test' }, plain: 'a|b' }],
+        row_count: 1,
+      })[0]?.text ?? '';
+    expect(text).toContain('| {"note":"pipe\\|test"} | a\\|b |');
+    // Header + separator + one data row, each with exactly 2 columns.
+    const dataRow = text.split('\n').find((l) => l.includes('pipe'));
+    expect(dataRow?.split(/(?<!\\)\|/).length).toBe(4); // '' + 2 cells + ''
+  });
+
+  it('renders primitive and null cells on the unserialized path', () => {
+    // BIGINT/DATE/TIMESTAMP arrive pre-marshaled as strings, so they must render
+    // bare — not JSON-quoted — and a null cell stays empty.
+    const text =
+      openmeteoDataframeQueryTool.format!({
+        canvas_id: 'testcanvas01',
+        rows: [
+          {
+            big: '123456789012345',
+            day: '2020-01-01',
+            stamp: '2020-01-01 00:00:00',
+            n: -2.3,
+            ok: true,
+            missing: null,
+          },
+        ],
+        row_count: 1,
+      })[0]?.text ?? '';
+    expect(text).toContain(
+      '| 123456789012345 | 2020-01-01 | 2020-01-01 00:00:00 | -2.3 | true |  |',
+    );
   });
 
   it('shows truncation notice when row_count exceeds 100', () => {

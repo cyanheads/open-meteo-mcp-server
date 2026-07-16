@@ -1,8 +1,8 @@
 /**
  * @fileoverview Shared DataCanvas spill helpers for the spill-capable weather tools
- * (openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_climate). Owns the
- * one inline budget every spill decision is measured against, and the column schema
- * handed to `spillover()`.
+ * (openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood,
+ * openmeteo_get_climate). Owns the one inline budget every spill decision is measured
+ * against, and the column schema handed to `spillover()`.
  * @module mcp-server/tools/spill-utils
  */
 

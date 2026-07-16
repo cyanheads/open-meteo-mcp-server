@@ -40,9 +40,9 @@ Eleven tools covering geocoding, weather forecasts, historical climate, probabil
 | `openmeteo_get_air_quality` | Modeled CAMS air quality forecast: PM2.5, PM10, NO2, O3, CO, dust, pollen, and European/US AQI indices |
 | `openmeteo_get_elevation` | Terrain elevation from Copernicus DEM (~90m resolution) for up to 100 coordinate pairs per call |
 | `openmeteo_get_ensemble` | Probabilistic ensemble forecast: per-member hourly/daily time series (up to 51 members, 16 days) for exceedance and uncertainty analysis |
-| `openmeteo_get_flood` | GloFAS river discharge forecast (up to 210 days) and reanalysis (1984–present); coordinate-based, snaps to nearest river |
+| `openmeteo_get_flood` | GloFAS river discharge forecast (up to 210 days) or reanalysis (1984–present); coordinate-based, snaps to nearest river; large ranges spill to DataCanvas |
 | `openmeteo_get_climate` | Bias-corrected daily CMIP6 climate projections (1950–2050) across up to 7 models; large ranges spill to DataCanvas |
-| `openmeteo_dataframe_describe` | List tables and columns on a DataCanvas staged by `openmeteo_get_historical`, `openmeteo_get_ensemble`, or `openmeteo_get_climate` |
+| `openmeteo_dataframe_describe` | List tables and columns on a DataCanvas staged by `openmeteo_get_historical`, `openmeteo_get_ensemble`, `openmeteo_get_flood`, or `openmeteo_get_climate` |
 | `openmeteo_dataframe_query` | Run a read-only SQL SELECT against tables staged on a DataCanvas |
 
 ### `openmeteo_geocode`
@@ -137,10 +137,11 @@ GloFAS (Global Flood Awareness System) river discharge forecast and reanalysis v
 
 - Coordinate-based — no river ID needed; the API snaps to the nearest river grid point automatically
 - Forecast horizon up to 210 days; reanalysis history from 1984-01-01 to present
-- Use `forecast_days` for future outlook, `start_date`/`end_date` for historical analysis; both can be combined
+- One mode per call: `forecast_days` for the future outlook, or `start_date` and `end_date` together for historical analysis. The two are mutually exclusive, and a date range needs both ends — a lone `start_date` or `end_date` is rejected
 - Available daily variables: `river_discharge` (ensemble mean), `river_discharge_mean`, `river_discharge_min`, `river_discharge_max`, `river_discharge_median`, `river_discharge_p25` (25th percentile), `river_discharge_p75` (75th percentile) — all in m³/s
 - Returns null for coordinates outside GloFAS coverage (e.g., open ocean or areas without river network data)
 - Discharge values reflect the GloFAS ensemble — percentile variables expose the uncertainty spread
+- Wide reanalysis ranges spill to DataCanvas when `CANVAS_PROVIDER_TYPE=duckdb` — output includes `canvas_id` and `truncated: true`; query with `openmeteo_dataframe_query`
 
 ---
 
@@ -173,7 +174,7 @@ Open-Meteo–specific:
 - Self-contained geocoding: `openmeteo_geocode` resolves place names so agents don't need a separate geocoder
 - ERA5 archive from 1940 to present with same variable schema as the forecast API — direct past/forecast comparisons on one schema
 - Automatic columnar-to-record reshape: Open-Meteo returns parallel time/variable arrays; handlers convert to per-timestamp records with a `*_units` map
-- DataCanvas spillover for `openmeteo_get_historical`, `openmeteo_get_ensemble`, and `openmeteo_get_climate`: a result too large to return inline registers a DuckDB dataframe for SQL querying, staging every hourly and daily row with its upstream numeric type intact
+- DataCanvas spillover for `openmeteo_get_historical`, `openmeteo_get_ensemble`, `openmeteo_get_flood`, and `openmeteo_get_climate`: a result too large to return inline registers a DuckDB dataframe for SQL querying, staging every hourly and daily row with its upstream numeric type intact
 - Configurable base URLs for all eight API endpoints (forecast, archive, marine, air quality, geocoding, ensemble, flood, climate) — override for testing or self-hosted deployments
 - **Attribution:** Weather data by [Open-Meteo.com](https://open-meteo.com/) (CC BY 4.0). Non-commercial use is free and keyless; commercial use requires Open-Meteo's paid API tier (~10,000 req/day, 5,000/hour fair-use ceiling for non-commercial)
 
@@ -301,7 +302,7 @@ All configuration is validated at startup via Zod schemas. No API key is require
 | `MCP_GC_PRESSURE_INTERVAL_MS` | Opt-in forced-GC interval (ms, Bun only). Set to `60000` if heap growth is observed under sustained HTTP traffic. | `0` |
 | `LOGS_DIR` | Directory for log files (Node.js only) | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
-| `CANVAS_PROVIDER_TYPE` | Canvas engine for `openmeteo_get_historical` / `openmeteo_get_ensemble` / `openmeteo_get_climate` spillover: `duckdb` or `none` | `none` |
+| `CANVAS_PROVIDER_TYPE` | Canvas engine for `openmeteo_get_historical` / `openmeteo_get_ensemble` / `openmeteo_get_flood` / `openmeteo_get_climate` spillover: `duckdb` or `none` | `none` |
 | `OPEN_METEO_API_BASE_URL` | Override for the main forecast + elevation API | `https://api.open-meteo.com` |
 | `OPEN_METEO_ARCHIVE_BASE_URL` | Override for the ERA5 historical archive API | `https://archive-api.open-meteo.com` |
 | `OPEN_METEO_MARINE_BASE_URL` | Override for the marine forecast API | `https://marine-api.open-meteo.com` |
@@ -354,7 +355,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/config` | Server-specific environment variable parsing and validation with Zod |
 | `src/mcp-server/tools/definitions` | Tool definitions (`*.tool.ts`) — one file per tool; includes `dataframe-describe.tool.ts` and `dataframe-query.tool.ts` |
 | `src/services/open-meteo` | Open-Meteo HTTP client wrapping all nine endpoints with retry, error classification, and columnar reshape |
-| `src/services/canvas-accessor.ts` | DataCanvas accessor for `openmeteo_get_historical` / `openmeteo_get_ensemble` / `openmeteo_get_climate` spillover |
+| `src/services/canvas-accessor.ts` | DataCanvas accessor for `openmeteo_get_historical` / `openmeteo_get_ensemble` / `openmeteo_get_flood` / `openmeteo_get_climate` spillover |
 | `tests/` | Unit and integration tests mirroring `src/` |
 
 ## Development guide
