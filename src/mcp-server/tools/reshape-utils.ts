@@ -26,12 +26,18 @@ export function reshapeColumnar(block: ColumnarBlock): TimeRecord[] {
 
 /**
  * Format a units map as a human-readable string for `format()` output.
- * e.g. `temperature_2m: °C | precipitation: mm`
+ * e.g. `time: iso8601 | temperature_2m: °C | precipitation: mm`
+ *
+ * Every entry is rendered, `time` included. This is a units *map*, and upstream
+ * gives `time` a real unit (`iso8601`) like any other key — dropping it would
+ * leave `content[]` carrying less than `structuredContent.*_units`, which keeps
+ * the entry. Not to be confused with {@link formatRecord}'s `time` exclusion:
+ * that one drops `time` from a data record's per-variable listing because the
+ * record's timestamp is already rendered as its leading label.
  */
 export function formatUnits(units: UnitsMap | undefined): string {
   if (!units) return '';
   return Object.entries(units)
-    .filter(([k]) => k !== 'time')
     .map(([k, v]) => `${k}: ${v}`)
     .join(' | ');
 }

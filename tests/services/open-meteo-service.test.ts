@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { formatUnits, reshapeColumnar } from '@/mcp-server/tools/reshape-utils.js';
+import { formatRecord, formatUnits, reshapeColumnar } from '@/mcp-server/tools/reshape-utils.js';
 
 describe('reshapeColumnar', () => {
   it('zips time and variable arrays into per-timestamp records', () => {
@@ -110,18 +110,41 @@ describe('reshapeColumnar', () => {
 describe('formatUnits', () => {
   it('formats a units map as a readable string', () => {
     const out = formatUnits({ time: 'iso8601', temperature_2m: '°C', precipitation: 'mm' });
-    expect(out).toContain('temperature_2m: °C');
-    expect(out).toContain('precipitation: mm');
-    expect(out).not.toContain('time:');
+    expect(out).toBe('time: iso8601 | temperature_2m: °C | precipitation: mm');
   });
 
   it('returns empty string for undefined', () => {
     expect(formatUnits(undefined)).toBe('');
   });
 
-  it('excludes the time key from the formatted string', () => {
+  it('includes the time key in the formatted string (#24)', () => {
+    // Upstream gives time a real unit (iso8601) and structuredContent.*_units keeps
+    // it — dropping it here left content[] carrying an incomplete units map for
+    // text-only clients.
     const out = formatUnits({ time: 'iso8601', pm2_5: 'μg/m³' });
-    expect(out).not.toContain('time:');
+    expect(out).toContain('time: iso8601');
     expect(out).toContain('pm2_5: μg/m³');
+  });
+
+  it('formats a map with no time entry unchanged', () => {
+    expect(formatUnits({ river_discharge: 'm³/s' })).toBe('river_discharge: m³/s');
+  });
+});
+
+describe('formatRecord', () => {
+  it('renders time as the leading label and omits it from the variable list', () => {
+    // formatRecord's time exclusion is unrelated to formatUnits' — a record's
+    // timestamp is already its leading label, so repeating it in the per-variable
+    // listing would be redundant. A units map has no such leading label, which is
+    // why the two functions treat `time` differently.
+    expect(formatRecord({ time: '2024-07-01T00:00', temperature_2m: 18, precipitation: 0 })).toBe(
+      '**2024-07-01T00:00** — temperature_2m: 18 | precipitation: 0',
+    );
+  });
+
+  it('renders null values explicitly rather than dropping them', () => {
+    expect(formatRecord({ time: '2024-07-01', river_discharge: null })).toBe(
+      '**2024-07-01** — river_discharge: null',
+    );
   });
 });

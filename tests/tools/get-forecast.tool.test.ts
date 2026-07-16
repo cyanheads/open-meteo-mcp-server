@@ -225,6 +225,25 @@ describe('openmeteoGetForecastTool', () => {
     expect(blocks[0]?.text).toContain('Open-Meteo.com');
   });
 
+  it('renders the full units map including the time unit in content[] (#24)', () => {
+    // structuredContent.*_units carries time: iso8601 — content[] must too, or
+    // text-only clients read an incomplete units map.
+    const text =
+      openmeteoGetForecastTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        elevation: 59,
+        timezone: 'America/Los_Angeles',
+        utc_offset_seconds: -25200,
+        hourly: [{ time: '2026-05-30T10:00', temperature_2m: 12.0 }],
+        hourly_units: { time: 'iso8601', temperature_2m: '°C' },
+        daily: [{ time: '2026-05-30', temperature_2m_max: 18.0 }],
+        daily_units: { time: 'iso8601', temperature_2m_max: '°C' },
+      })[0]?.text ?? '';
+    expect(text).toContain('**Hourly units:** time: iso8601 | temperature_2m: °C');
+    expect(text).toContain('**Daily units:** time: iso8601 | temperature_2m_max: °C');
+  });
+
   it('renders every hourly row in content[] with no cap or "…and N more" (format parity)', () => {
     // 50 rows is above the former 48-row render cap — content[] must carry the same
     // rows as structuredContent.hourly, with an honest count in the heading.
