@@ -7,12 +7,66 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetForecastTool } from '@/mcp-server/tools/definitions/get-forecast.tool.js';
+import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
 
 const mockGetForecast = vi.fn();
+const mockSpillover = vi.fn();
 
 vi.mock('@/services/open-meteo/open-meteo-service.js', () => ({
   getOpenMeteoService: () => ({ getForecast: mockGetForecast }),
 }));
+
+// Mock the canvas spillover helper — allows per-test control over spill behaviour.
+// The real inferSchemaFromRows backs deriveSpillSchema, so the schema the handler
+// hands to spillover() is genuinely derived, not stubbed.
+vi.mock('@cyanheads/mcp-ts-core/canvas', async (importActual) => ({
+  ...(await importActual<typeof import('@cyanheads/mcp-ts-core/canvas')>()),
+  spillover: (...args: unknown[]) => mockSpillover(...args),
+}));
+
+// Canvas mock — returns undefined by default; individual tests can override
+let mockCanvasInstance: unknown;
+
+vi.mock('@/services/canvas-accessor.js', () => ({
+  getCanvas: () => mockCanvasInstance,
+}));
+
+/** `count` consecutive hourly ISO timestamps from `from`. */
+const hourlyTimes = (count: number, from = '2026-03-01T00:00'): string[] =>
+  Array.from({ length: count }, (_, i) => {
+    const d = new Date(from);
+    d.setHours(d.getHours() + i);
+    return d.toISOString().slice(0, 16);
+  });
+
+/**
+ * A 12-variable hourly block — the width that makes a 108-day window overflow.
+ * `nullsBefore` leaves that many leading rows all-null, the shape the forecast API
+ * returns when `past_days` reaches further back than it serves.
+ */
+const wideHourlyBlock = (
+  time: string[],
+  nullsBefore = 0,
+): Record<string, (number | null)[] | string[]> => {
+  const block: Record<string, (number | null)[] | string[]> = { time };
+  for (const variable of [
+    'temperature_2m',
+    'precipitation',
+    'wind_speed_10m',
+    'relative_humidity_2m',
+    'cloud_cover',
+    'uv_index',
+    'apparent_temperature',
+    'dew_point_2m',
+    'surface_pressure',
+    'visibility',
+    'wind_gusts_10m',
+    'wind_direction_10m',
+  ]) {
+    block[variable] = time.map((_, i) => (i < nullsBefore ? null : 100.5 + (i % 17)));
+  }
+  return block;
+};
 
 const MOCK_RESPONSE = {
   latitude: 47.595562,
@@ -33,6 +87,12 @@ const MOCK_RESPONSE = {
 describe('openmeteoGetForecastTool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCanvasInstance = undefined; // reset canvas to disabled state
+    // Default spillover mock: fit result (no spill) — overridden per test
+    mockSpillover.mockResolvedValue({
+      spilled: false,
+      previewRows: [],
+    });
   });
 
   it('reshapes columnar response into per-timestamp records', async () => {
@@ -218,8 +278,10 @@ describe('openmeteoGetForecastTool', () => {
       elevation: 59,
       timezone: 'America/Los_Angeles',
       utc_offset_seconds: -25200,
+      record_count: 1,
       hourly: [{ time: '2026-05-30T10:00', temperature_2m: 12.0 }],
       hourly_units: { temperature_2m: '°C' },
+      truncated: false,
     });
     expect(blocks[0]?.text).toContain('Weather forecast');
     expect(blocks[0]?.text).toContain('Open-Meteo.com');
@@ -235,10 +297,12 @@ describe('openmeteoGetForecastTool', () => {
         elevation: 59,
         timezone: 'America/Los_Angeles',
         utc_offset_seconds: -25200,
+        record_count: 2,
         hourly: [{ time: '2026-05-30T10:00', temperature_2m: 12.0 }],
         hourly_units: { time: 'iso8601', temperature_2m: '°C' },
         daily: [{ time: '2026-05-30', temperature_2m_max: 18.0 }],
         daily_units: { time: 'iso8601', temperature_2m_max: '°C' },
+        truncated: false,
       })[0]?.text ?? '';
     expect(text).toContain('**Hourly units:** time: iso8601 | temperature_2m: °C');
     expect(text).toContain('**Daily units:** time: iso8601 | temperature_2m_max: °C');
@@ -258,12 +322,205 @@ describe('openmeteoGetForecastTool', () => {
         elevation: 59,
         timezone: 'America/Los_Angeles',
         utc_offset_seconds: -25200,
+        record_count: 50,
         hourly,
         hourly_units: { temperature_2m: '°C' },
+        truncated: false,
       })[0]?.text ?? '';
     expect(text).toContain('### Hourly (50 records)');
     expect(text).toContain('temperature_2m: 1000'); // first row
     expect(text).toContain('temperature_2m: 1049'); // last row — not sliced at 48
     expect(text).not.toMatch(/and \d+ more/);
+  });
+  it('spills to DataCanvas and sets truncated=true when a wide past_days window exceeds the budget', async () => {
+    // #29: past_days up to 92 alongside forecast_days up to 16 is a 108-day hourly
+    // window — the same payload class openmeteo_get_historical stages.
+    const time = hourlyTimes(2592);
+    mockGetForecast.mockResolvedValue({ ...MOCK_RESPONSE, hourly: wideHourlyBlock(time) });
+
+    const previewRows = time.slice(0, 5).map((tstamp) => ({
+      time: tstamp,
+      temperature_2m: 12.5,
+    }));
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: time.length, tableName: 'spilled_fc123' },
+      previewRows,
+    });
+    const acquire = vi.fn().mockResolvedValue({ canvasId: 'canvas-fc-1' });
+    mockCanvasInstance = { acquire };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      forecast_days: 16,
+      past_days: 92,
+      hourly_variables: ['temperature_2m', 'precipitation'],
+    });
+    const result = await openmeteoGetForecastTool.handler(input, ctx);
+
+    expect(acquire).toHaveBeenCalled();
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-fc-1');
+    expect(result.table_name).toBe('spilled_fc123');
+    expect(result.record_count).toBe(time.length);
+    expect(result.hourly).toHaveLength(previewRows.length);
+  });
+
+  it('bounds the preview and sets truncated=true when the window is wide and canvas is disabled', async () => {
+    // Depends on #28 — without the canvas-less fallback this window would return
+    // whole with truncated: false.
+    const time = hourlyTimes(2592);
+    mockGetForecast.mockResolvedValue({ ...MOCK_RESPONSE, hourly: wideHourlyBlock(time) });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext();
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      forecast_days: 16,
+      past_days: 92,
+      hourly_variables: ['temperature_2m', 'precipitation'],
+    });
+    const result = await openmeteoGetForecastTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBeUndefined();
+    expect(result.table_name).toBeUndefined();
+    expect(mockSpillover).not.toHaveBeenCalled();
+    expect(result.hourly?.length ?? 0).toBeLessThan(time.length);
+    expect(JSON.stringify(result.hourly ?? []).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    // record_count stays the full upstream total, not the preview length.
+    expect(result.record_count).toBe(time.length);
+  });
+
+  it('skips the leading all-null past_days run in the canvas-less preview', async () => {
+    // The API serves fewer past days than past_days: 92 allows, so the unserved head
+    // comes back null — measured at 733 of 2,592 rows for a Seattle pull, longer than
+    // the whole budget. Without the skip the preview carries no data at all.
+    const time = hourlyTimes(2592);
+    const firstUseful = 733;
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: wideHourlyBlock(time, firstUseful),
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext();
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      forecast_days: 16,
+      past_days: 92,
+      hourly_variables: ['temperature_2m', 'precipitation'],
+    });
+    const result = await openmeteoGetForecastTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.hourly?.[0]?.time).toBe(time[firstUseful]);
+    expect(result.hourly?.[0]?.temperature_2m).not.toBeNull();
+    // The skipped rows still count toward the upstream total.
+    expect(result.record_count).toBe(time.length);
+  });
+
+  it('returns inline without touching a canvas when the window fits', async () => {
+    mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
+    const acquire = vi.fn();
+    mockCanvasInstance = { acquire };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m', 'precipitation'],
+    });
+    const result = await openmeteoGetForecastTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(false);
+    expect(result.record_count).toBe(2);
+    expect(result.canvas_id).toBeUndefined();
+    expect(result.table_name).toBeUndefined();
+    // A result that fits must not mint a canvas — an acquired-but-unused canvas
+    // holds a per-tenant slot the caller never learns about.
+    expect(acquire).not.toHaveBeenCalled();
+    expect(mockSpillover).not.toHaveBeenCalled();
+  });
+
+  it('splits the spillover preview back into hourly and daily by timestamp shape', async () => {
+    const hourlyTime = hourlyTimes(2160);
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: wideHourlyBlock(hourlyTime),
+      daily_units: { time: 'iso8601', temperature_2m_max: '°C' },
+      daily: { time: ['2026-03-01', '2026-03-02'], temperature_2m_max: [15.9, 16.2] },
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: hourlyTime.length + 2, tableName: 'spilled_fc_mix' },
+      previewRows: [
+        { time: '2026-03-01T00:00', temperature_2m: 5.1 },
+        { time: '2026-03-01', temperature_2m_max: 15.9 },
+      ],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-fc-mix' }) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      forecast_days: 16,
+      past_days: 74,
+      hourly_variables: ['temperature_2m'],
+      daily_variables: ['temperature_2m_max'],
+    });
+    const result = await openmeteoGetForecastTool.handler(input, ctx);
+
+    expect(result.hourly).toEqual([{ time: '2026-03-01T00:00', temperature_2m: 5.1 }]);
+    expect(result.daily).toEqual([{ time: '2026-03-01', temperature_2m_max: 15.9 }]);
+  });
+
+  it('renders the canvas handles in the truncated format()', () => {
+    const text =
+      openmeteoGetForecastTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        elevation: 59,
+        timezone: 'America/Los_Angeles',
+        utc_offset_seconds: -25200,
+        record_count: 2592,
+        hourly: [{ time: '2026-03-01T00:00', temperature_2m: 5.1 }],
+        hourly_units: { temperature_2m: '°C' },
+        canvas_id: 'canvas-fc-1',
+        table_name: 'spilled_fc123',
+        truncated: true,
+      })[0]?.text ?? '';
+    expect(text).toContain('canvas-fc-1');
+    expect(text).toContain('spilled_fc123');
+    expect(text).toContain('**Records:** 2592');
+    expect(text).toContain('1 shown of 2592 total rows on canvas');
+  });
+
+  it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
+    const text =
+      openmeteoGetForecastTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        elevation: 59,
+        timezone: 'America/Los_Angeles',
+        utc_offset_seconds: -25200,
+        record_count: 2592,
+        hourly: [{ time: '2026-03-01T00:00', temperature_2m: 5.1 }],
+        hourly_units: { temperature_2m: '°C' },
+        canvas_id: undefined,
+        table_name: undefined,
+        truncated: true,
+      })[0]?.text ?? '';
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(text).toContain('fewer past_days / forecast_days');
+    // Heading reports the upstream total and does not claim a canvas holds it.
+    expect(text).toContain('1 shown of 2592 total rows)');
+    expect(text).not.toContain('total rows on canvas');
   });
 });

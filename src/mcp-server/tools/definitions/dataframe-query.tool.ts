@@ -45,7 +45,7 @@ function formatCell(value: unknown): string {
 export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
   description:
     'Run a read-only SQL SELECT against tables staged on a DataCanvas by ' +
-    'openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate. ' +
+    'openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate. ' +
     'Pass the canvas_id returned when any of those tools spills (truncated: true), and ' +
     'reference the exact table_name those tools return alongside it. Call ' +
     'openmeteo_dataframe_describe to list staged tables and their columns when you need to discover names.',
@@ -64,7 +64,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id is unknown or has expired (TTL is 24 h sliding)',
       recovery:
-        'Re-run openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate to stage a fresh canvas, then retry.',
+        'Re-run openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate to stage a fresh canvas, then retry.',
       retryable: false,
     },
     {
@@ -80,7 +80,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The SQL references a table that is not staged on this canvas — a mistyped name, or one that expired (24 h sliding TTL) or was dropped',
       recovery:
-        'List the staged tables and columns with openmeteo_dataframe_describe, then reference an existing name — or re-run openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate to stage a fresh canvas.',
+        'List the staged tables and columns with openmeteo_dataframe_describe, then reference an existing name — or re-run openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate to stage a fresh canvas.',
       retryable: false,
     },
   ],
@@ -89,7 +89,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     canvas_id: z
       .string()
       .describe(
-        'Canvas ID returned by openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate when truncated: true.',
+        'Canvas ID returned by openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate when truncated: true.',
       ),
     sql: z
       .string()
@@ -157,7 +157,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
             typeof tableName === 'string' ? `Table "${tableName}"` : 'The referenced table';
           throw ctx.fail(
             'missing_table',
-            `${named} is not staged on canvas "${input.canvas_id}". Use the exact table_name returned by openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate, or call openmeteo_dataframe_describe to list staged tables. It may also have expired (24 h sliding TTL) or been dropped.`,
+            `${named} is not staged on canvas "${input.canvas_id}". Use the exact table_name returned by openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate, or call openmeteo_dataframe_describe to list staged tables. It may also have expired (24 h sliding TTL) or been dropped.`,
             ctx.recoveryFor('missing_table'),
             { cause: err },
           );
