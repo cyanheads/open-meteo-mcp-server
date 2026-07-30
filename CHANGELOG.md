@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-07-30
+
+Spill-capable tools no longer return unbounded payloads with truncated: false when DataCanvas is disabled; openmeteo_get_forecast gains the same spillover pattern as its siblings.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-07-30 · ⚠️ Breaking
 
 openmeteo_geocode renamed to openmeteo_search_locations with no compatibility alias; mcp-ts-core 0.11.0 adopted; .mcpb bundle strips platform-specific DuckDB natives, cutting it from 42.9 MB to 5.86 MB.
