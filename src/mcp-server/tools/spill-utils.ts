@@ -1,8 +1,9 @@
 /**
  * @fileoverview Shared DataCanvas spill helpers for the spill-capable weather tools
- * (openmeteo_get_historical, openmeteo_get_ensemble, openmeteo_get_flood,
- * openmeteo_get_climate). Owns the one inline budget every spill decision is measured
- * against, and the column schema handed to `spillover()`.
+ * (openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_ensemble,
+ * openmeteo_get_flood, openmeteo_get_climate). Owns the one inline budget every spill
+ * decision is measured against, the column schema handed to `spillover()`, and the
+ * canvas-less fallback those tools take when DataCanvas is disabled.
  * @module mcp-server/tools/spill-utils
  */
 
@@ -70,4 +71,90 @@ export function exceedsInlineBudget(records: readonly TimeRecord[]): boolean {
  */
 export function deriveSpillSchema(records: readonly TimeRecord[]): ColumnSchema[] {
   return inferSchemaFromRows(records);
+}
+
+/** True when a record carries a non-null value in any column other than `time`. */
+function hasNonNullValue(record: Record<string, unknown>): boolean {
+  for (const [key, value] of Object.entries(record)) {
+    if (key !== 'time' && value != null) return true;
+  }
+  return false;
+}
+
+/**
+ * Rows that fit {@link PREVIEW_CHARS}, starting at the first record carrying data.
+ * Always at least one row when `records` is non-empty.
+ *
+ * The canvas-less half of the spill decision. `CANVAS_PROVIDER_TYPE` defaults to
+ * `none`, so `getCanvas()` returns undefined on a default deployment and the tools
+ * would otherwise fall through an exceeded budget to an unbounded inline return
+ * carrying `truncated: false` — the field a client reads to decide whether anything is
+ * missing. Bounding here against the same budget `spillover()` drains to keeps the
+ * response the same size and `truncated` honest in either configuration; the only
+ * difference is that there is no canvas holding the remainder, which
+ * {@link noCanvasNotice} states in `format()`.
+ *
+ * The leading all-null run is skipped because on this path the preview is everything
+ * the caller gets. Three real response shapes open with one: an ensemble `past_days`
+ * response leads with placeholder rows the models don't hindcast; the forecast API
+ * serves fewer past days than `past_days: 92` allows, so the unserved head comes back
+ * null; and a GloFAS reanalysis range that starts before the coordinate's record
+ * begins is null until it does. A chronological head would spend the whole budget
+ * inside that run and return a response with no data at all. When every row is null
+ * the head is returned as-is — that is the honest answer, not an empty array.
+ *
+ * Measures `JSON.stringify(row).length` per row and stops on the row that would cross
+ * the budget, matching `spillover()`'s drain exactly.
+ */
+export function boundedPreview<T extends Record<string, unknown>>(records: readonly T[]): T[] {
+  const firstUseful = records.findIndex(hasNonNullValue);
+  const rows: T[] = [];
+  let chars = 0;
+  for (const row of records.slice(firstUseful < 0 ? 0 : firstUseful)) {
+    chars += JSON.stringify(row).length;
+    if (chars > PREVIEW_CHARS && rows.length > 0) break;
+    rows.push(row);
+  }
+  return rows;
+}
+
+/**
+ * Split concatenated hourly + daily records back into the two cadences.
+ *
+ * Hourly and daily stage into one union table (one `table_name`, ragged rows padded by
+ * the appender), so timestamp shape is the only discriminator: hourly is
+ * `YYYY-MM-DDTHH:MM`, daily is `YYYY-MM-DD`. The tools with both cadences apply this to
+ * `spillover()`'s preview rows and to {@link boundedPreview}'s, which is what makes the
+ * two paths return the same split for the same records — and it is the same rule a
+ * caller uses against the staged table (`WHERE time LIKE '%T%'`).
+ */
+export function splitByCadence(records: readonly TimeRecord[]): {
+  hourly: Record<string, unknown>[];
+  daily: Record<string, unknown>[];
+} {
+  const hourly: Record<string, unknown>[] = [];
+  const daily: Record<string, unknown>[] = [];
+  for (const record of records) {
+    if (typeof record.time !== 'string') continue;
+    (record.time.includes('T') ? hourly : daily).push(record);
+  }
+  return { hourly, daily };
+}
+
+/**
+ * `format()` notice for a preview bounded by {@link boundedPreview} with no canvas
+ * behind it — states why the response carries no `canvas_id`, how the preview was
+ * selected, and both ways to reach the rows it omits.
+ *
+ * @param narrowing - The tool's own inputs that shrink the payload, e.g.
+ * `'a shorter start_date–end_date range, or fewer daily_variables'`. Named per tool
+ * because the levers differ: only some take `models`, and only some take a date range.
+ */
+export function noCanvasNotice(narrowing: string): string {
+  return (
+    '⚠️ Large result — this is a bounded preview, and the remaining rows are not in this response. ' +
+    'There is no canvas_id because DataCanvas is disabled on this server (CANVAS_PROVIDER_TYPE=none). ' +
+    'The preview starts at the first row carrying data, so any leading all-null rows are omitted. ' +
+    `To reach the full dataset, set CANVAS_PROVIDER_TYPE=duckdb and re-run, or narrow the request: ${narrowing}.`
+  );
 }

@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tool: openmeteo_get_historical — ERA5 historical weather archive.
  * Reshapes columnar response into per-timestamp records.
- * Large date ranges (multi-year hourly) spill to DataCanvas when canvas is enabled.
+ * Large date ranges (multi-year hourly) spill to DataCanvas when canvas is enabled,
+ * and return a bounded preview with truncated: true when it is not.
  * @module mcp-server/tools/definitions/get-historical
  */
 
@@ -12,7 +13,14 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
-import { deriveSpillSchema, exceedsInlineBudget, PREVIEW_CHARS } from '../spill-utils.js';
+import {
+  boundedPreview,
+  deriveSpillSchema,
+  exceedsInlineBudget,
+  noCanvasNotice,
+  PREVIEW_CHARS,
+  splitByCadence,
+} from '../spill-utils.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
 
 export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
@@ -22,7 +30,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     '— for dates within the last week, use openmeteo_get_forecast with past_days instead. ' +
     'Uses the same variable names as the forecast API for direct comparison. Large date ranges ' +
     '(multi-year hourly) produce thousands of records — these spill to DataCanvas for SQL querying ' +
-    'when canvas is enabled. At least one of hourly_variables or daily_variables is required.',
+    'when canvas is enabled, and return a bounded preview with truncated: true when it is not. ' +
+    'At least one of hourly_variables or daily_variables is required.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -127,18 +136,20 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .describe('Date range of returned data'),
     record_count: z
       .number()
-      .describe('Total number of records (hourly or daily rows) in this response'),
+      .describe(
+        'Total number of records (hourly + daily rows) — the full upstream total when truncated is true, not the combined length of the hourly and daily previews.',
+      ),
     hourly: z
       .array(z.record(z.string(), z.unknown()))
       .optional()
       .describe(
-        'Per-hour records with "time" (ISO 8601) + variable keys. Absent when only daily_variables were requested. When truncated, contains only a preview; query canvas_id for the full dataset.',
+        'Per-hour records with "time" (ISO 8601) + variable keys. Absent when only daily_variables were requested. When truncated, contains only a preview — query canvas_id for the full dataset when one is present.',
       ),
     daily: z
       .array(z.record(z.string(), z.unknown()))
       .optional()
       .describe(
-        'Per-day records with "time" (YYYY-MM-DD) + variable keys. Absent when only hourly_variables were requested. When truncated, contains only a preview; query canvas_id for the full dataset.',
+        'Per-day records with "time" (YYYY-MM-DD) + variable keys. Absent when only hourly_variables were requested. When truncated, contains only a preview — query canvas_id for the full dataset when one is present.',
       ),
     hourly_units: z
       .record(z.string(), z.string())
@@ -156,18 +167,18 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token — present only when truncated is true (data spilled). Query with SQL using this token.',
+        'DataCanvas token for the staged full dataset. Present only when truncated is true AND DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) — absent otherwise, in which case the preview is all this response carries. Query with SQL using this token.',
       ),
     table_name: z
       .string()
       .optional()
       .describe(
-        'DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only when truncated is true.',
+        'DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only alongside canvas_id.',
       ),
     truncated: z
       .boolean()
       .describe(
-        'True when the response was too large to return inline and data spilled to canvas_id. Query the canvas for the full dataset — it holds every hourly and daily row, including any column the preview omits.',
+        'True when the response was too large to return inline, so hourly and daily carry a bounded preview rather than the full set. With DataCanvas enabled the complete data is staged at canvas_id — every hourly and daily row, including any column the preview omits. With it disabled there is no canvas_id, and the omitted rows are reached only by narrowing the request.',
       ),
   }),
 
@@ -256,6 +267,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
           signal: ctx.signal,
         });
 
+        const spilledPreview = splitByCadence(spilled.previewRows);
+
         return {
           latitude: data.latitude,
           longitude: data.longitude,
@@ -263,12 +276,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
           timezone: data.timezone,
           date_range: dateRange,
           record_count: spilled.spilled ? spilled.handle.rowCount : allRecords.length,
-          hourly: spilled.previewRows.filter(
-            (r) => typeof r.time === 'string' && r.time.includes('T'),
-          ) as Record<string, unknown>[],
-          daily: spilled.previewRows.filter(
-            (r) => typeof r.time === 'string' && !r.time.includes('T'),
-          ) as Record<string, unknown>[],
+          hourly: spilledPreview.hourly,
+          daily: spilledPreview.daily,
           hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
           daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
           // Only point at the canvas when data actually spilled — spillover()
@@ -279,6 +288,30 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
           truncated: spilled.spilled,
         };
       }
+
+      /*
+       * No canvas (CANVAS_PROVIDER_TYPE=none, the default): bound the preview anyway.
+       * Falling through to the full inline return would report truncated: false on a
+       * multi-megabyte payload. Split by timestamp shape the same way the canvas
+       * branch splits spillover()'s preview rows, so both paths return the same
+       * preview for the same records.
+       */
+      const preview = splitByCadence(boundedPreview(allRecords));
+      return {
+        latitude: data.latitude,
+        longitude: data.longitude,
+        elevation: data.elevation,
+        timezone: data.timezone,
+        date_range: dateRange,
+        record_count: allRecords.length,
+        hourly: preview.hourly,
+        daily: preview.daily,
+        hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
+        daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+        canvas_id: undefined,
+        table_name: undefined,
+        truncated: true,
+      };
     }
 
     return {
@@ -309,32 +342,40 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       lines.push(
         `\n⚠️ Large result — full data staged on canvas \`${result.canvas_id}\`, table \`${result.table_name}\`. Query with SQL via openmeteo_dataframe_query.`,
       );
+    } else if (result.truncated) {
+      lines.push(
+        `\n${noCanvasNotice('a shorter start_date–end_date range, or fewer hourly_variables / daily_variables')}`,
+      );
     }
 
     if (result.hourly_units) lines.push(`\n**Hourly units:** ${formatUnits(result.hourly_units)}`);
     if (result.daily_units) lines.push(`**Daily units:** ${formatUnits(result.daily_units)}`);
 
+    // "on canvas" only when one exists — with canvas disabled the total is the
+    // upstream row count and nothing holds the rows the preview omits.
+    const totalRows = `${result.record_count} total rows${result.canvas_id ? ' on canvas' : ''}`;
+
     if (result.daily && result.daily.length > 0) {
-      // When truncated, result.daily is the spillover preview array — render all of
-      // it so content[] matches structuredContent.daily; the heading references
-      // record_count (the full staged total), not the preview length.
+      // When truncated, result.daily is the preview array — render all of it so
+      // content[] matches structuredContent.daily; the heading references
+      // record_count (the full upstream total), not the preview length.
       lines.push(
         '',
         result.truncated
-          ? `### Daily summary (preview — ${result.daily.length} shown of ${result.record_count} total rows on canvas)`
+          ? `### Daily summary (preview — ${result.daily.length} shown of ${totalRows})`
           : `### Daily summary (${result.daily.length} records)`,
       );
       for (const rec of result.daily) lines.push(formatRecord(rec));
     }
 
     if (result.hourly && result.hourly.length > 0) {
-      // When truncated, result.hourly is the spillover preview array — render all of
-      // it so content[] matches structuredContent.hourly; the heading references
-      // record_count (the full staged total), not the preview length.
+      // When truncated, result.hourly is the preview array — render all of it so
+      // content[] matches structuredContent.hourly; the heading references
+      // record_count (the full upstream total), not the preview length.
       lines.push(
         '',
         result.truncated
-          ? `### Hourly (preview — ${result.hourly.length} shown of ${result.record_count} total rows on canvas)`
+          ? `### Hourly (preview — ${result.hourly.length} shown of ${totalRows})`
           : `### Hourly (${result.hourly.length} records)`,
       );
       for (const rec of result.hourly) lines.push(formatRecord(rec));

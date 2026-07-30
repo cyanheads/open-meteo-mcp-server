@@ -2,7 +2,8 @@
  * @fileoverview Tool: openmeteo_get_climate — bias-corrected daily CMIP6 climate projections.
  * Covers 1950-01-01 to 2050-12-31 across up to seven high-resolution climate models.
  * Reshapes columnar response into per-date records. Multi-decade, multi-model pulls
- * spill to DataCanvas when canvas is enabled.
+ * spill to DataCanvas when canvas is enabled, and return a bounded preview with
+ * truncated: true when it is not.
  * @module mcp-server/tools/definitions/get-climate
  */
 
@@ -13,7 +14,13 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
-import { deriveSpillSchema, exceedsInlineBudget, PREVIEW_CHARS } from '../spill-utils.js';
+import {
+  boundedPreview,
+  deriveSpillSchema,
+  exceedsInlineBudget,
+  noCanvasNotice,
+  PREVIEW_CHARS,
+} from '../spill-utils.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
 
 export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
@@ -27,7 +34,8 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     '(e.g. temperature_2m_max_CMCC_CM2_VHR4); a single or omitted model returns plain ' +
     'variable names. Not all models carry all variables — missing combinations return null. ' +
     'Multi-decade daily pulls across several models produce thousands of records and spill ' +
-    'to DataCanvas for SQL querying when canvas is enabled.',
+    'to DataCanvas for SQL querying when canvas is enabled, returning a bounded preview with ' +
+    'truncated: true when it is not.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -137,11 +145,15 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
         end: z.string().describe('Actual end date of returned data'),
       })
       .describe('Date range of returned data'),
-    record_count: z.number().describe('Total number of daily records in this response'),
+    record_count: z
+      .number()
+      .describe(
+        'Total number of daily records — the full upstream total when truncated is true, not the length of the daily preview.',
+      ),
     daily: z
       .array(z.record(z.string(), z.unknown()))
       .describe(
-        'Per-day records with "time" (YYYY-MM-DD) + one key per requested variable — per-model suffixed keys when 2+ models were requested (e.g. temperature_2m_max_CMCC_CM2_VHR4). Null values mean the model does not carry that variable. When truncated, contains only a preview; query canvas_id for the full dataset.',
+        'Per-day records with "time" (YYYY-MM-DD) + one key per requested variable — per-model suffixed keys when 2+ models were requested (e.g. temperature_2m_max_CMCC_CM2_VHR4). Null values mean the model does not carry that variable. When truncated, contains only a preview — query canvas_id for the full dataset when one is present.',
       ),
     daily_units: z
       .record(z.string(), z.string())
@@ -153,18 +165,18 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token — present only when truncated is true (data spilled). Query with SQL using this token.',
+        'DataCanvas token for the staged full dataset. Present only when truncated is true AND DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) — absent otherwise, in which case the preview is all this response carries. Query with SQL using this token.',
       ),
     table_name: z
       .string()
       .optional()
       .describe(
-        'DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only when truncated is true.',
+        'DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only alongside canvas_id.',
       ),
     truncated: z
       .boolean()
       .describe(
-        'True when the response was too large to return inline and data spilled to canvas_id. Query the canvas for the full dataset.',
+        'True when the response was too large to return inline, so daily carries a bounded preview rather than the full set. With DataCanvas enabled the complete data is staged at canvas_id. With it disabled there is no canvas_id, and the omitted rows are reached only by narrowing the request.',
       ),
   }),
 
@@ -275,6 +287,26 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
           truncated: spilled.spilled,
         };
       }
+
+      /*
+       * No canvas (CANVAS_PROVIDER_TYPE=none, the default): bound the preview anyway.
+       * Falling through to the full inline return would report truncated: false on a
+       * multi-decade, multi-model pull.
+       */
+      return {
+        latitude: data.latitude,
+        longitude: data.longitude,
+        elevation: data.elevation,
+        timezone: data.timezone,
+        models,
+        date_range: dateRange,
+        record_count: dailyRecords.length,
+        daily: boundedPreview(dailyRecords),
+        daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+        canvas_id: undefined,
+        table_name: undefined,
+        truncated: true,
+      };
     }
 
     return {
@@ -305,18 +337,23 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       lines.push(
         `\n⚠️ Large result — full data staged on canvas \`${result.canvas_id}\`, table \`${result.table_name}\`. Query with SQL via openmeteo_dataframe_query.`,
       );
+    } else if (result.truncated) {
+      lines.push(
+        `\n${noCanvasNotice('a shorter start_date–end_date range, fewer daily_variables, or fewer models')}`,
+      );
     }
 
     if (result.daily_units) lines.push(`\n**Daily units:** ${formatUnits(result.daily_units)}`);
 
     if (result.daily.length > 0) {
-      // When truncated, result.daily is the spillover preview array — render all of
-      // it so content[] matches structuredContent.daily; the heading references
-      // record_count (the full staged total), not the preview length.
+      // When truncated, result.daily is the preview array — render all of it so
+      // content[] matches structuredContent.daily; the heading references
+      // record_count (the full upstream total), not the preview length. "on canvas"
+      // only when one exists — with canvas disabled nothing holds the omitted rows.
       lines.push(
         '',
         result.truncated
-          ? `### Daily projections (preview — ${result.daily.length} shown of ${result.record_count} total rows on canvas)`
+          ? `### Daily projections (preview — ${result.daily.length} shown of ${result.record_count} total rows${result.canvas_id ? ' on canvas' : ''})`
           : `### Daily projections (${result.daily.length} records)`,
       );
       for (const rec of result.daily) lines.push(formatRecord(rec));

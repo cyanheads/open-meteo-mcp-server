@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetFloodTool } from '@/mcp-server/tools/definitions/get-flood.tool.js';
+import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
 
 const mockGetFlood = vi.fn();
 const mockSpillover = vi.fn();
@@ -494,7 +495,11 @@ describe('openmeteoGetFloodTool', () => {
     expect(mockSpillover).not.toHaveBeenCalled();
   });
 
-  it('returns data inline when the payload is oversized but canvas is disabled', async () => {
+  it('bounds the preview and sets truncated=true when the payload is oversized and canvas is disabled', async () => {
+    // #28: the budget check used to act only inside the `if (canvas)` branch, so a
+    // default deployment (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
+    // inline return carrying truncated: false — the field a client reads to decide
+    // whether anything is missing.
     const time = dailyDates(15_000);
     mockGetFlood.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -512,10 +517,36 @@ describe('openmeteoGetFloodTool', () => {
     });
     const result = await openmeteoGetFloodTool.handler(input, ctx);
 
-    expect(result.truncated).toBe(false);
+    expect(result.truncated).toBe(true);
     expect(result.canvas_id).toBeUndefined();
-    expect(result.daily).toHaveLength(time.length);
+    expect(result.table_name).toBeUndefined();
+    expect(mockSpillover).not.toHaveBeenCalled();
+    // Bounded by the same budget the canvas path measures against.
+    expect(result.daily.length).toBeLessThan(time.length);
+    expect(JSON.stringify(result.daily).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    // record_count stays the full upstream total, not the preview length.
     expect(result.record_count).toBe(time.length);
+  });
+
+  it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
+    const text =
+      openmeteoGetFloodTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        timezone: 'America/Los_Angeles',
+        record_count: 15_000,
+        daily: [{ time: '1984-01-01', river_discharge: 120.5 }],
+        daily_units: { river_discharge: 'm³/s' },
+        canvas_id: undefined,
+        table_name: undefined,
+        truncated: true,
+      })[0]?.text ?? '';
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(text).toContain('fewer daily_variables');
+    // Heading reports the upstream total and does not claim a canvas holds it.
+    expect(text).toContain('1 shown of 15000 total rows)');
+    expect(text).not.toContain('total rows on canvas');
   });
 
   it('formats output with GloFAS label and attribution', () => {

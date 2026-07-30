@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetClimateTool } from '@/mcp-server/tools/definitions/get-climate.tool.js';
+import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
 
 const mockGetClimate = vi.fn();
 const mockSpillover = vi.fn();
@@ -652,5 +653,62 @@ describe('openmeteoGetClimateTool', () => {
     expect(text).toContain('temperature_2m_max: 1000');
     expect(text).toContain('temperature_2m_max: 1034'); // last row — not sliced at 30
     expect(text).not.toMatch(/and \d+ more/);
+  });
+  it('bounds the preview and sets truncated=true when the payload is oversized and canvas is disabled', async () => {
+    // #28: the budget check used to act only inside the `if (canvas)` branch, so a
+    // default deployment (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
+    // inline return carrying truncated: false — the field a client reads to decide
+    // whether anything is missing.
+    const time = dailyDates(7670);
+    mockGetClimate.mockResolvedValue({
+      ...MOCK_MULTI_MODEL_RESPONSE,
+      daily: modelBlock(time, (row, m) => 20 + m + (row % 10) / 10),
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext();
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      start_date: '2030-01-01',
+      end_date: '2050-12-31',
+      daily_variables: ['temperature_2m_max'],
+      models: ALL_MODELS,
+    });
+    const result = await openmeteoGetClimateTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBeUndefined();
+    expect(result.table_name).toBeUndefined();
+    expect(mockSpillover).not.toHaveBeenCalled();
+    // Bounded by the same budget the canvas path measures against.
+    expect(result.daily.length).toBeLessThan(time.length);
+    expect(JSON.stringify(result.daily).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    // record_count stays the full upstream total, not the preview length.
+    expect(result.record_count).toBe(time.length);
+  });
+
+  it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
+    const text =
+      openmeteoGetClimateTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        elevation: 17,
+        timezone: 'GMT',
+        models: ALL_MODELS,
+        date_range: { start: '2030-01-01', end: '2050-12-31' },
+        record_count: 7670,
+        daily: [{ time: '2030-01-01', temperature_2m_max: 8.1 }],
+        daily_units: { temperature_2m_max: '°C' },
+        canvas_id: undefined,
+        table_name: undefined,
+        truncated: true,
+      })[0]?.text ?? '';
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(text).toContain('fewer models');
+    // Heading reports the upstream total and does not claim a canvas holds it.
+    expect(text).toContain('1 shown of 7670 total rows)');
+    expect(text).not.toContain('total rows on canvas');
   });
 });

@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetHistoricalTool } from '@/mcp-server/tools/definitions/get-historical.tool.js';
+import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
 
 const mockGetHistorical = vi.fn();
 const mockSpillover = vi.fn();
@@ -543,5 +544,81 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(text).toContain('temperature_2m: 2059'); // full preview rendered, not capped at 48
     expect(text).toContain('spilled_histbig'); // #18: table name in the hint
     expect(text).not.toMatch(/and \d+ more/);
+  });
+  it('bounds the preview and sets truncated=true when the payload is oversized and canvas is disabled', async () => {
+    // #28: the budget check used to act only inside the `if (canvas)` branch, so a
+    // default deployment (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
+    // inline return carrying truncated: false — the field a client reads to decide
+    // whether anything is missing.
+    const hourlyTime = hourlyTimes(43_848);
+    const dailyTime = dailyDates(1827, '2020-01-01');
+
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', temperature_2m: '°C', precipitation: 'mm' },
+      daily_units: { time: 'iso8601', precipitation_sum: 'mm' },
+      hourly: {
+        time: hourlyTime,
+        temperature_2m: hourlyTime.map((_, i) => 3.5 + (i % 10)),
+        precipitation: hourlyTime.map((_, i) => (i % 3 === 0 ? 0.5 : 0)),
+      },
+      daily: {
+        time: dailyTime,
+        precipitation_sum: dailyTime.map((_, i) => (i % 4 === 0 ? 1.2 : 0)),
+      },
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext();
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2020-01-01',
+      end_date: '2024-12-31',
+      hourly_variables: ['temperature_2m', 'precipitation'],
+      daily_variables: ['precipitation_sum'],
+    });
+    const result = await openmeteoGetHistoricalTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBeUndefined();
+    expect(result.table_name).toBeUndefined();
+    expect(mockSpillover).not.toHaveBeenCalled();
+    // Bounded by the same budget the canvas path measures against.
+    const previewRows = (result.hourly?.length ?? 0) + (result.daily?.length ?? 0);
+    expect(previewRows).toBeLessThan(hourlyTime.length + dailyTime.length);
+    expect(
+      JSON.stringify([...(result.hourly ?? []), ...(result.daily ?? [])]).length,
+    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    // record_count stays the full upstream total, not the preview length.
+    expect(result.record_count).toBe(hourlyTime.length + dailyTime.length);
+    // Cadences are split by timestamp shape, same as the canvas path.
+    expect(result.hourly?.every((r) => String(r.time).includes('T'))).toBe(true);
+    expect(result.daily?.every((r) => !String(r.time).includes('T'))).toBe(true);
+  });
+
+  it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
+    const text =
+      openmeteoGetHistoricalTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        elevation: 59,
+        timezone: 'America/Los_Angeles',
+        date_range: { start: '2020-01-01', end: '2024-12-31' },
+        record_count: 43_848,
+        hourly: [{ time: '2020-01-01T00:00', temperature_2m: 5.2 }],
+        daily: undefined,
+        hourly_units: { temperature_2m: '°C' },
+        daily_units: undefined,
+        canvas_id: undefined,
+        table_name: undefined,
+        truncated: true,
+      })[0]?.text ?? '';
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(text).toContain('start_date–end_date');
+    // Heading reports the upstream total and does not claim a canvas holds it.
+    expect(text).toContain('1 shown of 43848 total rows)');
+    expect(text).not.toContain('total rows on canvas');
   });
 });

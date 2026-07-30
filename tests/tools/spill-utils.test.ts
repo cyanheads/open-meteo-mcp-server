@@ -9,8 +9,10 @@
 import { type CanvasInstance, spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  boundedPreview,
   deriveSpillSchema,
   exceedsInlineBudget,
+  noCanvasNotice,
   PREVIEW_CHARS,
 } from '@/mcp-server/tools/spill-utils.js';
 import type { TimeRecord } from '@/services/open-meteo/types.js';
@@ -175,5 +177,95 @@ describe('exceedsInlineBudget', () => {
 
     expect(result.spilled).toBe(exceedsInlineBudget(records));
     expect(registerTable).toHaveBeenCalledTimes(result.spilled ? 1 : 0);
+  });
+});
+
+describe('boundedPreview', () => {
+  /** Narrow daily row — roughly 50 chars serialized. */
+  const narrowRow = (i: number): TimeRecord => ({
+    time: `2023-01-${String((i % 28) + 1).padStart(2, '0')}`,
+    temperature_2m_max: 10 + (i % 20),
+  });
+
+  it('returns the whole set when it fits the budget', () => {
+    const records = Array.from({ length: 500 }, (_, i) => narrowRow(i));
+    expect(boundedPreview(records)).toEqual(records);
+  });
+
+  it('stops at the budget for an oversized set', () => {
+    const records = Array.from({ length: 50_000 }, (_, i) => narrowRow(i));
+    const preview = boundedPreview(records);
+
+    expect(preview.length).toBeLessThan(records.length);
+    expect(JSON.stringify(preview).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    // Chronological head, not a sample.
+    expect(preview[0]).toEqual(records[0]);
+  });
+
+  it('agrees with exceedsInlineBudget on whether anything was dropped', () => {
+    // The two measure the same rows against the same number, so a set that does not
+    // exceed the budget must come back whole and one that does must come back short.
+    for (const count of [1, 500, 1500, 5000]) {
+      const records = Array.from({ length: count }, (_, i) => narrowRow(i));
+      const preview = boundedPreview(records);
+      expect(preview.length < records.length).toBe(exceedsInlineBudget(records));
+    }
+  });
+
+  it('keeps one row even when that row alone blows the budget', () => {
+    // A response with a single enormous row must still carry data, not an empty array.
+    const fat: TimeRecord = { time: '2023-01-01', blob: 'x'.repeat(PREVIEW_CHARS * 2) };
+    expect(boundedPreview([fat, narrowRow(0)])).toEqual([fat]);
+  });
+
+  it('returns an empty array for an empty set', () => {
+    expect(boundedPreview([])).toEqual([]);
+  });
+
+  it('starts at the first row carrying data, skipping the leading all-null run', () => {
+    // Upstream leads with nulls in three shapes — ensemble past_days placeholders, a
+    // forecast past_days window longer than the API serves, and a GloFAS range that
+    // starts before the coordinate's record. A chronological head would spend the
+    // whole budget inside that run and carry no data at all.
+    const nullRow = (i: number): TimeRecord => ({
+      time: `2023-01-${String((i % 28) + 1).padStart(2, '0')}`,
+      temperature_2m_max: null,
+    });
+    const records = [
+      ...Array.from({ length: 3000 }, (_, i) => nullRow(i)),
+      ...Array.from({ length: 3000 }, (_, i) => narrowRow(i)),
+    ];
+    const preview = boundedPreview(records);
+
+    expect(preview[0]).toEqual(records[3000]);
+    expect(preview.every((r) => r.temperature_2m_max !== null)).toBe(true);
+  });
+
+  it('returns the head when every row is all-null', () => {
+    // No row carries data, so there is nothing better to show — an empty array would
+    // just hide the shape of what came back.
+    const records = Array.from({ length: 5000 }, (_, i) => ({
+      time: `2023-01-${String((i % 28) + 1).padStart(2, '0')}`,
+      temperature_2m_max: null,
+    })) satisfies TimeRecord[];
+    const preview = boundedPreview(records);
+
+    expect(preview[0]).toEqual(records[0]);
+    expect(preview.length).toBeGreaterThan(0);
+    expect(preview.length).toBeLessThan(records.length);
+  });
+});
+
+describe('noCanvasNotice', () => {
+  it('names the disabled setting, the enabling setting, and the tool-specific levers', () => {
+    const text = noCanvasNotice('a shorter start_date–end_date range, or fewer daily_variables');
+
+    // Why there is no canvas_id …
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
+    // … and both ways to reach the omitted rows.
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(text).toContain('a shorter start_date–end_date range, or fewer daily_variables');
+    // … and how the preview was picked, since it is not the chronological head.
+    expect(text).toContain('first row carrying data');
   });
 });

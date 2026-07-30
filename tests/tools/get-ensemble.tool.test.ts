@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetEnsembleTool } from '@/mcp-server/tools/definitions/get-ensemble.tool.js';
+import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
 
 const mockGetEnsemble = vi.fn();
 const mockSpillover = vi.fn();
@@ -613,5 +614,93 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(text).toContain('temperature_2m_member01: 1000');
     expect(text).toContain('temperature_2m_member01: 1029'); // last row — not sliced at 24
     expect(text).not.toMatch(/and \d+ more/);
+  });
+  it('bounds the preview and sets truncated=true when the payload is oversized and canvas is disabled', async () => {
+    // #28: the budget check used to act only inside the `if (canvas)` branch, so a
+    // default deployment (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
+    // inline return carrying truncated: false — the field a client reads to decide
+    // whether anything is missing.
+    const time = hourlyTimes(384);
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: memberBlock(time, (row, member) => 12 + member / 10 + (row % 7)),
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext();
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'gfs025',
+      forecast_days: 16,
+    });
+    const result = await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBeUndefined();
+    expect(result.table_name).toBeUndefined();
+    expect(mockSpillover).not.toHaveBeenCalled();
+    // Bounded by the same budget the canvas path measures against.
+    expect(result.hourly?.length ?? 0).toBeLessThan(time.length);
+    expect(JSON.stringify(result.hourly ?? []).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    // record_count stays the full upstream total, not the preview length.
+    expect(result.record_count).toBe(time.length);
+  });
+
+  it('skips the leading all-null past_days run in the canvas-less preview', async () => {
+    // Without a canvas the preview is everything the caller gets, so spending it on
+    // the placeholder rows the models do not hindcast would return no data at all.
+    const time = hourlyTimes(600);
+    const firstUseful = 240;
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: memberBlock(time, (row, member) =>
+        row < firstUseful ? null : 12 + member / 10 + (row % 7),
+      ),
+    });
+    mockCanvasInstance = undefined;
+
+    const ctx = createMockContext();
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'gfs025',
+      forecast_days: 16,
+      past_days: 10,
+    });
+    const result = await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.hourly?.[0]?.time).toBe(time[firstUseful]);
+    expect(result.hourly?.[0]?.temperature_2m_member01).not.toBeNull();
+    // The skipped rows still count toward the upstream total.
+    expect(result.record_count).toBe(time.length);
+  });
+
+  it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
+    const text =
+      openmeteoGetEnsembleTool.format!({
+        latitude: 47.6,
+        longitude: -122.3,
+        elevation: 59,
+        timezone: 'America/Los_Angeles',
+        model: 'gfs025',
+        member_count: 31,
+        record_count: 384,
+        truncated: true,
+        canvas_id: undefined,
+        table_name: undefined,
+        hourly: [{ time: '2026-06-18T00:00', temperature_2m_member01: 12.1 }],
+        hourly_units: { temperature_2m_member01: '°C' },
+      })[0]?.text ?? '';
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
+    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    // models takes one model, so the lever is a lighter model — not a shorter list.
+    expect(text).toContain('a models value with fewer members');
+    // Heading reports the upstream total and does not claim a canvas holds it.
+    expect(text).toContain('1 shown of 384 total rows)');
+    expect(text).not.toContain('total rows on canvas');
   });
 });

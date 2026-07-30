@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tool: openmeteo_get_ensemble — probabilistic ensemble weather forecast.
  * Returns per-member hourly/daily time series from NWP ensemble models (up to 51 members,
- * 16 days ahead). Large multi-member pulls spill to DataCanvas when canvas is enabled.
+ * 16 days ahead). Large multi-member pulls spill to DataCanvas when canvas is enabled,
+ * and return a bounded preview with truncated: true when it is not.
  * @module mcp-server/tools/definitions/get-ensemble
  */
 
@@ -12,7 +13,13 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { type ColumnarBlock, toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
-import { deriveSpillSchema, exceedsInlineBudget, PREVIEW_CHARS } from '../spill-utils.js';
+import {
+  boundedPreview,
+  deriveSpillSchema,
+  exceedsInlineBudget,
+  noCanvasNotice,
+  PREVIEW_CHARS,
+} from '../spill-utils.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
 
 /**
@@ -32,36 +39,6 @@ function countMembers(...blocks: (ColumnarBlock | undefined)[]): number | undefi
   return members.size > 0 ? members.size : undefined;
 }
 
-/** True when a record carries a non-null value in any column other than `time`. */
-function hasNonNullValue(record: Record<string, unknown>): boolean {
-  for (const [key, value] of Object.entries(record)) {
-    if (key !== 'time' && value != null) return true;
-  }
-  return false;
-}
-
-/**
- * Build a byte-bounded inline preview that begins at the first record carrying data.
- *
- * Ensemble responses with past_days lead with all-null placeholder rows — the models
- * don't hindcast — so the chronological head that spillover()'s byte-drain returns can
- * be entirely null while the staged canvas holds the useful forecast rows. Skip the
- * leading all-null run for the *preview only*; spillover still stages every row in
- * chronological order on the canvas.
- */
-function selectPreviewRows(records: Record<string, unknown>[]): Record<string, unknown>[] {
-  const firstUseful = records.findIndex(hasNonNullValue);
-  const start = firstUseful < 0 ? 0 : firstUseful;
-  const rows: Record<string, unknown>[] = [];
-  let chars = 0;
-  for (const row of records.slice(start)) {
-    chars += JSON.stringify(row).length;
-    if (chars > PREVIEW_CHARS && rows.length > 0) break;
-    rows.push(row);
-  }
-  return rows;
-}
-
 export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
   description:
     'Probabilistic ensemble weather forecast — up to 51 ensemble members, up to 16 days ahead ' +
@@ -72,7 +49,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     '"gfs025" (31 members, global, 0.25°), "icon_seamless" (40 members, global/Europe blend), ' +
     '"gem_global" (21 members, global, 0.25°). Omit models to use the API default blend. ' +
     'Large multi-member, multi-day pulls produce thousands of records and spill to DataCanvas ' +
-    'when canvas is enabled. At least one of hourly_variables or daily_variables is required.',
+    'when canvas is enabled, returning a bounded preview with truncated: true when it is not. ' +
+    'At least one of hourly_variables or daily_variables is required.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -183,13 +161,13 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       .array(z.record(z.string(), z.unknown()))
       .optional()
       .describe(
-        'Per-hour records with "time" (ISO 8601) + per-member columns for each requested variable (e.g., temperature_2m_member01, temperature_2m_member02). Absent when only daily_variables were requested. When truncated, contains a preview only; query canvas_id for the full dataset.',
+        'Per-hour records with "time" (ISO 8601) + per-member columns for each requested variable (e.g., temperature_2m_member01, temperature_2m_member02). Absent when only daily_variables were requested. When truncated, contains a preview only — query canvas_id for the full dataset when one is present.',
       ),
     daily: z
       .array(z.record(z.string(), z.unknown()))
       .optional()
       .describe(
-        'Per-day records with "time" (YYYY-MM-DD) + per-member columns (e.g., temperature_2m_max_member01). Absent when only hourly_variables were requested. When truncated, contains a preview only; query canvas_id for the full dataset.',
+        'Per-day records with "time" (YYYY-MM-DD) + per-member columns (e.g., temperature_2m_max_member01). Absent when only hourly_variables were requested. When truncated, contains a preview only — query canvas_id for the full dataset when one is present.',
       ),
     hourly_units: z
       .record(z.string(), z.string())
@@ -205,23 +183,25 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       ),
     record_count: z
       .number()
-      .describe('Total number of records (hourly + daily rows) in this response'),
+      .describe(
+        'Total number of records (hourly + daily rows) — the full upstream total when truncated is true, not the combined length of the hourly and daily previews.',
+      ),
     canvas_id: z
       .string()
       .optional()
       .describe(
-        'DataCanvas token — present only when truncated is true (data spilled). Query with SQL using this token.',
+        'DataCanvas token for the staged full dataset. Present only when truncated is true AND DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) — absent otherwise, in which case the preview is all this response carries. Query with SQL using this token.',
       ),
     table_name: z
       .string()
       .optional()
       .describe(
-        'DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only when truncated is true.',
+        'DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only alongside canvas_id.',
       ),
     truncated: z
       .boolean()
       .describe(
-        'True when the response was too large to return inline and data spilled to canvas_id. Query the canvas for the full dataset — it holds every hourly and daily row, including any column the preview omits.',
+        'True when the response was too large to return inline, so hourly and daily carry a bounded preview rather than the full set. With DataCanvas enabled the complete data is staged at canvas_id — every hourly and daily row, including any column the preview omits. With it disabled there is no canvas_id, and the omitted rows are reached only by narrowing the request.',
       ),
   }),
 
@@ -291,15 +271,16 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
           signal: ctx.signal,
         });
 
-        // Inline preview: when spilled, favor rows with data — past_days responses
-        // lead with all-null placeholder rows, so a raw chronological head can be
-        // entirely null. When not spilled the whole set fit inline, so return it
-        // complete. Either way the canvas holds every row in chronological order.
+        // Inline preview: when spilled, boundedPreview favors rows with data —
+        // past_days responses lead with all-null placeholder rows, so a raw
+        // chronological head can be entirely null. When not spilled the whole set fit
+        // inline, so return it complete. Either way the canvas holds every row in
+        // chronological order.
         const hourlyPreview = spilled.spilled
-          ? selectPreviewRows(hourlyRecords ?? [])
+          ? boundedPreview(hourlyRecords ?? [])
           : (hourlyRecords ?? []);
         const dailyPreview = spilled.spilled
-          ? selectPreviewRows(dailyRecords ?? [])
+          ? boundedPreview(dailyRecords ?? [])
           : (dailyRecords ?? []);
 
         return {
@@ -322,6 +303,29 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
           truncated: spilled.spilled,
         };
       }
+
+      /*
+       * No canvas (CANVAS_PROVIDER_TYPE=none, the default): bound the preview anyway.
+       * Falling through to the full inline return would report truncated: false on a
+       * multi-megabyte member fan-out. Same per-cadence preview selection the canvas
+       * branch uses, so both paths return the same rows for the same records.
+       */
+      return {
+        latitude: data.latitude,
+        longitude: data.longitude,
+        elevation: data.elevation,
+        timezone: data.timezone,
+        model,
+        member_count: memberCount,
+        record_count: allRecords.length,
+        hourly: boundedPreview(hourlyRecords ?? []),
+        daily: boundedPreview(dailyRecords ?? []),
+        hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
+        daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+        canvas_id: undefined,
+        table_name: undefined,
+        truncated: true,
+      };
     }
 
     return {
@@ -359,32 +363,40 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         `\n⚠️ Large result — full data staged on canvas \`${result.canvas_id}\`, table \`${result.table_name}\`. Query with SQL via openmeteo_dataframe_query.`,
         `_Preview favors rows with data: any leading all-null rows (e.g. past_days placeholders the models don't hindcast) are omitted here but staged in full chronological order on the canvas._`,
       );
+    } else if (result.truncated) {
+      lines.push(
+        `\n${noCanvasNotice('fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or a models value with fewer members (gem_global has 21, ecmwf_ifs025 51)')}`,
+      );
     }
 
     if (result.hourly_units) lines.push(`\n**Hourly units:** ${formatUnits(result.hourly_units)}`);
     if (result.daily_units) lines.push(`**Daily units:** ${formatUnits(result.daily_units)}`);
 
+    // "on canvas" only when one exists — with canvas disabled the total is the
+    // upstream row count and nothing holds the rows the preview omits.
+    const totalRows = `${result.record_count} total rows${result.canvas_id ? ' on canvas' : ''}`;
+
     if (result.daily && result.daily.length > 0) {
-      // When truncated, result.daily is the spillover preview array — render all of
-      // it so content[] matches structuredContent.daily; the heading references
-      // record_count (the full staged total), not the preview length.
+      // When truncated, result.daily is the preview array — render all of it so
+      // content[] matches structuredContent.daily; the heading references
+      // record_count (the full upstream total), not the preview length.
       lines.push(
         '',
         result.truncated
-          ? `### Daily ensemble summary (preview — ${result.daily.length} shown of ${result.record_count} total rows on canvas)`
+          ? `### Daily ensemble summary (preview — ${result.daily.length} shown of ${totalRows})`
           : `### Daily ensemble summary (${result.daily.length} records)`,
       );
       for (const rec of result.daily) lines.push(formatRecord(rec));
     }
 
     if (result.hourly && result.hourly.length > 0) {
-      // When truncated, result.hourly is the spillover preview array — render all of
-      // it so content[] matches structuredContent.hourly; the heading references
-      // record_count (the full staged total), not the preview length.
+      // When truncated, result.hourly is the preview array — render all of it so
+      // content[] matches structuredContent.hourly; the heading references
+      // record_count (the full upstream total), not the preview length.
       lines.push(
         '',
         result.truncated
-          ? `### Hourly ensemble (preview — ${result.hourly.length} shown of ${result.record_count} total rows on canvas)`
+          ? `### Hourly ensemble (preview — ${result.hourly.length} shown of ${totalRows})`
           : `### Hourly ensemble (${result.hourly.length} records)`,
       );
       for (const rec of result.hourly) lines.push(formatRecord(rec));
