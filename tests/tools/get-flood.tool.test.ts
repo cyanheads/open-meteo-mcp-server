@@ -192,24 +192,27 @@ describe('openmeteoGetFloodTool', () => {
     ['start_date only', { start_date: '2024-01-01' }],
     ['end_date only', { end_date: '2024-01-02' }],
     ['a correctly paired range', { start_date: '2024-01-01', end_date: '2024-01-02' }],
-  ])('throws forecast_days_conflict when forecast_days is combined with %s', async (_label, dates) => {
-    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
-    const input = openmeteoGetFloodTool.input.parse({
-      latitude: 47.6,
-      longitude: -122.3,
-      daily_variables: ['river_discharge'],
-      forecast_days: 7,
-      ...dates,
-    });
-    await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: {
-        reason: 'forecast_days_conflict',
-        recovery: { hint: expect.stringContaining('forecast_days') },
-      },
-    });
-    expect(mockGetFlood).not.toHaveBeenCalled();
-  });
+  ])(
+    'throws forecast_days_conflict when forecast_days is combined with %s',
+    async (_label, dates) => {
+      const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+      const input = openmeteoGetFloodTool.input.parse({
+        latitude: 47.6,
+        longitude: -122.3,
+        daily_variables: ['river_discharge'],
+        forecast_days: 7,
+        ...dates,
+      });
+      await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'forecast_days_conflict',
+          recovery: { hint: expect.stringContaining('forecast_days') },
+        },
+      });
+      expect(mockGetFlood).not.toHaveBeenCalled();
+    },
+  );
 
   it('accepts forecast_days alone and a paired range alone', async () => {
     mockGetFlood.mockResolvedValue(MOCK_RESPONSE);
