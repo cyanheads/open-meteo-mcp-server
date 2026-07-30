@@ -16,11 +16,16 @@ api_docs: https://open-meteo.com/en/docs
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `openmeteo_search_locations` | Resolve a place name to ranked coordinate matches. Required first step before any weather tool — weather tools take coordinates, not names. Returns name, country, admin1/2, lat/lon, elevation, timezone, population, and feature type for disambiguation. | `name: string`, `count?: 1–10` | `readOnlyHint: true` |
-| `openmeteo_get_forecast` | Weather forecast for coordinates: hourly and/or daily variables for up to 16 days. Optional `past_days` (up to 92) covers recent history when ERA5 has a lag. Reshapes columnar API response into per-timestamp records. `timezone=auto` default localizes to the location. | `latitude`, `longitude`, `hourly_variables?: string[]`, `daily_variables?: string[]`, `forecast_days?: 1–16`, `past_days?: 0–92`, `wind_speed_unit?`, `temperature_unit?` | `readOnlyHint: true` |
-| `openmeteo_get_historical` | Historical weather from the ERA5 reanalysis archive (1940–present, ~5-day lag). Date range required; same variable vocabulary as `openmeteo_get_forecast` so past and forecast are directly comparable. Large ranges spill to DataCanvas. | `latitude`, `longitude`, `start_date: ISO date`, `end_date: ISO date`, `hourly_variables?: string[]`, `daily_variables?: string[]`, `timezone?`, `temperature_unit?`, `wind_speed_unit?` | `readOnlyHint: true` |
+| `openmeteo_get_forecast` | Weather forecast for coordinates: hourly and/or daily variables for up to 16 days. Optional `past_days` (up to 92) covers recent history when ERA5 has a lag. Reshapes columnar API response into per-timestamp records. `timezone=auto` default localizes to the location. Wide windows spill to DataCanvas. | `latitude`, `longitude`, `hourly_variables?: string[]`, `daily_variables?: string[]`, `forecast_days?: 1–16`, `past_days?: 0–92`, `wind_speed_unit?`, `temperature_unit?`, `canvas_id?` | `readOnlyHint: true` |
+| `openmeteo_get_historical` | Historical weather from the ERA5 reanalysis archive (1940–present, ~5-day lag). Date range required; same variable vocabulary as `openmeteo_get_forecast` so past and forecast are directly comparable. Large ranges spill to DataCanvas. | `latitude`, `longitude`, `start_date: ISO date`, `end_date: ISO date`, `hourly_variables?: string[]`, `daily_variables?: string[]`, `timezone?`, `temperature_unit?`, `wind_speed_unit?`, `canvas_id?` | `readOnlyHint: true` |
 | `openmeteo_get_marine` | Marine forecast for a coastal or ocean coordinate: wave height/period/direction, wind-wave, swell components. Reshapes columnar response into per-timestamp records. Best for open-ocean and coastal points; inland points return near-zero wave values. | `latitude`, `longitude`, `hourly_variables?: string[]`, `daily_variables?: string[]`, `forecast_days?: 1–7`, `timezone?` | `readOnlyHint: true` |
 | `openmeteo_get_air_quality` | Modeled CAMS air quality forecast: PM2.5, PM10, NO2, SO2, O3, CO, dust, pollen, and European/US AQI indices. Modeled grid data — cross-reference `openaq-mcp-server` for measured station readings. | `latitude`, `longitude`, `hourly_variables?: string[]`, `forecast_days?: 1–7`, `timezone?` | `readOnlyHint: true` |
 | `openmeteo_get_elevation` | Terrain elevation from Copernicus DEM (~90m resolution) for one or more coordinates. Accepts up to 100 coordinate pairs in one call. | `latitudes: number[]`, `longitudes: number[]` | `readOnlyHint: true`, `idempotentHint: true` |
+| `openmeteo_get_ensemble` | Probabilistic ensemble forecast — up to 51 members, up to 16 days ahead. Each member's values appear as a suffixed column (`temperature_2m_member01`). Use the spread across members for exceedance probabilities and uncertainty. Large multi-member pulls spill to DataCanvas. | `latitude`, `longitude`, `hourly_variables?: string[]`, `daily_variables?: string[]`, `models?`, `forecast_days?: 1–16`, `past_days?: 0–92`, `timezone?`, `canvas_id?` | `readOnlyHint: true`, `idempotentHint: true` |
+| `openmeteo_get_flood` | GloFAS river discharge (m³/s) for the river nearest the coordinates — the API snaps to the nearest stream, no river ID needed. One mode per call: `forecast_days` for the outlook, or `start_date`+`end_date` together for reanalysis history back to 1984. Wide ranges spill to DataCanvas. | `latitude`, `longitude`, `daily_variables?: string[]`, `forecast_days?: 1–210`, `start_date?: ISO date`, `end_date?: ISO date`, `timezone?`, `canvas_id?` | `readOnlyHint: true`, `idempotentHint: true` |
+| `openmeteo_get_climate` | Bias-corrected daily CMIP6 climate projections, 1950–2050 — the future-projection counterpart to `openmeteo_get_historical`. With 2+ models each variable is suffixed by model name. Daily resolution only. Multi-decade multi-model pulls spill to DataCanvas. | `latitude`, `longitude`, `start_date: ISO date`, `end_date: ISO date`, `daily_variables?: string[]`, `models?: string[]` (max 7), `timezone?`, `canvas_id?` | `readOnlyHint: true`, `idempotentHint: true` |
+| `openmeteo_dataframe_describe` | List the tables and columns staged on a DataCanvas by the five spill-capable tools. Call before querying to discover table names. | `canvas_id: string` | `readOnlyHint: true`, `idempotentHint: true` |
+| `openmeteo_dataframe_query` | Run a read-only SQL SELECT against tables staged on a DataCanvas. Takes the `canvas_id` and the `table_name` returned when a tool spills (`truncated: true`). | `canvas_id: string`, `sql: string` | `readOnlyHint: true` |
 
 ### Resources
 
@@ -244,7 +249,7 @@ errors: [
 
 ### `openmeteo_get_forecast`
 
-**Description:** Weather forecast for coordinates: hourly and/or daily variables for up to 16 days ahead, with optional `past_days` (up to 92) for recent history. Use `past_days` instead of `openmeteo_get_historical` for dates within the last 1–5 days, since the ERA5 archive has a variable lag. Reshapes the columnar API response into per-timestamp records. Common hourly variables: `temperature_2m`, `precipitation`, `wind_speed_10m`, `relative_humidity_2m`, `cloud_cover`, `uv_index`, `apparent_temperature`, `precipitation_probability`, `weather_code`, `surface_pressure`, `visibility`, `wind_direction_10m`, `wind_gusts_10m`, `dew_point_2m`. Common daily variables: `temperature_2m_max`, `temperature_2m_min`, `precipitation_sum`, `wind_speed_10m_max`, `sunrise`, `sunset`, `uv_index_max`, `precipitation_hours`, `weather_code`. At least one of `hourly_variables` or `daily_variables` is required.
+**Description:** Weather forecast for coordinates: hourly and/or daily variables for up to 16 days ahead, with optional `past_days` (up to 92) for recent history. Use `past_days` instead of `openmeteo_get_historical` for dates within the last 1–5 days, since the ERA5 archive has a variable lag. Reshapes the columnar API response into per-timestamp records. Common hourly variables: `temperature_2m`, `precipitation`, `wind_speed_10m`, `relative_humidity_2m`, `cloud_cover`, `uv_index`, `apparent_temperature`, `precipitation_probability`, `weather_code`, `surface_pressure`, `visibility`, `wind_direction_10m`, `wind_gusts_10m`, `dew_point_2m`. Common daily variables: `temperature_2m_max`, `temperature_2m_min`, `precipitation_sum`, `wind_speed_10m_max`, `sunrise`, `sunset`, `uv_index_max`, `precipitation_hours`, `weather_code`. A wide window — a large `past_days` plus many hourly variables — produces thousands of records; these spill to DataCanvas for SQL querying when canvas is enabled, and return a bounded preview with `truncated: true` when it is not. At least one of `hourly_variables` or `daily_variables` is required.
 
 **Input schema:**
 ```ts
@@ -269,6 +274,8 @@ errors: [
     .describe('Precipitation unit: "mm" or "inch". Default "mm".'),
   timezone: z.string().default('auto')
     .describe('IANA timezone (e.g., "America/Los_Angeles") or "auto" to use the location\'s local timezone. Default "auto". The timezone from openmeteo_search_locations is ideal to pass here.'),
+  canvas_id: z.string().optional()
+    .describe('DataCanvas token for wide past_days or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas for SQL querying. Omit to create a fresh canvas.'),
 }
 ```
 
@@ -280,14 +287,21 @@ errors: [
   elevation: z.number().describe('Terrain elevation at grid point (meters)'),
   timezone: z.string().describe('Resolved IANA timezone'),
   utc_offset_seconds: z.number().describe('UTC offset in seconds for this timezone at query time'),
+  record_count: z.number().describe('Total number of records (hourly + daily rows) — the full upstream total when truncated is true, not the combined length of the hourly and daily previews.'),
   hourly: z.array(z.record(z.unknown())).optional()
-    .describe('Per-hour records. Each object has a "time" field (ISO 8601) plus one key per requested variable with its value. Units are in the hourly_units map.'),
+    .describe('Per-hour records. Each object has a "time" field (ISO 8601) plus one key per requested variable with its value. Units are in the hourly_units map. When truncated, contains only a preview — query canvas_id for the full dataset when one is present.'),
   daily: z.array(z.record(z.unknown())).optional()
-    .describe('Per-day records. Each object has a "time" field (YYYY-MM-DD) plus one key per requested variable with its value. Units are in the daily_units map.'),
+    .describe('Per-day records. Each object has a "time" field (YYYY-MM-DD) plus one key per requested variable with its value. Units are in the daily_units map. When truncated, contains only a preview — query canvas_id for the full dataset when one is present.'),
   hourly_units: z.record(z.string()).optional()
     .describe('Map of variable name → unit string for hourly data (e.g., {"temperature_2m": "°C", "precipitation": "mm"}).'),
   daily_units: z.record(z.string()).optional()
     .describe('Map of variable name → unit string for daily data.'),
+  canvas_id: z.string().optional()
+    .describe('DataCanvas token for the staged full dataset. Present only when truncated is true AND DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) — absent otherwise, in which case the preview is all this response carries. Query with SQL using this token.'),
+  table_name: z.string().optional()
+    .describe('DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only alongside canvas_id.'),
+  truncated: z.boolean()
+    .describe('True when the response was too large to return inline, so hourly and daily carry a bounded preview rather than the full set. With DataCanvas enabled the complete data is staged at canvas_id — every hourly and daily row, including any column the preview omits. With it disabled there is no canvas_id, and the omitted rows are reached only by narrowing the request.'),
 }
 ```
 
@@ -356,7 +370,7 @@ errors: [
     start: z.string().describe('Actual start date of returned data'),
     end: z.string().describe('Actual end date of returned data'),
   }).describe('Date range of returned data'),
-  record_count: z.number().describe('Total number of records (hourly or daily rows) in this response'),
+  record_count: z.number().describe('Total number of records (hourly + daily rows) — the full upstream total when truncated is true, not the combined length of the hourly and daily previews.'),
   hourly: z.array(z.record(z.unknown())).optional()
     .describe('Per-hour records with "time" (ISO 8601) + variable keys. Empty when only daily was requested.'),
   daily: z.array(z.record(z.unknown())).optional()
@@ -366,9 +380,9 @@ errors: [
   daily_units: z.record(z.string()).optional()
     .describe('Variable → unit string for daily data.'),
   canvas_id: z.string().optional()
-    .describe('DataCanvas token — present only when truncated is true (data spilled). Query with SQL using this token.'),
+    .describe('DataCanvas token for the staged full dataset. Present only when truncated is true AND DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) — absent otherwise, in which case the preview is all this response carries. Query with SQL using this token.'),
   truncated: z.boolean()
-    .describe('True when the response was too large to return inline and data spilled to canvas_id. Query the canvas for the full dataset — it holds every hourly and daily row, including any column the preview omits.'),
+    .describe('True when the response was too large to return inline, so hourly and daily carry a bounded preview rather than the full set. With DataCanvas enabled the complete data is staged at canvas_id — every hourly and daily row, including any column the preview omits. With it disabled there is no canvas_id, and the omitted rows are reached only by narrowing the request.'),
 }
 ```
 
@@ -525,7 +539,7 @@ errors: [
 2. **OpenMeteoService** — HTTP client wrapping all six endpoints; columnar-to-records reshape helper; retry with 2 attempts, 500ms delay; error envelope detection.
 3. **`openmeteo_search_locations`** — no reshape needed; guard `results ?? []`; `no_results` error contract.
 4. **`openmeteo_get_elevation`** — simplest tool; validates array length parity; zips input coords with response array.
-5. **`openmeteo_get_forecast`** — reshape helper for hourly + daily; `no_variables_requested` guard; rich `format()` output.
+5. **`openmeteo_get_forecast`** — reshape helper for hourly + daily; `no_variables_requested` guard; rich `format()` output; DataCanvas spillover for wide `past_days` windows.
 6. **`openmeteo_get_historical`** — same reshape; date validation; DataCanvas spillover for large ranges.
 7. **`openmeteo_get_marine`** — same reshape; note ocean_current_velocity nullability.
 8. **`openmeteo_get_air_quality`** — same reshape; surface `data_source: 'CAMS'` in output.
@@ -546,9 +560,13 @@ Each tool is independently testable. The reshape helper is the only shared inter
 
 **No resources.** Weather time-series has no stable URI — it changes by the hour, is keyed by coordinates + variables + timezone, and doesn't map to addressable entities. Resources add no value here.
 
-**DataCanvas for historical, ensemble, flood, and climate.** These four are the tools whose response size is unbounded: multi-year hourly archive pulls reach tens of thousands of rows; ensemble and climate fan a variable out into one column per member or per model, so a payload grows by width as well as by length; and flood's GloFAS reanalysis runs daily from 1984, ~15.5k rows (~285 KB) for a full-history pull. Marine (max 7 days × 24h = 168 rows) and air quality (same) fit inline. Each of the four gets an optional `canvas_id` input plus `truncated`/`canvas_id`/`table_name` output.
+**DataCanvas for forecast, historical, ensemble, flood, and climate.** These five are the tools whose response size is unbounded: multi-year hourly archive pulls reach tens of thousands of rows; ensemble and climate fan a variable out into one column per member or per model, so a payload grows by width as well as by length; flood's GloFAS reanalysis runs daily from 1984, ~15.5k rows (~285 KB) for a full-history pull; and forecast accepts `past_days: 92` alongside `forecast_days: 16`, a 108-day window that reaches the same class as the archive tool it defers to for recent history. Marine (max 7 days × 24h = 168 rows) and air quality (same) fit inline. Each of the five gets an optional `canvas_id` input plus `truncated`/`record_count`/`canvas_id`/`table_name` output.
 
-**Spill eligibility is payload size, not row count.** The spill-capable tools measure the serialized size of the records they are about to return against one budget (`PREVIEW_CHARS` in `src/mcp-server/tools/spill-utils.ts`) and spill past it. That budget is the same number handed to `spillover()` as `previewChars`, which is what makes the precheck agree with the helper exactly: a result that would not spill never acquires a canvas. A row-count gate can only disagree — it misses a wide result that overflows the budget in a few hundred rows (a 16-day ensemble fan-out is ~376 KB in 384 rows), and it acquires a canvas for a narrow result that `spillover()` then declines to stage, burning a per-tenant canvas slot the caller never learns about because `canvas_id` is only surfaced on a real spill.
+**An exceeded budget bounds the response whether or not a canvas exists.** `CANVAS_PROVIDER_TYPE` defaults to `none`, so on a default deployment `getCanvas()` returns undefined. Gating the whole size check behind a canvas would let an over-budget result fall through to an unbounded inline return carrying `truncated: false` — the field a client reads to decide whether anything is missing — so `boundedPreview()` in `spill-utils.ts` truncates against the same `PREVIEW_CHARS` budget with no canvas behind it, and `format()` says why there is no `canvas_id` and how to reach the rest (enable `CANVAS_PROVIDER_TYPE=duckdb`, or narrow the request). `record_count` keeps reporting the full upstream total on that path, not the preview length, so the caller can tell how much is missing. Rejecting wide inputs was the alternative and is worse: those ranges are valid, and a caller who wants the whole set should still be able to get it by enabling canvas.
+
+**The canvas-less preview starts at the first row carrying data.** On that path the preview is everything the caller gets, and three real response shapes open with a run of all-null rows: an ensemble `past_days` response leads with placeholder rows the models don't hindcast; the forecast API serves fewer past days than `past_days: 92` allows, so the unserved head comes back null (a Seattle 92-day pull measured 733 null rows of 2,592, longer than the whole 80,000-character budget); and a GloFAS reanalysis range starting before the coordinate's record begins is null until it does (4,749 null rows of 15,523 from 1984). A chronological head spends the entire budget inside that run and returns a response with no data at all, so `boundedPreview()` skips it. Skipped rows are still counted in `record_count`, and when every row is null the head is returned as-is rather than an empty array. On the canvas path only ensemble reuses the same selection; the other four keep `spillover()`'s chronological head, since the canvas holds every row and a null-leading preview costs the caller nothing there.
+
+**Spill eligibility is payload size, not row count.** The spill-capable tools measure the serialized size of the records they are about to return against one budget (`PREVIEW_CHARS` in `src/mcp-server/tools/spill-utils.ts`) and spill past it. That budget is the same number handed to `spillover()` as `previewChars`, which is what makes the precheck agree with the helper exactly: a result that would not spill never acquires a canvas. A row-count gate can only disagree — it misses a wide result that overflows the budget in a few hundred rows (a 16-day ensemble fan-out is ~376 KB in 384 rows), and it acquires a canvas for a narrow result that `spillover()` then declines to stage, burning a per-tenant canvas slot the caller never learns about because `canvas_id` is only surfaced on a real spill. The same budget bounds the canvas-less path, so a given set of records yields the same preview in either configuration.
 
 **Spill schemas are derived from the full record set, never sniffed.** The spill-capable tools pass `spillover()` an explicit `schema` built from every staged row. Left to infer, `spillover()` samples only its own preview buffer, and two real response shapes defeat that window: an ensemble `past_days` response opens with a long run of all-null placeholder rows (the models don't hindcast), leaving every column with no non-null evidence and typing them all VARCHAR; and hourly records are concatenated ahead of daily ones, so a large hourly pull exhausts the window before a daily row is sampled — and a column missing from the schema is never created on the table at all. Types come from every observed value rather than the first non-null one: `precipitation` arrives as `[0, 0.5, 0]`, whose leading `0` alone would type the column integer and truncate every fractional reading, and `sunrise`/`sunset` are ISO 8601 strings, so a blanket "weather columns are numeric" rule would corrupt them.
 

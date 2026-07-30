@@ -34,7 +34,7 @@ Eleven tools covering geocoding, weather forecasts, historical climate, probabil
 | Tool | Description |
 |:---|:---|
 | `openmeteo_search_locations` | Resolve a place name to ranked coordinate matches with country, region, elevation, timezone, and population |
-| `openmeteo_get_forecast` | Weather forecast for coordinates: hourly and/or daily variables for up to 16 days, with optional recent past data |
+| `openmeteo_get_forecast` | Weather forecast for coordinates: hourly and/or daily variables for up to 16 days, with optional recent past data; wide windows spill to DataCanvas |
 | `openmeteo_get_historical` | Historical weather from the ERA5 reanalysis archive (1940–present); large ranges spill to DataCanvas |
 | `openmeteo_get_marine` | Marine forecast for coastal or ocean coordinates: wave height, period, direction, swell, and sea-surface temperature |
 | `openmeteo_get_air_quality` | Modeled CAMS air quality forecast: PM2.5, PM10, NO2, O3, CO, dust, pollen, and European/US AQI indices |
@@ -42,7 +42,7 @@ Eleven tools covering geocoding, weather forecasts, historical climate, probabil
 | `openmeteo_get_ensemble` | Probabilistic ensemble forecast: per-member hourly/daily time series (up to 51 members, 16 days) for exceedance and uncertainty analysis |
 | `openmeteo_get_flood` | GloFAS river discharge forecast (up to 210 days) or reanalysis (1984–present); coordinate-based, snaps to nearest river; large ranges spill to DataCanvas |
 | `openmeteo_get_climate` | Bias-corrected daily CMIP6 climate projections (1950–2050) across up to 7 models; large ranges spill to DataCanvas |
-| `openmeteo_dataframe_describe` | List tables and columns on a DataCanvas staged by `openmeteo_get_historical`, `openmeteo_get_ensemble`, `openmeteo_get_flood`, or `openmeteo_get_climate` |
+| `openmeteo_dataframe_describe` | List tables and columns on a DataCanvas staged by `openmeteo_get_forecast`, `openmeteo_get_historical`, `openmeteo_get_ensemble`, `openmeteo_get_flood`, or `openmeteo_get_climate` |
 | `openmeteo_dataframe_query` | Run a read-only SQL SELECT against tables staged on a DataCanvas |
 
 ### `openmeteo_search_locations`
@@ -68,6 +68,7 @@ Weather forecast for a coordinate pair with hourly and/or daily variable selecti
 - At least one of `hourly_variables` or `daily_variables` is required
 - Configurable temperature unit (Celsius/Fahrenheit), wind speed unit (km/h, mph, m/s, knots), and precipitation unit (mm/inch)
 - Reshapes the API's columnar response into per-timestamp records with a parallel `hourly_units` / `daily_units` map
+- A wide window (a large `past_days` plus many hourly variables) spills to DataCanvas when `CANVAS_PROVIDER_TYPE=duckdb` — output includes `canvas_id` and `truncated: true`; query with `openmeteo_dataframe_query`
 
 ---
 
@@ -174,7 +175,7 @@ Open-Meteo–specific:
 - Self-contained geocoding: `openmeteo_search_locations` resolves place names so agents don't need a separate geocoder
 - ERA5 archive from 1940 to present with same variable schema as the forecast API — direct past/forecast comparisons on one schema
 - Automatic columnar-to-record reshape: Open-Meteo returns parallel time/variable arrays; handlers convert to per-timestamp records with a `*_units` map
-- DataCanvas spillover for `openmeteo_get_historical`, `openmeteo_get_ensemble`, `openmeteo_get_flood`, and `openmeteo_get_climate`: a result too large to return inline registers a DuckDB dataframe for SQL querying, staging every hourly and daily row with its upstream numeric type intact
+- DataCanvas spillover for `openmeteo_get_forecast`, `openmeteo_get_historical`, `openmeteo_get_ensemble`, `openmeteo_get_flood`, and `openmeteo_get_climate`: a result too large to return inline registers a DuckDB dataframe for SQL querying, staging every hourly and daily row with its upstream numeric type intact. With `CANVAS_PROVIDER_TYPE=none` (the default) the same size check still applies — those tools return a bounded preview with `truncated: true` and no `canvas_id`, never an unbounded payload claiming to be complete
 - Configurable base URLs for all eight API endpoints (forecast, archive, marine, air quality, geocoding, ensemble, flood, climate) — override for testing or self-hosted deployments
 - **Attribution:** Weather data by [Open-Meteo.com](https://open-meteo.com/) (CC BY 4.0). Non-commercial use is free and keyless; commercial use requires Open-Meteo's paid API tier (~10,000 req/day, 5,000/hour fair-use ceiling for non-commercial)
 
@@ -302,7 +303,7 @@ All configuration is validated at startup via Zod schemas. No API key is require
 | `MCP_GC_PRESSURE_INTERVAL_MS` | Opt-in forced-GC interval (ms, Bun only). Set to `60000` if heap growth is observed under sustained HTTP traffic. | `0` |
 | `LOGS_DIR` | Directory for log files (Node.js only) | `<project-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
-| `CANVAS_PROVIDER_TYPE` | Canvas engine for `openmeteo_get_historical` / `openmeteo_get_ensemble` / `openmeteo_get_flood` / `openmeteo_get_climate` spillover: `duckdb` or `none` | `none` |
+| `CANVAS_PROVIDER_TYPE` | Canvas engine for `openmeteo_get_forecast` / `openmeteo_get_historical` / `openmeteo_get_ensemble` / `openmeteo_get_flood` / `openmeteo_get_climate` spillover: `duckdb` or `none`. At `none` those tools still bound an over-budget response to a preview and set `truncated: true` — there is just no canvas holding the rows they omit | `none` |
 | `OPEN_METEO_API_BASE_URL` | Override for the main forecast + elevation API | `https://api.open-meteo.com` |
 | `OPEN_METEO_ARCHIVE_BASE_URL` | Override for the ERA5 historical archive API | `https://archive-api.open-meteo.com` |
 | `OPEN_METEO_MARINE_BASE_URL` | Override for the marine forecast API | `https://marine-api.open-meteo.com` |
@@ -355,7 +356,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/config` | Server-specific environment variable parsing and validation with Zod |
 | `src/mcp-server/tools/definitions` | Tool definitions (`*.tool.ts`) — one file per tool; includes `dataframe-describe.tool.ts` and `dataframe-query.tool.ts` |
 | `src/services/open-meteo` | Open-Meteo HTTP client wrapping all nine endpoints with retry, error classification, and columnar reshape |
-| `src/services/canvas-accessor.ts` | DataCanvas accessor for `openmeteo_get_historical` / `openmeteo_get_ensemble` / `openmeteo_get_flood` / `openmeteo_get_climate` spillover |
+| `src/services/canvas-accessor.ts` | DataCanvas accessor for `openmeteo_get_forecast` / `openmeteo_get_historical` / `openmeteo_get_ensemble` / `openmeteo_get_flood` / `openmeteo_get_climate` spillover |
 | `tests/` | Unit and integration tests mirroring `src/` |
 
 ## Development guide

@@ -225,17 +225,17 @@ src/
     open-meteo/
       open-meteo-service.ts             # HTTP client: forecast, archive, marine, air quality, geocoding, elevation, ensemble, flood, climate
       types.ts                          # API response types
-    canvas-accessor.ts                  # DataCanvas accessor for openmeteo_get_historical / openmeteo_get_ensemble / openmeteo_get_climate spillover
+    canvas-accessor.ts                  # DataCanvas accessor for the spill-capable tools (forecast / historical / ensemble / flood / climate)
   mcp-server/
     tools/definitions/
       search-locations.tool.ts          # openmeteo_search_locations
-      get-forecast.tool.ts              # openmeteo_get_forecast
+      get-forecast.tool.ts              # openmeteo_get_forecast (DataCanvas spillover)
       get-historical.tool.ts            # openmeteo_get_historical (DataCanvas spillover)
       get-marine.tool.ts                # openmeteo_get_marine
       get-air-quality.tool.ts           # openmeteo_get_air_quality
       get-elevation.tool.ts             # openmeteo_get_elevation
       get-ensemble.tool.ts              # openmeteo_get_ensemble (DataCanvas spillover)
-      get-flood.tool.ts                 # openmeteo_get_flood
+      get-flood.tool.ts                 # openmeteo_get_flood (DataCanvas spillover)
       get-climate.tool.ts               # openmeteo_get_climate (DataCanvas spillover)
 ```
 
