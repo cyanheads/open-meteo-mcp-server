@@ -45,7 +45,9 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       .number()
       .min(-90)
       .max(90)
-      .describe('Latitude in decimal degrees. Use openmeteo_geocode to resolve a place name.'),
+      .describe(
+        'Latitude in decimal degrees. Use openmeteo_search_locations to resolve a place name.',
+      ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
     hourly_variables: z
       .array(z.string())

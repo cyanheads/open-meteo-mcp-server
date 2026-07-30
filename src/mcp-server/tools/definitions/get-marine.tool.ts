@@ -47,7 +47,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .min(-90)
       .max(90)
       .describe(
-        'Latitude of a coastal or ocean point. Use openmeteo_geocode to resolve a place name. Inland points return near-zero wave values.',
+        'Latitude of a coastal or ocean point. Use openmeteo_search_locations to resolve a place name. Inland points return near-zero wave values.',
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
     hourly_variables: z

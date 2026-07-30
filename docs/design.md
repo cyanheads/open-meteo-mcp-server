@@ -15,7 +15,7 @@ api_docs: https://open-meteo.com/en/docs
 
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
-| `openmeteo_geocode` | Resolve a place name to ranked coordinate matches. Required first step before any weather tool — weather tools take coordinates, not names. Returns name, country, admin1/2, lat/lon, elevation, timezone, population, and feature type for disambiguation. | `name: string`, `count?: 1–10` | `readOnlyHint: true` |
+| `openmeteo_search_locations` | Resolve a place name to ranked coordinate matches. Required first step before any weather tool — weather tools take coordinates, not names. Returns name, country, admin1/2, lat/lon, elevation, timezone, population, and feature type for disambiguation. | `name: string`, `count?: 1–10` | `readOnlyHint: true` |
 | `openmeteo_get_forecast` | Weather forecast for coordinates: hourly and/or daily variables for up to 16 days. Optional `past_days` (up to 92) covers recent history when ERA5 has a lag. Reshapes columnar API response into per-timestamp records. `timezone=auto` default localizes to the location. | `latitude`, `longitude`, `hourly_variables?: string[]`, `daily_variables?: string[]`, `forecast_days?: 1–16`, `past_days?: 0–92`, `wind_speed_unit?`, `temperature_unit?` | `readOnlyHint: true` |
 | `openmeteo_get_historical` | Historical weather from the ERA5 reanalysis archive (1940–present, ~5-day lag). Date range required; same variable vocabulary as `openmeteo_get_forecast` so past and forecast are directly comparable. Large ranges spill to DataCanvas. | `latitude`, `longitude`, `start_date: ISO date`, `end_date: ISO date`, `hourly_variables?: string[]`, `daily_variables?: string[]`, `timezone?`, `temperature_unit?`, `wind_speed_unit?` | `readOnlyHint: true` |
 | `openmeteo_get_marine` | Marine forecast for a coastal or ocean coordinate: wave height/period/direction, wind-wave, swell components. Reshapes columnar response into per-timestamp records. Best for open-ocean and coastal points; inland points return near-zero wave values. | `latitude`, `longitude`, `hourly_variables?: string[]`, `daily_variables?: string[]`, `forecast_days?: 1–7`, `timezone?` | `readOnlyHint: true` |
@@ -38,7 +38,7 @@ Global weather and climate data via Open-Meteo's keyless API — forecast up to 
 
 Fills the **global** gap in keyless weather coverage that `nws-weather-mcp-server` and `noaa-cdo-mcp-server` leave: NWS is US-only; NOAA CDO has token management friction. Open-Meteo serves any coordinates on Earth with consistent variable names across both forecast and history, making past-vs-forecast comparisons on one schema practical.
 
-The server is self-contained: `openmeteo_geocode` resolves free-text place names to coordinates so agents don't need an external geocoder.
+The server is self-contained: `openmeteo_search_locations` resolves free-text place names to coordinates so agents don't need an external geocoder.
 
 **Attribution:** Weather data by Open-Meteo.com (CC BY 4.0). Non-commercial use is free and keyless; commercial use requires the paid API tier.
 
@@ -190,7 +190,7 @@ No API key required. Config is optional-only — the server works zero-config fo
 
 ## Tool Detail
 
-### `openmeteo_geocode`
+### `openmeteo_search_locations`
 
 **Description:** Resolve a place name to ranked coordinate matches with country, region, elevation, timezone, and population. Required prerequisite for name-based queries — all weather tools take latitude/longitude, not place names. Returns up to 10 matches ranked by population/relevance; use country or admin1 to disambiguate when multiple cities share a name.
 
@@ -250,7 +250,7 @@ errors: [
 ```ts
 {
   latitude: z.number().min(-90).max(90)
-    .describe('Latitude in decimal degrees (e.g., 47.6062 for Seattle). Use openmeteo_geocode to resolve a place name to coordinates.'),
+    .describe('Latitude in decimal degrees (e.g., 47.6062 for Seattle). Use openmeteo_search_locations to resolve a place name to coordinates.'),
   longitude: z.number().min(-180).max(180)
     .describe('Longitude in decimal degrees (e.g., -122.3321 for Seattle).'),
   hourly_variables: z.array(z.string()).optional()
@@ -268,7 +268,7 @@ errors: [
   precipitation_unit: z.enum(['mm', 'inch']).default('mm')
     .describe('Precipitation unit: "mm" or "inch". Default "mm".'),
   timezone: z.string().default('auto')
-    .describe('IANA timezone (e.g., "America/Los_Angeles") or "auto" to use the location\'s local timezone. Default "auto". The timezone from openmeteo_geocode is ideal to pass here.'),
+    .describe('IANA timezone (e.g., "America/Los_Angeles") or "auto" to use the location\'s local timezone. Default "auto". The timezone from openmeteo_search_locations is ideal to pass here.'),
 }
 ```
 
@@ -321,7 +321,7 @@ errors: [
 ```ts
 {
   latitude: z.number().min(-90).max(90)
-    .describe('Latitude in decimal degrees. Use openmeteo_geocode to resolve a place name to coordinates.'),
+    .describe('Latitude in decimal degrees. Use openmeteo_search_locations to resolve a place name to coordinates.'),
   longitude: z.number().min(-180).max(180)
     .describe('Longitude in decimal degrees.'),
   start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -409,7 +409,7 @@ errors: [
 ```ts
 {
   latitude: z.number().min(-90).max(90)
-    .describe('Latitude of a coastal or ocean point. Use openmeteo_geocode to resolve a place name. Inland points return near-zero wave values.'),
+    .describe('Latitude of a coastal or ocean point. Use openmeteo_search_locations to resolve a place name. Inland points return near-zero wave values.'),
   longitude: z.number().min(-180).max(180)
     .describe('Longitude in decimal degrees.'),
   hourly_variables: z.array(z.string()).optional()
@@ -450,7 +450,7 @@ errors: [
 ```ts
 {
   latitude: z.number().min(-90).max(90)
-    .describe('Latitude in decimal degrees. Use openmeteo_geocode to resolve a place name.'),
+    .describe('Latitude in decimal degrees. Use openmeteo_search_locations to resolve a place name.'),
   longitude: z.number().min(-180).max(180)
     .describe('Longitude in decimal degrees.'),
   hourly_variables: z.array(z.string()).optional()
@@ -523,7 +523,7 @@ errors: [
 
 1. **Config and server setup** — `src/config/server-config.ts` with base URL overrides (all optional); update `createApp()` instructions with geocode-before-forecast guidance and ERA5 lag note.
 2. **OpenMeteoService** — HTTP client wrapping all six endpoints; columnar-to-records reshape helper; retry with 2 attempts, 500ms delay; error envelope detection.
-3. **`openmeteo_geocode`** — no reshape needed; guard `results ?? []`; `no_results` error contract.
+3. **`openmeteo_search_locations`** — no reshape needed; guard `results ?? []`; `no_results` error contract.
 4. **`openmeteo_get_elevation`** — simplest tool; validates array length parity; zips input coords with response array.
 5. **`openmeteo_get_forecast`** — reshape helper for hourly + daily; `no_variables_requested` guard; rich `format()` output.
 6. **`openmeteo_get_historical`** — same reshape; date validation; DataCanvas spillover for large ranges.

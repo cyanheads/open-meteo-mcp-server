@@ -1,7 +1,7 @@
 /**
- * @fileoverview Tool: openmeteo_geocode — resolve a place name to ranked coordinate matches.
+ * @fileoverview Tool: openmeteo_search_locations — resolve a place name to ranked coordinate matches.
  * Required prerequisite for weather tools, which take coordinates not place names.
- * @module mcp-server/tools/definitions/geocode
+ * @module mcp-server/tools/definitions/search-locations
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
@@ -49,7 +49,7 @@ function normalizeResults(results: GeocodingResult[] | undefined) {
   }));
 }
 
-export const openmeteoGeocodeTool = tool('openmeteo_geocode', {
+export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
   description:
     'Resolve a place name to ranked coordinate matches with country, region, elevation, ' +
     'timezone, and population. Required prerequisite for name-based queries — all weather ' +

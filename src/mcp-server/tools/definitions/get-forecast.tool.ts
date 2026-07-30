@@ -50,7 +50,7 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
       .min(-90)
       .max(90)
       .describe(
-        'Latitude in decimal degrees (e.g., 47.6062 for Seattle). Use openmeteo_geocode to resolve a place name to coordinates.',
+        'Latitude in decimal degrees (e.g., 47.6062 for Seattle). Use openmeteo_search_locations to resolve a place name to coordinates.',
       ),
     longitude: z
       .number()
@@ -105,7 +105,7 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
       .string()
       .default('auto')
       .describe(
-        'IANA timezone (e.g., "America/Los_Angeles") or "auto" to use the location\'s local timezone. Default "auto". The timezone from openmeteo_geocode is ideal to pass here.',
+        'IANA timezone (e.g., "America/Los_Angeles") or "auto" to use the location\'s local timezone. Default "auto". The timezone from openmeteo_search_locations is ideal to pass here.',
       ),
   }),
 

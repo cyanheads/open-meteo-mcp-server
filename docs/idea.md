@@ -50,7 +50,7 @@ Variables are selected explicitly (`temperature_2m`, `precipitation`, `wind_spee
 
 | Tool | Behavior |
 |:---|:---|
-| `openmeteo_geocode` | Resolve a place name to ranked coordinate matches: name, country, admin1/2, lat, lon, elevation, timezone, population, feature code. Required first step for name-based queries — weather tools take coordinates. Disambiguates duplicate names by country/population. |
+| `openmeteo_search_locations` | Resolve a place name to ranked coordinate matches: name, country, admin1/2, lat, lon, elevation, timezone, population, feature code. Required first step for name-based queries — weather tools take coordinates. Disambiguates duplicate names by country/population. |
 | `openmeteo_forecast` | Forecast for coordinates. Hourly and/or daily variables; horizon ≤16 days; optional `past_days`. `timezone=auto` default. Returns reshaped per-timestamp records + units. Temp, precip, wind, humidity, cloud, UV, pressure, more. |
 | `openmeteo_historical` | Historical weather from the ERA5 archive (1940→present, ~5-day lag). Coordinates, date range, hourly/daily variables — same vocabulary as forecast, so past vs. forecast compare on one schema. Large ranges spill to DataCanvas. |
 | `openmeteo_marine` | Marine forecast for a coastal/ocean coordinate: wave height/period/direction, wind-wave and swell components, sea-surface temp. Same reshaped time-series shape. |

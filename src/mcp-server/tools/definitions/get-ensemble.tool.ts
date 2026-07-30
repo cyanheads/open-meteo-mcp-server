@@ -99,7 +99,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       .min(-90)
       .max(90)
       .describe(
-        'Latitude in decimal degrees. Use openmeteo_geocode to resolve a place name to coordinates.',
+        'Latitude in decimal degrees. Use openmeteo_search_locations to resolve a place name to coordinates.',
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
     hourly_variables: z
