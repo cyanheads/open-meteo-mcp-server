@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-07-16 05:44:41
+Generated on: 2026-07-30 22:37:22
 
 ```text
 open-meteo-mcp-server/
@@ -23,6 +23,7 @@ open-meteo-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -140,7 +141,6 @@ open-meteo-mcp-server/
 │   │       ├── definitions/
 │   │       │   ├── dataframe-describe.tool.ts
 │   │       │   ├── dataframe-query.tool.ts
-│   │       │   ├── geocode.tool.ts
 │   │       │   ├── get-air-quality.tool.ts
 │   │       │   ├── get-climate.tool.ts
 │   │       │   ├── get-elevation.tool.ts
@@ -149,7 +149,8 @@ open-meteo-mcp-server/
 │   │       │   ├── get-forecast.tool.ts
 │   │       │   ├── get-historical.tool.ts
 │   │       │   ├── get-marine.tool.ts
-│   │       │   └── index.ts
+│   │       │   ├── index.ts
+│   │       │   └── search-locations.tool.ts
 │   │       ├── reshape-utils.ts
 │   │       ├── spill-utils.ts
 │   │       └── upstream-error.ts
@@ -162,12 +163,13 @@ open-meteo-mcp-server/
 ├── tests/
 │   ├── prompts/
 │   ├── resources/
+│   ├── scripts/
+│   │   └── packaging-entry-regex-sync.test.ts
 │   ├── services/
 │   │   └── open-meteo-service.test.ts
 │   └── tools/
 │       ├── dataframe-describe.tool.test.ts
 │       ├── dataframe-query.tool.test.ts
-│       ├── geocode.tool.test.ts
 │       ├── get-air-quality.tool.test.ts
 │       ├── get-climate.tool.test.ts
 │       ├── get-elevation.tool.test.ts
@@ -176,7 +178,9 @@ open-meteo-mcp-server/
 │       ├── get-forecast.tool.test.ts
 │       ├── get-historical.tool.test.ts
 │       ├── get-marine.tool.test.ts
+│       ├── search-locations.tool.test.ts
 │       ├── spill-utils.test.ts
+│       ├── tool-surface.test.ts
 │       └── upstream-error.test.ts
 ├── .dockerignore
 ├── .env.example

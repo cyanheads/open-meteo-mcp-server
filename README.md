@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -33,7 +33,7 @@ Eleven tools covering geocoding, weather forecasts, historical climate, probabil
 
 | Tool | Description |
 |:---|:---|
-| `openmeteo_geocode` | Resolve a place name to ranked coordinate matches with country, region, elevation, timezone, and population |
+| `openmeteo_search_locations` | Resolve a place name to ranked coordinate matches with country, region, elevation, timezone, and population |
 | `openmeteo_get_forecast` | Weather forecast for coordinates: hourly and/or daily variables for up to 16 days, with optional recent past data |
 | `openmeteo_get_historical` | Historical weather from the ERA5 reanalysis archive (1940–present); large ranges spill to DataCanvas |
 | `openmeteo_get_marine` | Marine forecast for coastal or ocean coordinates: wave height, period, direction, swell, and sea-surface temperature |
@@ -45,14 +45,14 @@ Eleven tools covering geocoding, weather forecasts, historical climate, probabil
 | `openmeteo_dataframe_describe` | List tables and columns on a DataCanvas staged by `openmeteo_get_historical`, `openmeteo_get_ensemble`, `openmeteo_get_flood`, or `openmeteo_get_climate` |
 | `openmeteo_dataframe_query` | Run a read-only SQL SELECT against tables staged on a DataCanvas |
 
-### `openmeteo_geocode`
+### `openmeteo_search_locations`
 
 Resolve a free-text place name to ranked coordinate matches. Required first step for name-based queries — all weather tools accept latitude/longitude, not place names.
 
 - Returns name, country, admin1/admin2, latitude, longitude, elevation, IANA timezone, population, and GeoNames feature code
 - Search by a bare place name — a city, region, or landmark ("Baoding", not "Baoding Hebei"; "Paris", not "Paris, France"); a compound "City Region" or "City, Country" string matches nothing
 - Disambiguate same-named places (e.g., "Springfield") with the optional `country` filter (ISO 3166-1 alpha-2, e.g. `US`) or by raising `count` (default 5, up to 10) and reading the `admin1`/`country` fields on each result — those are output fields for choosing among matches, not search inputs
-- Pass the timezone from a geocode result directly to weather tools as the `timezone` parameter
+- Pass the timezone from an `openmeteo_search_locations` result directly to weather tools as the `timezone` parameter
 - Fails with a `no_results` error (not an empty array) when nothing matches — retry the bare place name without qualifiers, or for a physical feature/landmark search the nearest populated place instead
 
 ---
@@ -171,7 +171,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 Open-Meteo–specific:
 
 - No API key required for non-commercial use — zero-config out of the box
-- Self-contained geocoding: `openmeteo_geocode` resolves place names so agents don't need a separate geocoder
+- Self-contained geocoding: `openmeteo_search_locations` resolves place names so agents don't need a separate geocoder
 - ERA5 archive from 1940 to present with same variable schema as the forecast API — direct past/forecast comparisons on one schema
 - Automatic columnar-to-record reshape: Open-Meteo returns parallel time/variable arrays; handlers convert to per-timestamp records with a `*_units` map
 - DataCanvas spillover for `openmeteo_get_historical`, `openmeteo_get_ensemble`, `openmeteo_get_flood`, and `openmeteo_get_climate`: a result too large to return inline registers a DuckDB dataframe for SQL querying, staging every hourly and daily row with its upstream numeric type intact
@@ -180,7 +180,7 @@ Open-Meteo–specific:
 
 Agent-friendly output:
 
-- Geocode-first workflow: `openmeteo_geocode` returns the IANA timezone alongside coordinates — pass it directly as `timezone` to any weather tool
+- Location-first workflow: `openmeteo_search_locations` returns the IANA timezone alongside coordinates — pass it directly as `timezone` to any weather tool
 - Recovery hints on all error contracts — invalid variable names surface correction guidance with common variable examples
 - Coordinate snapping transparency — responses echo the snapped `latitude`/`longitude` (Open-Meteo quantizes to the nearest model grid point) so agents can reason about grid alignment
 - `data_source: "CAMS"` label on air quality results distinguishes modeled forecast data from measured station readings
