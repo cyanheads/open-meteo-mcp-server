@@ -10,6 +10,7 @@ import { type CanvasInstance, spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { describe, expect, it, vi } from 'vitest';
 import {
   boundedPreview,
+  boundedPreviewByCadence,
   deriveSpillSchema,
   exceedsInlineBudget,
   noCanvasNotice,
@@ -253,6 +254,128 @@ describe('boundedPreview', () => {
     expect(preview[0]).toEqual(records[0]);
     expect(preview.length).toBeGreaterThan(0);
     expect(preview.length).toBeLessThan(records.length);
+  });
+});
+
+describe('boundedPreviewByCadence', () => {
+  /** Wide hourly row — 9 marine variables, the shape the #32 repro requests. */
+  const hourlyRow = (i: number): TimeRecord => {
+    const record: TimeRecord = { time: `2026-04-30T${String(i % 24).padStart(2, '0')}:00` };
+    for (const name of [
+      'wave_height',
+      'wave_direction',
+      'wave_period',
+      'wind_wave_height',
+      'wind_wave_direction',
+      'wind_wave_period',
+      'swell_wave_height',
+      'swell_wave_direction',
+      'swell_wave_period',
+    ]) {
+      record[name] = 1 + (i % 30) / 10;
+    }
+    return record;
+  };
+
+  /** Narrow daily row — the cheap cadence. */
+  const dailyRow = (i: number): TimeRecord => ({
+    time: `2026-04-${String((i % 28) + 1).padStart(2, '0')}`,
+    wave_height_max: 2 + (i % 15) / 10,
+    wave_direction_dominant: 90 + (i % 40),
+    wave_period_max: 9 + (i % 6),
+  });
+
+  const size = (rows: readonly TimeRecord[]) =>
+    rows.reduce((chars, row) => chars + JSON.stringify(row).length, 0);
+
+  it('carries daily rows when a wide hourly window would have taken the whole budget (#32)', () => {
+    // The live repro: 2,400 hourly rows against 100 daily. One preview over the
+    // concatenated array spends the budget before the first daily row.
+    const hourly = Array.from({ length: 2400 }, (_, i) => hourlyRow(i));
+    const daily = Array.from({ length: 100 }, (_, i) => dailyRow(i));
+
+    const preview = boundedPreviewByCadence(hourly, daily);
+
+    expect(preview.daily).toHaveLength(100);
+    expect(preview.hourly.length).toBeGreaterThan(0);
+    expect(preview.hourly.length).toBeLessThan(hourly.length);
+    // The concatenated approach this replaces, for contrast: rows, all of them hourly.
+    const concatenated = boundedPreview([...hourly, ...daily]);
+    expect(concatenated.length).toBeGreaterThan(0);
+    expect(concatenated.some((r) => !String(r.time).includes('T'))).toBe(false);
+  });
+
+  it('keeps the two previews inside one PREVIEW_CHARS budget', () => {
+    const hourly = Array.from({ length: 5000 }, (_, i) => hourlyRow(i));
+    const daily = Array.from({ length: 4000 }, (_, i) => dailyRow(i));
+
+    const preview = boundedPreviewByCadence(hourly, daily);
+
+    // One-row overshoot per cadence, exactly as a single boundedPreview allows.
+    expect(size(preview.hourly) + size(preview.daily)).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    // Neither cadence is starved: each clears its guaranteed half.
+    expect(size(preview.hourly)).toBeGreaterThan(PREVIEW_CHARS / 2 - 1000);
+    expect(size(preview.daily)).toBeGreaterThan(PREVIEW_CHARS / 2 - 1000);
+  });
+
+  it('gives a single-cadence response the whole budget, not half of it', () => {
+    // A daily-only or hourly-only request must not lose rows to a reservation the
+    // other cadence never claims.
+    const daily = Array.from({ length: 4000 }, (_, i) => dailyRow(i));
+    const hourly = Array.from({ length: 4000 }, (_, i) => hourlyRow(i));
+
+    // Both sides truncate, so the equality is against a real row set rather than two
+    // empty arrays, and each side clears the half a fixed reservation would have left.
+    const dailyOnly = boundedPreviewByCadence([], daily).daily;
+    const hourlyOnly = boundedPreviewByCadence(hourly, []).hourly;
+
+    expect(dailyOnly).toEqual(boundedPreview(daily));
+    expect(hourlyOnly).toEqual(boundedPreview(hourly));
+    expect(dailyOnly.length).toBeGreaterThan(0);
+    expect(hourlyOnly.length).toBeGreaterThan(0);
+    expect(size(dailyOnly)).toBeGreaterThan(PREVIEW_CHARS / 2);
+    expect(size(hourlyOnly)).toBeGreaterThan(PREVIEW_CHARS / 2);
+  });
+
+  it('skips a leading all-null run in each cadence independently', () => {
+    const nullHourly = (i: number): TimeRecord => ({
+      time: `2026-04-30T${String(i % 24).padStart(2, '0')}:00`,
+      wave_height: null,
+    });
+    const nullDaily = (i: number): TimeRecord => ({
+      time: `2026-04-${String((i % 28) + 1).padStart(2, '0')}`,
+      wave_height_max: null,
+    });
+    const hourly = [
+      ...Array.from({ length: 500 }, (_, i) => nullHourly(i)),
+      ...Array.from({ length: 500 }, (_, i) => hourlyRow(i)),
+    ];
+    const daily = [
+      ...Array.from({ length: 40 }, (_, i) => nullDaily(i)),
+      ...Array.from({ length: 40 }, (_, i) => dailyRow(i)),
+    ];
+
+    const preview = boundedPreviewByCadence(hourly, daily);
+
+    expect(preview.hourly[0]).toEqual(hourly[500]);
+    expect(preview.daily[0]).toEqual(daily[40]);
+  });
+
+  it('keeps daily whole when one hourly row alone blows the whole budget', () => {
+    // Hourly overshoots past PREVIEW_CHARS on its single row, so the complement is
+    // negative — daily falls back to the half it claimed on the first pass rather than
+    // to the one row an unfloored budget would leave.
+    const fat: TimeRecord = { time: '2026-04-30T00:00', blob: 'x'.repeat(PREVIEW_CHARS * 2) };
+    const daily = Array.from({ length: 10 }, (_, i) => dailyRow(i));
+
+    const preview = boundedPreviewByCadence([fat], daily);
+
+    expect(preview.hourly).toEqual([fat]);
+    expect(preview.daily).toEqual(daily);
+  });
+
+  it('returns two empty arrays when neither cadence has records', () => {
+    expect(boundedPreviewByCadence([], [])).toEqual({ hourly: [], daily: [] });
   });
 });
 

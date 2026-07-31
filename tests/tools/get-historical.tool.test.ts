@@ -653,6 +653,11 @@ describe('openmeteoGetHistoricalTool', () => {
     ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
     // record_count stays the full upstream total, not the preview length.
     expect(result.record_count).toBe(hourlyTime.length + dailyTime.length);
+    // #32: each cadence carries rows. One preview over the concatenated set spends
+    // the whole budget on the leading hourly rows and returns an empty daily array.
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    expect(result.daily?.length ?? 0).toBeGreaterThan(0);
+    expect(result.daily?.[0]).toMatchObject({ time: dailyTime[0] });
     // Cadences are split by timestamp shape, same as the canvas path.
     expect(result.hourly?.every((r) => String(r.time).includes('T'))).toBe(true);
     expect(result.daily?.every((r) => !String(r.time).includes('T'))).toBe(true);

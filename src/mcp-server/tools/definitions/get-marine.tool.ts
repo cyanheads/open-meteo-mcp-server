@@ -19,7 +19,7 @@ import {
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
-  boundedPreview,
+  boundedPreviewByCadence,
   deriveSpillSchema,
   exceedsInlineBudget,
   noCanvasNotice,
@@ -367,11 +367,11 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       /*
        * No canvas (CANVAS_PROVIDER_TYPE=none, the default): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
-       * 92-day hourly window. Split by timestamp shape the same way the canvas branch
-       * splits spillover()'s preview rows, so both paths return the same preview for
-       * the same records.
+       * 92-day hourly window. Bound each cadence against its own share of the budget —
+       * one preview over the concatenated array spends it all on the leading hourly
+       * rows and returns an empty daily summary. See boundedPreviewByCadence.
        */
-      const preview = splitByCadence(boundedPreview(allRecords));
+      const preview = boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? []);
       return {
         latitude: data.latitude,
         longitude: data.longitude,

@@ -526,6 +526,69 @@ describe('openmeteoGetMarineTool', () => {
     expect(result.record_count).toBe(time.length);
   });
 
+  it('carries daily rows in the canvas-less preview of a wide hourly window (#32)', async () => {
+    // The live repro: past_days 92 + forecast_days 8 over nine hourly variables
+    // serves 2,400 hourly and 100 daily rows. Hourly records lead the concatenated
+    // set, so a single preview over it returns an empty daily summary.
+    const time = hourlyTimes(2400);
+    const dailyTime = Array.from(
+      { length: 100 },
+      (_, i) => `2026-0${Math.floor(i / 28) + 1}-${String((i % 28) + 1).padStart(2, '0')}`,
+    );
+    const hourlyBlock: Record<string, (number | null)[] | string[]> = { time };
+    for (const variable of [
+      'wave_height',
+      'wave_direction',
+      'wave_period',
+      'wind_wave_height',
+      'wind_wave_direction',
+      'wind_wave_period',
+      'swell_wave_height',
+      'swell_wave_direction',
+      'swell_wave_period',
+    ]) {
+      hourlyBlock[variable] = time.map((_, i) => 1 + (i % 30) / 10);
+    }
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: hourlyBlock,
+      daily_units: { time: 'iso8601', wave_height_max: 'm', wave_period_max: 's' },
+      daily: {
+        time: dailyTime,
+        wave_height_max: dailyTime.map((_, i) => 2 + (i % 15) / 10),
+        wave_direction_dominant: dailyTime.map((_, i) => 90 + (i % 40)),
+        wave_period_max: dailyTime.map((_, i) => 9 + (i % 6)),
+      },
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext();
+    const input = openmeteoGetMarineTool.input.parse({
+      latitude: 36.8,
+      longitude: -75.0,
+      hourly_variables: ['wave_height', 'wave_direction', 'wave_period'],
+      daily_variables: ['wave_height_max', 'wave_direction_dominant', 'wave_period_max'],
+      past_days: 92,
+      forecast_days: 8,
+    });
+    const result = await openmeteoGetMarineTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBeUndefined();
+    expect(result.daily).toHaveLength(dailyTime.length);
+    expect(result.daily?.[0]).toMatchObject({ time: dailyTime[0], wave_height_max: 2 });
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    expect(
+      JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
+    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    expect(result.record_count).toBe(time.length + dailyTime.length);
+
+    // format() renders the daily section the empty array used to gate away.
+    const text = openmeteoGetMarineTool.format!(result)[0]?.text ?? '';
+    expect(text).toContain('### Daily marine summary (preview —');
+    expect(text).toContain(`of ${time.length + dailyTime.length} total rows`);
+  });
+
   // --- format() --------------------------------------------------------------
 
   it('formats output with attribution', () => {

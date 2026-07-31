@@ -507,6 +507,49 @@ describe('openmeteoGetForecastTool', () => {
     expect(result.record_count).toBe(time.length);
   });
 
+  it('carries daily rows in the canvas-less preview of a wide hourly window (#32)', async () => {
+    // Hourly records lead the concatenated set, so a single preview over it spends
+    // the whole budget before the first daily row and daily comes back empty.
+    const time = hourlyTimes(2592);
+    const dailyTime = Array.from(
+      { length: 108 },
+      (_, i) => `2026-0${Math.floor(i / 28) + 1}-${String((i % 28) + 1).padStart(2, '0')}`,
+    );
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: wideHourlyBlock(time),
+      daily_units: { time: 'iso8601', temperature_2m_max: '°C', precipitation_sum: 'mm' },
+      daily: {
+        time: dailyTime,
+        temperature_2m_max: dailyTime.map((_, i) => 12 + (i % 15)),
+        precipitation_sum: dailyTime.map((_, i) => (i % 3 === 0 ? 1.2 : 0)),
+      },
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext();
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      forecast_days: 16,
+      past_days: 92,
+      hourly_variables: ['temperature_2m', 'precipitation'],
+      daily_variables: ['temperature_2m_max', 'precipitation_sum'],
+    });
+    const result = await openmeteoGetForecastTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBeUndefined();
+    expect(result.daily).toHaveLength(dailyTime.length);
+    expect(result.daily?.[0]).toMatchObject({ time: dailyTime[0], temperature_2m_max: 12 });
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    // Both previews together stay inside the one budget, and record_count is the total.
+    expect(
+      JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
+    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    expect(result.record_count).toBe(time.length + dailyTime.length);
+  });
+
   it('skips the leading all-null past_days run in the canvas-less preview', async () => {
     // The API serves fewer past days than past_days: 92 allows, so the unserved head
     // comes back null — measured at 733 of 2,592 rows for a Seattle pull, longer than

@@ -106,17 +106,66 @@ function hasNonNullValue(record: Record<string, unknown>): boolean {
  *
  * Measures `JSON.stringify(row).length` per row and stops on the row that would cross
  * the budget, matching `spillover()`'s drain exactly.
+ *
+ * @param budget - Character ceiling for the returned rows. Defaults to the whole
+ * {@link PREVIEW_CHARS}; {@link boundedPreviewByCadence} passes a share of it when the
+ * response carries both cadences.
  */
-export function boundedPreview<T extends Record<string, unknown>>(records: readonly T[]): T[] {
+export function boundedPreview<T extends Record<string, unknown>>(
+  records: readonly T[],
+  budget: number = PREVIEW_CHARS,
+): T[] {
   const firstUseful = records.findIndex(hasNonNullValue);
   const rows: T[] = [];
   let chars = 0;
   for (const row of records.slice(firstUseful < 0 ? 0 : firstUseful)) {
     chars += JSON.stringify(row).length;
-    if (chars > PREVIEW_CHARS && rows.length > 0) break;
+    if (chars > budget && rows.length > 0) break;
     rows.push(row);
   }
   return rows;
+}
+
+/** Serialized size of `rows`, in the same measure {@link PREVIEW_CHARS} is expressed in. */
+function serializedLength(rows: readonly Record<string, unknown>[]): number {
+  let chars = 0;
+  for (const row of rows) chars += JSON.stringify(row).length;
+  return chars;
+}
+
+/**
+ * A preview per cadence, the two together fitting {@link PREVIEW_CHARS}.
+ *
+ * Taking one preview over the concatenated `[...hourly, ...daily]` array and splitting
+ * the result afterwards cannot reach the daily rows: hourly records lead, so a wide
+ * hourly window spends the whole budget before the first daily row and `daily` comes
+ * back empty even though the rows exist upstream. Bounding each cadence separately is
+ * what keeps both surfaces populated — and it gives each its own leading-all-null skip
+ * (see {@link boundedPreview}) rather than only the hourly head's.
+ *
+ * How the budget divides: each cadence is guaranteed half, and a cadence that needs
+ * less releases the rest to the other. Daily takes its half first, hourly then takes
+ * everything daily left, and daily is re-taken against whatever hourly left in turn —
+ * floored at its first pass, which is what holds the guarantee when hourly overshoots
+ * on a single oversized row. A fixed half each would cut a single-cadence response to
+ * half the rows it returns today; a first-come split would starve whichever cadence
+ * came second. Daily leads because it is the cheap one — a 92-day marine window serves
+ * 2,400 hourly rows against 100 daily, so daily takes about an eighth of the budget and
+ * never reaches its half: measured against that response, hourly goes from 343 rows to
+ * 301 and daily from 0 to all 100.
+ *
+ * The pair overshoots by at most one row per cadence, exactly as a single
+ * {@link boundedPreview} does: each cadence keeps its first row even when that row alone
+ * crosses the budget, so `daily` is non-empty whenever daily records exist.
+ */
+export function boundedPreviewByCadence<T extends Record<string, unknown>>(
+  hourly: readonly T[],
+  daily: readonly T[],
+): { hourly: T[]; daily: T[] } {
+  const dailyFloor = serializedLength(boundedPreview(daily, PREVIEW_CHARS / 2));
+  const hourlyRows = boundedPreview(hourly, PREVIEW_CHARS - dailyFloor);
+  const dailyBudget = Math.max(dailyFloor, PREVIEW_CHARS - serializedLength(hourlyRows));
+  return { hourly: hourlyRows, daily: boundedPreview(daily, dailyBudget) };
 }
 
 /**
@@ -125,9 +174,10 @@ export function boundedPreview<T extends Record<string, unknown>>(records: reado
  * Hourly and daily stage into one union table (one `table_name`, ragged rows padded by
  * the appender), so timestamp shape is the only discriminator: hourly is
  * `YYYY-MM-DDTHH:MM`, daily is `YYYY-MM-DD`. The tools with both cadences apply this to
- * `spillover()`'s preview rows and to {@link boundedPreview}'s, which is what makes the
- * two paths return the same split for the same records — and it is the same rule a
- * caller uses against the staged table (`WHERE time LIKE '%T%'`).
+ * `spillover()`'s preview rows, which arrive concatenated from the staged set — it is
+ * the same rule a caller uses against the staged table (`WHERE time LIKE '%T%'`). The
+ * canvas-less path never needs it: it still holds the two record arrays separately and
+ * bounds each one through {@link boundedPreviewByCadence}.
  */
 export function splitByCadence(records: readonly TimeRecord[]): {
   hourly: Record<string, unknown>[];
