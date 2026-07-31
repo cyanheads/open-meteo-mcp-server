@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.4](changelog/0.3.x/0.3.4.md) — 2026-07-30
+
+Ensemble and the three other two-cadence tools bound their preview to one shared per-cadence budget on both branches; a regional model outside its coverage now fails fast as an input error instead of retrying into a false outage; list parameters go on the wire with a literal comma so upstream isolates the rejected name itself.
+
 ## [0.3.3](changelog/0.3.x/0.3.3.md) — 2026-07-30
 
 Canvas-less forecast/historical/marine previews no longer drop daily rows on a wide hourly window; ensemble and climate models are backed by a documented catalog that isolates a rejected model instead of echoing the whole list.
