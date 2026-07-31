@@ -53,7 +53,7 @@ await createApp({
     '4. openmeteo_get_marine — wave/swell for coastal and ocean points; up to 8 forecast days, past_days, or a start_date+end_date archive range back to at least 2022\n' +
     '5. openmeteo_get_air_quality — CAMS modeled PM2.5, PM10, ozone, AQI; up to 7 forecast days, past_days, or a start_date+end_date archive range back to at least 2022-10-01\n' +
     '6. openmeteo_get_elevation — Copernicus DEM terrain elevation for up to 100 coordinate pairs\n' +
-    '7. openmeteo_get_ensemble — probabilistic ensemble forecast (up to 64 members, 16 days); use for exceedance probabilities and uncertainty quantification\n' +
+    '7. openmeteo_get_ensemble — probabilistic ensemble forecast (up to 64 members, 16 days); use for exceedance probabilities and uncertainty quantification. A regional model queried outside its coverage area fails as an input error naming the gap — switch to a global model, do not retry\n' +
     '8. openmeteo_get_flood — GloFAS river discharge forecast (up to 210 days) OR reanalysis (from 1984, start_date+end_date together); the two modes are mutually exclusive. Coordinate-based, snaps to nearest river\n' +
     '9. openmeteo_get_climate — bias-corrected daily CMIP6 climate projections (1950–2050, up to 7 models); use for multi-decade "what will conditions look like" questions\n\n' +
     'DataCanvas workflow (requires CANVAS_PROVIDER_TYPE=duckdb):\n' +
@@ -66,6 +66,6 @@ await createApp({
     '- All responses use timezone=auto by default (localizes to the location)\n' +
     '- Variable names are exact API names: temperature_2m, pm2_5, wave_height, river_discharge, etc.\n' +
     '- hourly_variables and daily_variables take separate variable sets — cloud_cover is hourly, temperature_2m_max is daily. A variable passed in the wrong field is rejected before the request, naming the value and the field it belongs in\n' +
-    '- Large forecast/historical/marine/air-quality/ensemble/flood/climate queries spill to DataCanvas when CANVAS_PROVIDER_TYPE=duckdb; with it unset they return a bounded preview and truncated: true, so narrow the request or enable canvas to reach the rest. A two-cadence preview carries both hourly and daily rows — neither is dropped for the other\n' +
-    '- The models value on openmeteo_get_ensemble and openmeteo_get_climate is not validated locally: a name the tool does not advertise still goes upstream, so a model Open-Meteo adds later works without a server update',
+    '- Large forecast/historical/marine/air-quality/ensemble/flood/climate queries spill to DataCanvas when CANVAS_PROVIDER_TYPE=duckdb; with it unset they return a bounded preview and truncated: true, so narrow the request or enable canvas to reach the rest. A two-cadence preview carries both hourly and daily rows in either configuration — neither is dropped for the other, and the two share one inline budget\n' +
+    '- The models value on openmeteo_get_ensemble and openmeteo_get_climate is not validated locally: a name the tool does not advertise still goes upstream, so a model Open-Meteo adds later works without a server update. When upstream rejects a multi-model climate request it names only the offending model — correct that one and leave the rest',
 });
