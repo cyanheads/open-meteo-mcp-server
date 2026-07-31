@@ -24,7 +24,6 @@ import {
   exceedsInlineBudget,
   noCanvasNotice,
   PREVIEW_CHARS,
-  splitByCadence,
 } from '../spill-utils.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
 import {
@@ -233,8 +232,8 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
 
     /*
      * Reject a confident misplacement before the call. Upstream rejects a wrong-bucket
-     * marine variable with a 400 that echoes the entire encoded list — valid siblings
-     * included, so the offender is never isolated. Unknown names are not misplacements
+     * marine variable as an unknown one: it names the value but not the field it
+     * belongs in, nor a same-cadence alternative. Unknown names are not misplacements
      * and go upstream untouched.
      */
     const mismatches = findCadenceMismatches(
@@ -344,15 +343,25 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
           signal: ctx.signal,
         });
 
-        const spilledPreview = splitByCadence(spilled.previewRows);
+        /*
+         * Bound each cadence against its own share of the budget rather than splitting
+         * spillover()'s previewRows: those are drained from the head of the concatenated
+         * array, so a wide hourly window fills them before a single daily row and the
+         * daily summary comes back empty. The staged table is unaffected — it holds
+         * every row of both cadences. When nothing spilled the whole set fit inline, so
+         * return it complete; truncated: false promises exactly that.
+         */
+        const preview = spilled.spilled
+          ? boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [])
+          : { hourly: hourlyRecords ?? [], daily: dailyRecords ?? [] };
 
         return {
           latitude: data.latitude,
           longitude: data.longitude,
           timezone: data.timezone,
           record_count: spilled.spilled ? spilled.handle.rowCount : allRecords.length,
-          hourly: spilledPreview.hourly,
-          daily: spilledPreview.daily,
+          hourly: preview.hourly,
+          daily: preview.daily,
           hourly_units: hourlyUnits,
           daily_units: dailyUnits,
           // Only point at the canvas when data actually spilled — spillover()

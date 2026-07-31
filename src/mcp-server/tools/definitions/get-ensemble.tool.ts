@@ -15,7 +15,7 @@ import { type ColumnarBlock, toUnitsMap } from '@/services/open-meteo/types.js';
 import { ENSEMBLE_MODEL_LIST, ENSEMBLE_MODEL_NAMES } from '../model-catalog.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
-  boundedPreview,
+  boundedPreviewByCadence,
   deriveSpillSchema,
   exceedsInlineBudget,
   noCanvasNotice,
@@ -66,11 +66,10 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     'with a member suffix (e.g. temperature_2m_member01, temperature_2m_member02). Use the spread ' +
     'across members to compute exceedance probabilities, quantify forecast uncertainty, and build ' +
     `decision thresholds. Available models: ${ENSEMBLE_MODEL_LIST}. Omit models to use the API ` +
-    'default blend. A regional model returns no data outside the area it covers, and how it fails ' +
-    'varies by model: some report "No data is available for this location", others surface a ' +
-    'transient-looking upstream failure. Read either against the coordinate before retrying, and ' +
-    'pick a global model outside the region. A model name this list does not carry is still sent ' +
-    'upstream, so a newly added one keeps working. ' +
+    'default blend. A regional model returns no data outside the area it covers; that comes back ' +
+    'as an input error naming the coverage gap, not a transient failure, so pick a global model ' +
+    'or move the coordinate inside the region rather than retrying. A model name this list does ' +
+    'not carry is still sent upstream, so a newly added one keeps working. ' +
     'Large multi-member, multi-day pulls produce thousands of records and spill to DataCanvas ' +
     'when canvas is enabled, returning a bounded preview with truncated: true when it is not. ' +
     'At least one of hourly_variables or daily_variables is required.',
@@ -257,8 +256,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
 
     /*
      * Reject a confident misplacement before the call. Upstream rejects a wrong-bucket
-     * name with a 400 that echoes the entire encoded list — valid siblings included, so
-     * the offender is never isolated. The ensemble catalog is its own: this endpoint
+     * name as an unknown one: it names the value but not the field it belongs in, and
+     * has no notion of a same-cadence alternative. The ensemble catalog is its own: this endpoint
      * publishes temperature_2m_max under both cadences, and a name in both is never
      * reported. Unknown names are not misplacements and go upstream untouched.
      */
@@ -348,17 +347,20 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
           signal: ctx.signal,
         });
 
-        // Inline preview: when spilled, boundedPreview favors rows with data —
-        // past_days responses lead with all-null placeholder rows, so a raw
-        // chronological head can be entirely null. When not spilled the whole set fit
-        // inline, so return it complete. Either way the canvas holds every row in
-        // chronological order.
-        const hourlyPreview = spilled.spilled
-          ? boundedPreview(hourlyRecords ?? [])
-          : (hourlyRecords ?? []);
-        const dailyPreview = spilled.spilled
-          ? boundedPreview(dailyRecords ?? [])
-          : (dailyRecords ?? []);
+        /*
+         * Inline preview: one budget divided between the cadences, the same bound the
+         * other three two-cadence tools apply — measuring each cadence against the whole
+         * PREVIEW_CHARS let a two-cadence ensemble response carry twice the inline
+         * ceiling of every other tool, on the widest payload the server serves. Each
+         * cadence still favors rows with data, which past_days responses need: they lead
+         * with all-null placeholder rows the models don't hindcast, so a raw
+         * chronological head can be entirely null. When not spilled the whole set fit
+         * inline, so return it complete. Either way the canvas holds every row in
+         * chronological order.
+         */
+        const preview = spilled.spilled
+          ? boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [])
+          : { hourly: hourlyRecords ?? [], daily: dailyRecords ?? [] };
 
         return {
           latitude: data.latitude,
@@ -368,8 +370,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
           model,
           member_count: memberCount,
           record_count: spilled.spilled ? spilled.handle.rowCount : allRecords.length,
-          hourly: hourlyPreview,
-          daily: dailyPreview,
+          hourly: preview.hourly,
+          daily: preview.daily,
           hourly_units: hourlyUnits,
           daily_units: dailyUnits,
           // Only point at the canvas when data actually spilled — spillover()
@@ -387,6 +389,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
        * multi-megabyte member fan-out. Same per-cadence preview selection the canvas
        * branch uses, so both paths return the same rows for the same records.
        */
+      const preview = boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? []);
       return {
         latitude: data.latitude,
         longitude: data.longitude,
@@ -395,8 +398,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         model,
         member_count: memberCount,
         record_count: allRecords.length,
-        hourly: boundedPreview(hourlyRecords ?? []),
-        daily: boundedPreview(dailyRecords ?? []),
+        hourly: preview.hourly,
+        daily: preview.daily,
         hourly_units: hourlyUnits,
         daily_units: dailyUnits,
         canvas_id: undefined,

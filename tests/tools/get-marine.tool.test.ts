@@ -388,14 +388,13 @@ describe('openmeteoGetMarineTool', () => {
       daily: { time: ['2026-04-30'], wave_height_max: [2.4] },
     });
 
-    const previewRows = [
-      { time: time[0], wave_height: 1, wave_period: 8 },
-      { time: '2026-04-30', wave_height_max: 2.4 },
-    ];
     mockSpillover.mockResolvedValue({
       spilled: true,
       handle: { rowCount: rows + 1, tableName: 'spilled_marine01' },
-      previewRows,
+      previewRows: [
+        { time: time[0], wave_height: 1, wave_period: 8 },
+        { time: '2026-04-30', wave_height_max: 2.4 },
+      ],
     });
 
     const mockCanvas = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-marine-1' }) };
@@ -416,9 +415,85 @@ describe('openmeteoGetMarineTool', () => {
     expect(result.canvas_id).toBe('canvas-marine-1');
     expect(result.table_name).toBe('spilled_marine01');
     expect(result.record_count).toBe(rows + 1); // full staged total, not the preview length
-    // Preview rows split back into their cadences by timestamp shape.
-    expect(result.hourly).toEqual([previewRows[0]]);
-    expect(result.daily).toEqual([previewRows[1]]);
+    // The preview is bounded from the source records rather than read off
+    // spillover()'s previewRows: both cadences carry rows, inside one budget.
+    expect(result.hourly?.[0]).toMatchObject({ time: time[0] });
+    expect(result.daily).toEqual([{ time: '2026-04-30', wave_height_max: 2.4 }]);
+    expect(
+      JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
+    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+  });
+
+  it('carries daily rows in the canvas-branch preview of a wide hourly window (#36)', async () => {
+    /*
+     * The live repro: 9 hourly variables over past_days 92 + forecast_days 8 serves
+     * 2,400 hourly rows against 100 daily. spillover() drains its previewRows from the
+     * head of the concatenated set, so every one of them is hourly — splitting them by
+     * timestamp shape returned an empty daily summary while the staged table held all
+     * 100 daily rows.
+     */
+    const time = hourlyTimes(2400);
+    const dailyTime = Array.from(
+      { length: 100 },
+      (_, i) => `2026-0${Math.floor(i / 28) + 1}-${String((i % 28) + 1).padStart(2, '0')}`,
+    );
+    const hourlyBlock: Record<string, (number | null)[] | string[]> = { time };
+    for (const variable of [
+      'wave_height',
+      'wave_direction',
+      'wave_period',
+      'wind_wave_height',
+      'wind_wave_direction',
+      'wind_wave_period',
+      'swell_wave_height',
+      'swell_wave_direction',
+      'swell_wave_period',
+    ]) {
+      hourlyBlock[variable] = time.map((_, i) => 1 + (i % 30) / 10);
+    }
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: hourlyBlock,
+      daily_units: { time: 'iso8601', wave_height_max: 'm', wave_period_max: 's' },
+      daily: {
+        time: dailyTime,
+        wave_height_max: dailyTime.map((_, i) => 2 + (i % 15) / 10),
+        wave_direction_dominant: dailyTime.map((_, i) => 90 + (i % 40)),
+        wave_period_max: dailyTime.map((_, i) => 9 + (i % 6)),
+      },
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: time.length + dailyTime.length, tableName: 'spilled_marine_mix' },
+      previewRows: time.slice(0, 300).map((t) => ({ time: t, wave_height: 1 })),
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-marine-mix' }) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetMarineTool.input.parse({
+      latitude: 36.8,
+      longitude: -75.0,
+      hourly_variables: ['wave_height', 'wave_direction', 'wave_period'],
+      daily_variables: ['wave_height_max', 'wave_direction_dominant', 'wave_period_max'],
+      past_days: 92,
+      forecast_days: 8,
+    });
+    const result = await openmeteoGetMarineTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-marine-mix');
+    expect(result.daily).toHaveLength(dailyTime.length);
+    expect(result.daily?.[0]).toMatchObject({ time: dailyTime[0], wave_height_max: 2 });
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    // One shared budget across both cadences, matching the canvas-less branch.
+    expect(
+      JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
+    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    expect(result.record_count).toBe(time.length + dailyTime.length);
+
+    const text = openmeteoGetMarineTool.format!(result)[0]?.text ?? '';
+    expect(text).toContain('### Daily marine summary (preview —');
+    expect(text).toContain(`of ${time.length + dailyTime.length} total rows on canvas`);
   });
 
   it('passes the caller canvas_id through to acquire', async () => {

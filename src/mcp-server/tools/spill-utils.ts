@@ -136,12 +136,21 @@ function serializedLength(rows: readonly Record<string, unknown>[]): number {
 /**
  * A preview per cadence, the two together fitting {@link PREVIEW_CHARS}.
  *
- * Taking one preview over the concatenated `[...hourly, ...daily]` array and splitting
- * the result afterwards cannot reach the daily rows: hourly records lead, so a wide
- * hourly window spends the whole budget before the first daily row and `daily` comes
- * back empty even though the rows exist upstream. Bounding each cadence separately is
- * what keeps both surfaces populated — and it gives each its own leading-all-null skip
- * (see {@link boundedPreview}) rather than only the hourly head's.
+ * Every two-cadence tool takes its preview from here, on the canvas branch and the
+ * canvas-less one alike. Two shapes it replaces, both of which leave `daily` empty on a
+ * wide hourly window: one preview over the concatenated `[...hourly, ...daily]` array —
+ * hourly records lead, so the budget is spent before the first daily row — and
+ * splitting `spillover()`'s `previewRows` back apart afterwards, which is that same
+ * concatenated head one step later. Bounding each cadence separately is what keeps both
+ * surfaces populated — and it gives each its own leading-all-null skip (see
+ * {@link boundedPreview}) rather than only the hourly head's.
+ *
+ * It is also the one place the combined inline ceiling is set. Calling
+ * {@link boundedPreview} once per cadence instead measures each against the whole
+ * budget, so a two-cadence response carries roughly twice what a single-cadence one
+ * does: the widest ensemble shape — a 64-member model suffixing every variable per
+ * member, 193 columns — measured 157,527 characters that way against 78,999 here, and
+ * the halved budget still leaves 7 hourly and 6 daily rows rather than starving either.
  *
  * How the budget divides: each cadence is guaranteed half, and a cadence that needs
  * less releases the rest to the other. Daily takes its half first, hourly then takes
@@ -166,30 +175,6 @@ export function boundedPreviewByCadence<T extends Record<string, unknown>>(
   const hourlyRows = boundedPreview(hourly, PREVIEW_CHARS - dailyFloor);
   const dailyBudget = Math.max(dailyFloor, PREVIEW_CHARS - serializedLength(hourlyRows));
   return { hourly: hourlyRows, daily: boundedPreview(daily, dailyBudget) };
-}
-
-/**
- * Split concatenated hourly + daily records back into the two cadences.
- *
- * Hourly and daily stage into one union table (one `table_name`, ragged rows padded by
- * the appender), so timestamp shape is the only discriminator: hourly is
- * `YYYY-MM-DDTHH:MM`, daily is `YYYY-MM-DD`. The tools with both cadences apply this to
- * `spillover()`'s preview rows, which arrive concatenated from the staged set — it is
- * the same rule a caller uses against the staged table (`WHERE time LIKE '%T%'`). The
- * canvas-less path never needs it: it still holds the two record arrays separately and
- * bounds each one through {@link boundedPreviewByCadence}.
- */
-export function splitByCadence(records: readonly TimeRecord[]): {
-  hourly: Record<string, unknown>[];
-  daily: Record<string, unknown>[];
-} {
-  const hourly: Record<string, unknown>[] = [];
-  const daily: Record<string, unknown>[] = [];
-  for (const record of records) {
-    if (typeof record.time !== 'string') continue;
-    (record.time.includes('T') ? hourly : daily).push(record);
-  }
-  return { hourly, daily };
 }
 
 /**

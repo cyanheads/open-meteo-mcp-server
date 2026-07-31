@@ -183,9 +183,9 @@ describe('openmeteoGetForecastTool', () => {
   });
 
   it('frames the upstream unknown-variable rejection: names the values, leads with guidance, demotes the raw reason', async () => {
-    // Real upstream reason from the live forecast endpoint for a two-variable
-    // request (URLSearchParams sends hourly with a percent-encoded comma, so the
-    // upstream echoes the whole requested list — valid names included).
+    // A rejection naming more than one value: upstream read the list as one opaque
+    // value. Without an allowlist the framing can only say at least one is invalid,
+    // never single out a name that may be perfectly valid.
     const upstreamReason =
       "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value temperature_2m,not_a_real_variable_xyz.";
     mockGetForecast.mockResolvedValue({
@@ -450,14 +450,10 @@ describe('openmeteoGetForecastTool', () => {
     const time = hourlyTimes(2592);
     mockGetForecast.mockResolvedValue({ ...MOCK_RESPONSE, hourly: wideHourlyBlock(time) });
 
-    const previewRows = time.slice(0, 5).map((tstamp) => ({
-      time: tstamp,
-      temperature_2m: 12.5,
-    }));
     mockSpillover.mockResolvedValue({
       spilled: true,
       handle: { rowCount: time.length, tableName: 'spilled_fc123' },
-      previewRows,
+      previewRows: time.slice(0, 5).map((tstamp) => ({ time: tstamp, temperature_2m: 12.5 })),
     });
     const acquire = vi.fn().mockResolvedValue({ canvasId: 'canvas-fc-1' });
     mockCanvasInstance = { acquire };
@@ -477,7 +473,11 @@ describe('openmeteoGetForecastTool', () => {
     expect(result.canvas_id).toBe('canvas-fc-1');
     expect(result.table_name).toBe('spilled_fc123');
     expect(result.record_count).toBe(time.length);
-    expect(result.hourly).toHaveLength(previewRows.length);
+    // The preview is bounded from the source records, not read off spillover()'s
+    // previewRows — the canvas holds every row, the inline preview is chosen separately.
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    expect(result.hourly?.length ?? 0).toBeLessThan(time.length);
+    expect(JSON.stringify(result.hourly ?? []).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
   });
 
   it('bounds the preview and sets truncated=true when the window is wide and canvas is disabled', async () => {
@@ -602,21 +602,35 @@ describe('openmeteoGetForecastTool', () => {
     expect(mockSpillover).not.toHaveBeenCalled();
   });
 
-  it('splits the spillover preview back into hourly and daily by timestamp shape', async () => {
-    const hourlyTime = hourlyTimes(2160);
+  it('carries daily rows in the canvas-branch preview of a wide hourly window (#36)', async () => {
+    /*
+     * The canvas branch used to split spillover()'s previewRows by timestamp shape.
+     * Those rows are drained from the head of the concatenated [...hourly, ...daily]
+     * array, so on a wide hourly window every one of them is hourly and `daily` came
+     * back empty even though the staged table held all 108 daily rows.
+     */
+    const hourlyTime = hourlyTimes(2592);
+    const dailyTime = Array.from(
+      { length: 108 },
+      (_, i) =>
+        `2026-${String(Math.floor(i / 28) + 1).padStart(2, '0')}-${String((i % 28) + 1).padStart(2, '0')}`,
+    );
     mockGetForecast.mockResolvedValue({
       ...MOCK_RESPONSE,
       hourly: wideHourlyBlock(hourlyTime),
-      daily_units: { time: 'iso8601', temperature_2m_max: '°C' },
-      daily: { time: ['2026-03-01', '2026-03-02'], temperature_2m_max: [15.9, 16.2] },
+      daily_units: { time: 'iso8601', temperature_2m_max: '°C', precipitation_sum: 'mm' },
+      daily: {
+        time: dailyTime,
+        temperature_2m_max: dailyTime.map((_, i) => 15 + (i % 12)),
+        precipitation_sum: dailyTime.map((_, i) => (i % 3 === 0 ? 1.2 : 0)),
+      },
     });
+    // What spillover() actually drains here: a budget's worth of leading hourly rows,
+    // no daily row among them.
     mockSpillover.mockResolvedValue({
       spilled: true,
-      handle: { rowCount: hourlyTime.length + 2, tableName: 'spilled_fc_mix' },
-      previewRows: [
-        { time: '2026-03-01T00:00', temperature_2m: 5.1 },
-        { time: '2026-03-01', temperature_2m_max: 15.9 },
-      ],
+      handle: { rowCount: hourlyTime.length + dailyTime.length, tableName: 'spilled_fc_mix' },
+      previewRows: hourlyTime.slice(0, 300).map((t) => ({ time: t, temperature_2m: 5.1 })),
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-fc-mix' }) };
 
@@ -625,14 +639,30 @@ describe('openmeteoGetForecastTool', () => {
       latitude: 47.6062,
       longitude: -122.3321,
       forecast_days: 16,
-      past_days: 74,
+      past_days: 92,
       hourly_variables: ['temperature_2m'],
-      daily_variables: ['temperature_2m_max'],
+      daily_variables: ['temperature_2m_max', 'precipitation_sum'],
     });
     const result = await openmeteoGetForecastTool.handler(input, ctx);
 
-    expect(result.hourly).toEqual([{ time: '2026-03-01T00:00', temperature_2m: 5.1 }]);
-    expect(result.daily).toEqual([{ time: '2026-03-01', temperature_2m_max: 15.9 }]);
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-fc-mix');
+    // Both cadences carry rows, and the daily side is real daily data.
+    expect(result.daily).toHaveLength(dailyTime.length);
+    expect(result.daily?.[0]).toMatchObject({ time: dailyTime[0], temperature_2m_max: 15 });
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    expect(result.hourly?.[0]?.time).toBe(hourlyTime[0]);
+    // One shared budget across both, same as the canvas-less branch.
+    expect(
+      JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
+    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    // record_count stays the staged total, not the preview length.
+    expect(result.record_count).toBe(hourlyTime.length + dailyTime.length);
+
+    // format() renders the daily section the empty array used to gate away.
+    const text = openmeteoGetForecastTool.format!(result)[0]?.text ?? '';
+    expect(text).toContain('### Daily');
+    expect(text).toContain(`of ${hourlyTime.length + dailyTime.length} total rows on canvas`);
   });
 
   it('renders the canvas handles in the truncated format()', () => {

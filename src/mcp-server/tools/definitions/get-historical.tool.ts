@@ -19,7 +19,6 @@ import {
   exceedsInlineBudget,
   noCanvasNotice,
   PREVIEW_CHARS,
-  splitByCadence,
 } from '../spill-utils.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
 import {
@@ -218,10 +217,10 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
 
     /*
      * Reject a confident misplacement before the call. The archive answers one
-     * direction with a 400 that echoes the entire encoded variable list — valid
-     * siblings included, so the offender is never isolated — and the other with a
-     * successful all-null column. Unknown names are not misplacements and go upstream
-     * untouched.
+     * direction with a 400 that rejects the name as an unknown one — naming the value
+     * but not the field it belongs in, nor a same-cadence alternative — and the other
+     * with a successful all-null column. Unknown names are not misplacements and go
+     * upstream untouched.
      */
     const mismatches = findCadenceMismatches(
       HISTORICAL_CADENCE,
@@ -325,7 +324,17 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
           signal: ctx.signal,
         });
 
-        const spilledPreview = splitByCadence(spilled.previewRows);
+        /*
+         * Bound each cadence against its own share of the budget rather than splitting
+         * spillover()'s previewRows: those are drained from the head of the concatenated
+         * array, so a wide hourly window fills them before a single daily row and the
+         * daily summary comes back empty. The staged table is unaffected — it holds
+         * every row of both cadences. When nothing spilled the whole set fit inline, so
+         * return it complete; truncated: false promises exactly that.
+         */
+        const preview = spilled.spilled
+          ? boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [])
+          : { hourly: hourlyRecords ?? [], daily: dailyRecords ?? [] };
 
         return {
           latitude: data.latitude,
@@ -334,8 +343,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
           timezone: data.timezone,
           date_range: dateRange,
           record_count: spilled.spilled ? spilled.handle.rowCount : allRecords.length,
-          hourly: spilledPreview.hourly,
-          daily: spilledPreview.daily,
+          hourly: preview.hourly,
+          daily: preview.daily,
           hourly_units: hourlyUnits,
           daily_units: dailyUnits,
           // Only point at the canvas when data actually spilled — spillover()

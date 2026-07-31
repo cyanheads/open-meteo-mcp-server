@@ -709,6 +709,74 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(text).not.toContain('temperature_2m_member01: null');
   });
 
+  it.each([
+    ['canvas', true],
+    ['canvas-less', false],
+  ])(
+    'holds a two-cadence preview inside one budget on the %s branch (#35)',
+    async (_label, canvasEnabled) => {
+      /*
+       * Both branches used to call the single-collection boundedPreview once per
+       * cadence, each measured against the whole PREVIEW_CHARS, so a two-cadence
+       * response carried roughly twice the ceiling every other spill-capable tool
+       * caps at — on the widest payload the server serves, since a member fan-out
+       * suffixes every variable per member.
+       */
+      const hourlyTime = hourlyTimes(2592);
+      const dailyTime = Array.from(
+        { length: 108 },
+        (_, i) =>
+          `2026-${String(Math.floor(i / 28) + 1).padStart(2, '0')}-${String((i % 28) + 1).padStart(2, '0')}`,
+      );
+      mockGetEnsemble.mockResolvedValue({
+        ...MOCK_RESPONSE,
+        hourly: memberBlock(hourlyTime, (row, m) => 10 + ((row + m) % 20) + 0.5),
+        daily_units: { time: 'iso8601', temperature_2m_max_member01: '°C' },
+        daily: memberBlock(dailyTime, (row, m) => 20 + ((row + m) % 8) + 0.5, 'temperature_2m_max'),
+      });
+      if (canvasEnabled) {
+        mockSpillover.mockResolvedValue({
+          spilled: true,
+          handle: {
+            rowCount: hourlyTime.length + dailyTime.length,
+            tableName: 'spilled_ens_budget',
+          },
+          previewRows: hourlyTime
+            .slice(0, 50)
+            .map((t) => ({ time: t, temperature_2m_member01: 1 })),
+        });
+        mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-budget' }) };
+      } else {
+        mockCanvasInstance = undefined;
+      }
+
+      const ctx = createMockContext();
+      const input = openmeteoGetEnsembleTool.input.parse({
+        latitude: 47.6,
+        longitude: -122.3,
+        hourly_variables: ['temperature_2m'],
+        daily_variables: ['temperature_2m_max'],
+        models: 'ecmwf_ifs025_ensemble',
+        forecast_days: 16,
+        past_days: 92,
+      });
+      const result = await openmeteoGetEnsembleTool.handler(input, ctx);
+
+      expect(result.truncated).toBe(true);
+      // Neither cadence is starved — each keeps rows even at the widest column count.
+      expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+      expect(result.daily?.length ?? 0).toBeGreaterThan(0);
+      // …and the pair shares one budget rather than claiming one each.
+      const hourlyChars = JSON.stringify(result.hourly ?? []).length;
+      const dailyChars = JSON.stringify(result.daily ?? []).length;
+      expect(hourlyChars + dailyChars).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+      // The old shape let either cadence alone approach the whole budget.
+      expect(hourlyChars).toBeLessThan(PREVIEW_CHARS);
+      expect(dailyChars).toBeLessThan(PREVIEW_CHARS);
+      expect(result.record_count).toBe(hourlyTime.length + dailyTime.length);
+    },
+  );
+
   it('formats member count for the default blend (no model)', () => {
     const blocks = openmeteoGetEnsembleTool.format!({
       latitude: 47.6,

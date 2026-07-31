@@ -330,6 +330,65 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(result.table_name).toBe('spilled_abc123'); // #18: exact staged table name surfaced
   });
 
+  it('carries daily rows in the canvas-branch preview of a wide hourly range (#36)', async () => {
+    /*
+     * The canvas branch used to split spillover()'s previewRows by timestamp shape.
+     * Those rows are drained from the head of the concatenated [...hourly, ...daily]
+     * array, so on a multi-year hourly range every one of them is hourly and `daily`
+     * came back empty even though the staged table held every daily row.
+     */
+    const hourlyTime = hourlyTimes(43_848);
+    const dailyTime = dailyDates(1827, '2020-01-01');
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', temperature_2m: '°C', precipitation: 'mm' },
+      daily_units: { time: 'iso8601', precipitation_sum: 'mm' },
+      hourly: {
+        time: hourlyTime,
+        temperature_2m: hourlyTime.map((_, i) => 3.5 + (i % 10)),
+        precipitation: hourlyTime.map((_, i) => (i % 3 === 0 ? 0.5 : 0)),
+      },
+      daily: {
+        time: dailyTime,
+        precipitation_sum: dailyTime.map((_, i) => (i % 4 === 0 ? 1.2 : 0)),
+      },
+    });
+    // What spillover() actually drains: a budget's worth of leading hourly rows.
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: {
+        rowCount: hourlyTime.length + dailyTime.length,
+        tableName: 'spilled_hist_mix',
+      },
+      previewRows: hourlyTime.slice(0, 500).map((t) => ({ time: t, temperature_2m: 3.5 })),
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-hist-mix' }) };
+
+    const ctx = createMockContext();
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2020-01-01',
+      end_date: '2024-12-31',
+      hourly_variables: ['temperature_2m', 'precipitation'],
+      daily_variables: ['precipitation_sum'],
+    });
+    const result = await openmeteoGetHistoricalTool.handler(input, ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-hist-mix');
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    expect(result.daily?.length ?? 0).toBeGreaterThan(0);
+    expect(result.daily?.[0]).toMatchObject({ time: dailyTime[0] });
+    // Cadences split correctly, and the pair shares one budget.
+    expect(result.hourly?.every((r) => String(r.time).includes('T'))).toBe(true);
+    expect(result.daily?.every((r) => !String(r.time).includes('T'))).toBe(true);
+    expect(
+      JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
+    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    expect(result.record_count).toBe(hourlyTime.length + dailyTime.length);
+  });
+
   it('returns no canvas handles when spillover declines to stage a table', async () => {
     // The handler must never surface a canvas_id pointing at an empty canvas —
     // spilled.handle only exists on the spilled branch of the union.
