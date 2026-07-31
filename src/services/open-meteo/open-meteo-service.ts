@@ -163,16 +163,27 @@ export interface HistoricalParams {
   wind_speed_unit?: string | undefined;
 }
 
+/**
+ * Marine and air quality both serve a forecast window (`forecast_days` + `past_days`)
+ * or an archive range (`start_date` + `end_date`), never both — upstream rejects the
+ * combination outright. Tool handlers pick one set before calling.
+ */
 export interface MarineParams {
   daily?: string[] | undefined;
+  end_date?: string | undefined;
   forecast_days?: number | undefined;
   hourly?: string[] | undefined;
+  past_days?: number | undefined;
+  start_date?: string | undefined;
   timezone?: string | undefined;
 }
 
 export interface AirQualityParams {
+  end_date?: string | undefined;
   forecast_days?: number | undefined;
   hourly?: string[] | undefined;
+  past_days?: number | undefined;
+  start_date?: string | undefined;
   timezone?: string | undefined;
 }
 
@@ -266,7 +277,7 @@ export class OpenMeteoService {
     return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, 'historical');
   }
 
-  /** Marine forecast endpoint — wave, swell, ocean variables. */
+  /** Marine endpoint — wave, swell, ocean variables; forecast window or archive range. */
   getMarine(
     lat: number,
     lon: number,
@@ -275,11 +286,18 @@ export class OpenMeteoService {
   ): Promise<WeatherEnvelope> {
     const { marineBaseUrl } = getServerConfig();
     const url = buildWeatherUrl(`${marineBaseUrl}/v1/marine`, lat, lon, params);
-    ctx.log.info('Fetching marine forecast', { lat, lon, forecast_days: params.forecast_days });
+    ctx.log.info('Fetching marine data', {
+      lat,
+      lon,
+      forecast_days: params.forecast_days,
+      past_days: params.past_days,
+      start_date: params.start_date,
+      end_date: params.end_date,
+    });
     return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, 'marine');
   }
 
-  /** CAMS Air Quality forecast endpoint. */
+  /** CAMS Air Quality endpoint — forecast window or archive range. */
   getAirQuality(
     lat: number,
     lon: number,
@@ -288,7 +306,14 @@ export class OpenMeteoService {
   ): Promise<WeatherEnvelope> {
     const { airQualityBaseUrl } = getServerConfig();
     const url = buildWeatherUrl(`${airQualityBaseUrl}/v1/air-quality`, lat, lon, params);
-    ctx.log.info('Fetching air quality', { lat, lon, forecast_days: params.forecast_days });
+    ctx.log.info('Fetching air quality', {
+      lat,
+      lon,
+      forecast_days: params.forecast_days,
+      past_days: params.past_days,
+      start_date: params.start_date,
+      end_date: params.end_date,
+    });
     return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, 'air-quality');
   }
 
