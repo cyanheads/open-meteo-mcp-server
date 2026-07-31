@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.3](changelog/0.3.x/0.3.3.md) — 2026-07-30
+
+Canvas-less forecast/historical/marine previews no longer drop daily rows on a wide hourly window; ensemble and climate models are backed by a documented catalog that isolates a rejected model instead of echoing the whole list.
+
 ## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-07-30
 
 openmeteo_get_marine and openmeteo_get_air_quality gain past_days/archive access and DataCanvas spillover; a variable placed in the wrong hourly/daily field no longer silently returns null data.
