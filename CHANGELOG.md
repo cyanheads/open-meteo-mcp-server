@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-07-30
+
+openmeteo_get_marine and openmeteo_get_air_quality gain past_days/archive access and DataCanvas spillover; a variable placed in the wrong hourly/daily field no longer silently returns null data.
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-07-30
 
 Spill-capable tools no longer return unbounded payloads with truncated: false when DataCanvas is disabled; openmeteo_get_forecast gains the same spillover pattern as its siblings.
