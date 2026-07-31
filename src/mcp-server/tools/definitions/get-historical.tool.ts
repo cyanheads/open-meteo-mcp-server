@@ -22,6 +22,12 @@ import {
   splitByCadence,
 } from '../spill-utils.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
+import {
+  describeCadenceMismatches,
+  findCadenceMismatches,
+  HISTORICAL_CADENCE,
+  undefinedUnitColumns,
+} from '../variable-cadence.js';
 
 export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
   description:
@@ -65,6 +71,14 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
         'Check the variable name against Open-Meteo docs. Common hourly: temperature_2m, precipitation, wind_speed_10m, relative_humidity_2m, cloud_cover. Common daily: temperature_2m_max, temperature_2m_min, precipitation_sum.',
       retryable: false,
     },
+    {
+      reason: 'variable_wrong_cadence',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A variable Open-Meteo documents under one cadence was passed in the other cadence field — for example cloud_cover in daily_variables, or temperature_2m_max in hourly_variables',
+      recovery:
+        'Move each variable the message names to the field the message names, or drop it — hourly_variables and daily_variables take separate ERA5 variable sets, and the message lists the same-cadence alternatives when the archive publishes any.',
+      retryable: false,
+    },
   ],
 
   input: z.object({
@@ -93,14 +107,14 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .max(50)
       .optional()
       .describe(
-        'Hourly ERA5 variables (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "relative_humidity_2m", "cloud_cover", "soil_moisture_0_to_7cm"]). At least one of hourly_variables or daily_variables required.',
+        'Hourly ERA5 variables (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "relative_humidity_2m", "cloud_cover", "soil_moisture_0_to_7cm"]). Hourly names only — a daily aggregate such as temperature_2m_max or precipitation_sum belongs in daily_variables and is rejected here. At least one of hourly_variables or daily_variables required.',
       ),
     daily_variables: z
       .array(z.string())
       .max(50)
       .optional()
       .describe(
-        'Daily summary variables (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_max"]). At least one of hourly_variables or daily_variables required.',
+        'Daily summary variables (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_max"]). Daily names only — an hourly name such as cloud_cover or temperature_2m belongs in hourly_variables and is rejected here; for a daily summary of an hourly variable use its published aggregate (cloud_cover_max, cloud_cover_mean, cloud_cover_min). At least one of hourly_variables or daily_variables required.',
       ),
     temperature_unit: z
       .enum(['celsius', 'fahrenheit'])
@@ -182,6 +196,15 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       ),
   }),
 
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Warning that a requested variable came back with no data — names each column whose unit is "undefined", which is how the archive reports a name it parsed but does not serve in the requested cadence.',
+      ),
+  },
+
   async handler(input, ctx) {
     const hasHourly = (input.hourly_variables?.length ?? 0) > 0;
     const hasDaily = (input.daily_variables?.length ?? 0) > 0;
@@ -190,6 +213,26 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
         'no_variables_requested',
         'Provide at least one of hourly_variables or daily_variables.',
         ctx.recoveryFor('no_variables_requested'),
+      );
+    }
+
+    /*
+     * Reject a confident misplacement before the call. The archive answers one
+     * direction with a 400 that echoes the entire encoded variable list — valid
+     * siblings included, so the offender is never isolated — and the other with a
+     * successful all-null column. Unknown names are not misplacements and go upstream
+     * untouched.
+     */
+    const mismatches = findCadenceMismatches(
+      HISTORICAL_CADENCE,
+      input.hourly_variables,
+      input.daily_variables,
+    );
+    if (mismatches.length > 0) {
+      throw ctx.fail(
+        'variable_wrong_cadence',
+        describeCadenceMismatches(mismatches),
+        ctx.recoveryFor('variable_wrong_cadence'),
       );
     }
 
@@ -242,6 +285,21 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       );
     }
 
+    const hourlyUnits = toUnitsMap(data.hourly_units as Record<string, unknown> | undefined);
+    const dailyUnits = toUnitsMap(data.daily_units as Record<string, unknown> | undefined);
+
+    /*
+     * Backstop for a name the catalog does not carry: the archive answers some
+     * wrong-cadence names with HTTP 200 and an all-null column whose unit is the
+     * literal string "undefined". Left unsaid that reads as a genuine data gap.
+     */
+    const emptyColumns = undefinedUnitColumns(hourlyUnits, dailyUnits);
+    if (emptyColumns.length > 0) {
+      ctx.enrich.notice(
+        `${emptyColumns.join(', ')} returned no data — Open-Meteo reported the unit as "undefined", which means the archive does not serve that name in the cadence it was requested under. Check the spelling, and whether it belongs in hourly_variables or daily_variables.`,
+      );
+    }
+
     const hourlyRecords = data.hourly ? reshapeColumnar(data.hourly) : undefined;
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : undefined;
 
@@ -278,8 +336,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
           record_count: spilled.spilled ? spilled.handle.rowCount : allRecords.length,
           hourly: spilledPreview.hourly,
           daily: spilledPreview.daily,
-          hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
-          daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+          hourly_units: hourlyUnits,
+          daily_units: dailyUnits,
           // Only point at the canvas when data actually spilled — spillover()
           // stages a table only past its byte threshold, so a canvas_id on the
           // non-spilled path would reference an empty canvas.
@@ -306,8 +364,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
         record_count: allRecords.length,
         hourly: preview.hourly,
         daily: preview.daily,
-        hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
-        daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+        hourly_units: hourlyUnits,
+        daily_units: dailyUnits,
         canvas_id: undefined,
         table_name: undefined,
         truncated: true,
@@ -323,8 +381,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       record_count: allRecords.length,
       hourly: hourlyRecords,
       daily: dailyRecords,
-      hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
-      daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+      hourly_units: hourlyUnits,
+      daily_units: dailyUnits,
       canvas_id: undefined,
       table_name: undefined,
       truncated: false,

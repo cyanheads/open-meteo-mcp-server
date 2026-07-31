@@ -22,6 +22,7 @@ import {
   PREVIEW_CHARS,
 } from '../spill-utils.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
+import { undefinedUnitColumns } from '../variable-cadence.js';
 
 export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
   description:
@@ -180,6 +181,15 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       ),
   }),
 
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Warning that a requested variable came back with no data — names each column whose unit is "undefined", which is how the endpoint reports a name it parsed but does not serve.',
+      ),
+  },
+
   async handler(input, ctx) {
     const dailyVariables = input.daily_variables;
     if (!dailyVariables || dailyVariables.length === 0) {
@@ -247,6 +257,22 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       );
     }
 
+    const dailyUnits = toUnitsMap(data.daily_units as Record<string, unknown> | undefined);
+
+    /*
+     * Backstop for a name the CMIP6 endpoint parses but does not serve: it shares the
+     * forecast API's variable parser, so a name from another endpoint's vocabulary such
+     * as river_discharge_max comes back as HTTP 200 with an all-null column whose unit
+     * is the literal string "undefined". Only a name the parser cannot resolve at all
+     * draws a 400.
+     */
+    const emptyColumns = undefinedUnitColumns(dailyUnits);
+    if (emptyColumns.length > 0) {
+      ctx.enrich.notice(
+        `${emptyColumns.join(', ')} returned no data — Open-Meteo reported the unit as "undefined", which means the CMIP6 climate endpoint does not serve that name. Check it against the climate variable list (temperature_2m_max, temperature_2m_min, precipitation_sum, wind_speed_10m_max, …).`,
+      );
+    }
+
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : [];
     const models = input.models && input.models.length > 0 ? input.models : undefined;
     const dateRange = {
@@ -278,7 +304,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
           date_range: dateRange,
           record_count: spilled.spilled ? spilled.handle.rowCount : dailyRecords.length,
           daily: spilled.previewRows as Record<string, unknown>[],
-          daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+          daily_units: dailyUnits,
           // Only point at the canvas when data actually spilled — spillover()
           // stages a table only past its byte threshold, so a canvas_id on the
           // non-spilled path would reference an empty canvas.
@@ -302,7 +328,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
         date_range: dateRange,
         record_count: dailyRecords.length,
         daily: boundedPreview(dailyRecords),
-        daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+        daily_units: dailyUnits,
         canvas_id: undefined,
         table_name: undefined,
         truncated: true,
@@ -318,7 +344,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       date_range: dateRange,
       record_count: dailyRecords.length,
       daily: dailyRecords,
-      daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+      daily_units: dailyUnits,
       canvas_id: undefined,
       table_name: undefined,
       truncated: false,

@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetHistoricalTool } from '@/mcp-server/tools/definitions/get-historical.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
@@ -122,6 +122,67 @@ describe('openmeteoGetHistoricalTool', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'no_variables_requested' },
     });
+  });
+
+  it('names a misplaced variable and its field in both directions (#26)', async () => {
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      hourly_variables: ['temperature_2m_max'],
+      daily_variables: ['temperature_2m_max', 'cloud_cover'],
+    });
+
+    await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining(
+        'temperature_2m_max is not valid in hourly_variables — Open-Meteo publishes it as a daily variable.',
+      ),
+      data: { reason: 'variable_wrong_cadence' },
+    });
+    await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
+      message: expect.stringContaining('cloud_cover is not valid in daily_variables'),
+    });
+    expect(mockGetHistorical).not.toHaveBeenCalled();
+  });
+
+  it('sends an unknown variable name upstream unrejected (#7)', async () => {
+    mockGetHistorical.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      hourly_variables: ['temperature_2m', 'a_variable_open_meteo_added_later'],
+    });
+
+    await openmeteoGetHistoricalTool.handler(input, ctx);
+
+    const callArgs = mockGetHistorical.mock.calls[0]?.[2] as { hourly?: string[] };
+    expect(callArgs?.hourly).toEqual(['temperature_2m', 'a_variable_open_meteo_added_later']);
+  });
+
+  it('notices an all-null column upstream reported with unit "undefined"', async () => {
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', some_new_daily_name: 'undefined' },
+      hourly: { time: ['2024-07-01T00:00'], some_new_daily_name: [null] },
+    });
+    const ctx = createMockContext();
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      hourly_variables: ['some_new_daily_name'],
+    });
+
+    await openmeteoGetHistoricalTool.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toContain('some_new_daily_name returned no data');
   });
 
   it('throws date_order_invalid with correct reason when end before start', async () => {

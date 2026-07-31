@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetForecastTool } from '@/mcp-server/tools/definitions/get-forecast.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
@@ -216,6 +216,118 @@ describe('openmeteoGetForecastTool', () => {
     await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
       message: expect.stringContaining(`(Upstream: ${upstreamReason})`),
     });
+  });
+
+  it('names cloud_cover and its field when it is passed alongside valid daily siblings (#26)', async () => {
+    // The live 400 for this request echoes the whole encoded list, valid names
+    // included, so the offender is never isolated upstream. Rejecting before the call
+    // is what makes the next attempt convergent.
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 40.71427,
+      longitude: -74.00597,
+      forecast_days: 16,
+      daily_variables: [
+        'sunrise',
+        'sunset',
+        'temperature_2m_max',
+        'temperature_2m_min',
+        'precipitation_sum',
+        'cloud_cover',
+        'weather_code',
+        'uv_index_max',
+      ],
+    });
+
+    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message:
+        'cloud_cover is not valid in daily_variables — Open-Meteo publishes it as an hourly variable. Move it to hourly_variables, or stay in daily_variables with cloud_cover_max, cloud_cover_mean, cloud_cover_min.',
+      data: { reason: 'variable_wrong_cadence', recovery: { hint: expect.any(String) } },
+    });
+    // The valid siblings are never named as suspects, and no upstream call is made.
+    expect(mockGetForecast).not.toHaveBeenCalled();
+  });
+
+  it('rejects temperature_2m_max in hourly_variables instead of returning an all-null column (#26)', async () => {
+    // Upstream answers this one with HTTP 200, an all-null column, and unit
+    // "undefined" — a success indistinguishable from a genuine data gap.
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 40.71427,
+      longitude: -74.00597,
+      hourly_variables: ['temperature_2m_max'],
+    });
+
+    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message:
+        'temperature_2m_max is not valid in hourly_variables — Open-Meteo publishes it as a daily variable. Move it to daily_variables, or stay in hourly_variables with temperature_2m.',
+      data: { reason: 'variable_wrong_cadence' },
+    });
+    expect(mockGetForecast).not.toHaveBeenCalled();
+  });
+
+  it('sends an unknown variable name upstream unrejected (#7)', async () => {
+    // The catalogs reject only a confident misplacement. A name in neither cadence set
+    // is unknown, not invalid — Open-Meteo stays the authority on it.
+    mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m', 'a_variable_open_meteo_added_later'],
+      daily_variables: ['another_new_daily_variable'],
+    });
+
+    await openmeteoGetForecastTool.handler(input, ctx);
+
+    expect(mockGetForecast).toHaveBeenCalledTimes(1);
+    const callArgs = mockGetForecast.mock.calls[0]?.[2] as {
+      hourly?: string[];
+      daily?: string[];
+    };
+    expect(callArgs?.hourly).toEqual(['temperature_2m', 'a_variable_open_meteo_added_later']);
+    expect(callArgs?.daily).toEqual(['another_new_daily_variable']);
+  });
+
+  it('notices an all-null column upstream reported with unit "undefined"', async () => {
+    // The backstop for names the catalog does not carry: without it the caller reads
+    // nulls as a genuine data gap.
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', temperature_2m: '°C', some_new_daily_name: 'undefined' },
+      hourly: {
+        time: ['2026-05-30T00:00', '2026-05-30T01:00'],
+        temperature_2m: [10.1, 9.4],
+        some_new_daily_name: [null, null],
+      },
+    });
+    const ctx = createMockContext();
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m', 'some_new_daily_name'],
+    });
+
+    await openmeteoGetForecastTool.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toContain('some_new_daily_name returned no data');
+    expect(getEnrichment(ctx).notice).toContain('hourly_variables or daily_variables');
+  });
+
+  it('stays quiet when every requested column carries a real unit', async () => {
+    mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext();
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m', 'precipitation'],
+    });
+
+    await openmeteoGetForecastTool.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBeUndefined();
   });
 
   it('passes timezone=auto by default', async () => {

@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetFloodTool } from '@/mcp-server/tools/definitions/get-flood.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
@@ -624,5 +624,53 @@ describe('openmeteoGetFloodTool', () => {
     expect(text).toContain('river_discharge: 1000');
     expect(text).toContain('river_discharge: 1034'); // last row — not sliced at 30
     expect(text).not.toMatch(/and \d+ more/);
+  });
+});
+
+describe('openmeteoGetFloodTool unserved-variable notice', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
+  });
+
+  it('notices an all-null column upstream reported with unit "undefined"', async () => {
+    // GloFAS shares the forecast API's variable parser, so a weather name it does not
+    // serve comes back HTTP 200 with an all-null column rather than an error —
+    // verified live with daily=precipitation_sum.
+    mockGetFlood.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      daily_units: { time: 'iso8601', river_discharge: 'm³/s', precipitation_sum: 'undefined' },
+      daily: {
+        time: ['2026-06-03', '2026-06-04'],
+        river_discharge: [120.5, 118.0],
+        precipitation_sum: [null, null],
+      },
+    });
+    const ctx = createMockContext();
+    const input = openmeteoGetFloodTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: ['river_discharge', 'precipitation_sum'],
+    });
+
+    await openmeteoGetFloodTool.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toContain('precipitation_sum returned no data');
+    expect(getEnrichment(ctx).notice).toContain('openmeteo_get_forecast');
+  });
+
+  it('stays quiet when every requested column carries a real unit', async () => {
+    mockGetFlood.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext();
+    const input = openmeteoGetFloodTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: ['river_discharge'],
+    });
+
+    await openmeteoGetFloodTool.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBeUndefined();
   });
 });

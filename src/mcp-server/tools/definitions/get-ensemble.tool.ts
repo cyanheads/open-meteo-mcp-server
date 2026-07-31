@@ -21,6 +21,25 @@ import {
   PREVIEW_CHARS,
 } from '../spill-utils.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
+import {
+  describeCadenceMismatches,
+  ENSEMBLE_CADENCE,
+  findCadenceMismatches,
+  undefinedUnitColumns,
+} from '../variable-cadence.js';
+
+/**
+ * Variable names behind the columns upstream reported with unit `"undefined"`, with the
+ * `_memberNN` suffix stripped so one unserved variable is named once rather than once
+ * per member — a 51-member fan-out would otherwise produce a 51-name notice.
+ */
+function unservedVariables(...unitMaps: (Record<string, string> | undefined)[]): string[] {
+  return [
+    ...new Set(
+      undefinedUnitColumns(...unitMaps).map((column) => column.replace(/_member\d+$/, '')),
+    ),
+  ];
+}
 
 /**
  * Count distinct ensemble members from per-member column names (_memberNN suffix).
@@ -69,6 +88,14 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         'Check the variable name against Open-Meteo ensemble docs. Common hourly: temperature_2m, precipitation, wind_speed_10m. Common daily: temperature_2m_max, temperature_2m_min, precipitation_sum. Valid models: ecmwf_ifs025, gfs025, icon_seamless, gem_global.',
       retryable: false,
     },
+    {
+      reason: 'variable_wrong_cadence',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A variable the ensemble API documents under one cadence was passed in the other cadence field — for example precipitation_sum in hourly_variables, or precipitation in daily_variables',
+      recovery:
+        'Move each variable the message names to the field the message names, or drop it — hourly_variables and daily_variables take separate ensemble variable sets, and the message lists the same-cadence alternatives when the endpoint publishes any.',
+      retryable: false,
+    },
   ],
 
   input: z.object({
@@ -85,14 +112,14 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       .max(50)
       .optional()
       .describe(
-        'Hourly variables to fetch across all ensemble members (e.g., ["temperature_2m", "precipitation", "wind_speed_10m"]). Each variable appears as temperature_2m_member01, temperature_2m_member02, … in the output. At least one of hourly_variables or daily_variables required.',
+        'Hourly variables to fetch across all ensemble members (e.g., ["temperature_2m", "precipitation", "wind_speed_10m"]). Each variable appears as temperature_2m_member01, temperature_2m_member02, … in the output. Hourly names only — a daily-only aggregate such as precipitation_sum or wind_speed_10m_max belongs in daily_variables and is rejected here; temperature_2m_max and temperature_2m_min are an exception, published here as 3-hourly aggregations as well as daily. At least one of hourly_variables or daily_variables required.',
       ),
     daily_variables: z
       .array(z.string())
       .max(50)
       .optional()
       .describe(
-        'Daily variables to fetch across all ensemble members (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum"]). Each variable appears as temperature_2m_max_member01, … At least one of hourly_variables or daily_variables required.',
+        'Daily variables to fetch across all ensemble members (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum"]). Each variable appears as temperature_2m_max_member01, … Daily names only — an hourly name such as precipitation or temperature_2m belongs in hourly_variables and is rejected here; for a daily summary use its published aggregate (precipitation_sum, temperature_2m_max). At least one of hourly_variables or daily_variables required.',
       ),
     models: z
       .string()
@@ -205,6 +232,15 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       ),
   }),
 
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Warning that a requested variable came back with no data across every member — names each variable whose unit is "undefined", which is how the endpoint reports a name the selected model does not carry.',
+      ),
+  },
+
   async handler(input, ctx) {
     const hasHourly = (input.hourly_variables?.length ?? 0) > 0;
     const hasDaily = (input.daily_variables?.length ?? 0) > 0;
@@ -213,6 +249,26 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         'no_variables_requested',
         'Provide at least one of hourly_variables or daily_variables.',
         ctx.recoveryFor('no_variables_requested'),
+      );
+    }
+
+    /*
+     * Reject a confident misplacement before the call. Upstream rejects a wrong-bucket
+     * name with a 400 that echoes the entire encoded list — valid siblings included, so
+     * the offender is never isolated. The ensemble catalog is its own: this endpoint
+     * publishes temperature_2m_max under both cadences, and a name in both is never
+     * reported. Unknown names are not misplacements and go upstream untouched.
+     */
+    const mismatches = findCadenceMismatches(
+      ENSEMBLE_CADENCE,
+      input.hourly_variables,
+      input.daily_variables,
+    );
+    if (mismatches.length > 0) {
+      throw ctx.fail(
+        'variable_wrong_cadence',
+        describeCadenceMismatches(mismatches),
+        ctx.recoveryFor('variable_wrong_cadence'),
       );
     }
 
@@ -239,6 +295,24 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         'invalid_variable',
         frameInvalidVariableMessage(data.reason, 'variable or model'),
         ctx.recoveryFor('invalid_variable'),
+      );
+    }
+
+    const hourlyUnits = toUnitsMap(data.hourly_units as Record<string, unknown> | undefined);
+    const dailyUnits = toUnitsMap(data.daily_units as Record<string, unknown> | undefined);
+
+    /*
+     * Backstop for a name the catalog does not carry, and for one it does that the
+     * chosen model does not run: the ensemble endpoint answers both with HTTP 200 and
+     * an all-null column per member whose unit is the literal string "undefined".
+     * temperature_2m_max is served by ecmwf_ifs025 and null under gfs025, so this is a
+     * notice rather than a failure — the name may be valid and simply unavailable from
+     * the selected model.
+     */
+    const emptyVariables = unservedVariables(hourlyUnits, dailyUnits);
+    if (emptyVariables.length > 0) {
+      ctx.enrich.notice(
+        `${emptyVariables.join(', ')} returned no data on any member — Open-Meteo reported the unit as "undefined", which means ${input.models ?? 'the default blend'} does not carry that name in the cadence it was requested under. Try another models value, move it to the other cadence field, or drop it.`,
       );
     }
 
@@ -293,8 +367,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
           record_count: spilled.spilled ? spilled.handle.rowCount : allRecords.length,
           hourly: hourlyPreview,
           daily: dailyPreview,
-          hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
-          daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+          hourly_units: hourlyUnits,
+          daily_units: dailyUnits,
           // Only point at the canvas when data actually spilled — spillover()
           // stages a table only past its byte threshold, so a canvas_id on the
           // non-spilled path would reference an empty canvas.
@@ -320,8 +394,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         record_count: allRecords.length,
         hourly: boundedPreview(hourlyRecords ?? []),
         daily: boundedPreview(dailyRecords ?? []),
-        hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
-        daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+        hourly_units: hourlyUnits,
+        daily_units: dailyUnits,
         canvas_id: undefined,
         table_name: undefined,
         truncated: true,
@@ -338,8 +412,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       record_count: allRecords.length,
       hourly: hourlyRecords,
       daily: dailyRecords,
-      hourly_units: toUnitsMap(data.hourly_units as Record<string, unknown> | undefined),
-      daily_units: toUnitsMap(data.daily_units as Record<string, unknown> | undefined),
+      hourly_units: hourlyUnits,
+      daily_units: dailyUnits,
       canvas_id: undefined,
       table_name: undefined,
       truncated: false,

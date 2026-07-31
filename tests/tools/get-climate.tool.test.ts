@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetClimateTool } from '@/mcp-server/tools/definitions/get-climate.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
@@ -710,5 +710,60 @@ describe('openmeteoGetClimateTool', () => {
     // Heading reports the upstream total and does not claim a canvas holds it.
     expect(text).toContain('1 shown of 7670 total rows)');
     expect(text).not.toContain('total rows on canvas');
+  });
+});
+
+describe('openmeteoGetClimateTool unserved-variable notice', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
+  });
+
+  it('notices an all-null column upstream reported with unit "undefined"', async () => {
+    // The CMIP6 endpoint shares the forecast API's variable parser, so a name from
+    // another endpoint's vocabulary comes back HTTP 200 with an all-null column rather
+    // than an error — verified live with daily=river_discharge_max.
+    mockGetClimate.mockResolvedValue({
+      ...MOCK_SINGLE_MODEL_RESPONSE,
+      daily_units: {
+        time: 'iso8601',
+        temperature_2m_max: '°C',
+        river_discharge_max: 'undefined',
+      },
+      daily: {
+        time: ['2049-01-01', '2049-01-02'],
+        temperature_2m_max: [10.1, 8.9],
+        river_discharge_max: [null, null],
+      },
+    });
+    const ctx = createMockContext();
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      start_date: '2049-01-01',
+      end_date: '2049-01-02',
+      daily_variables: ['temperature_2m_max', 'river_discharge_max'],
+    });
+
+    await openmeteoGetClimateTool.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toContain('river_discharge_max returned no data');
+  });
+
+  it('stays quiet when every requested column carries a real unit', async () => {
+    mockGetClimate.mockResolvedValue(MOCK_SINGLE_MODEL_RESPONSE);
+    const ctx = createMockContext();
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      start_date: '2049-01-01',
+      end_date: '2049-01-02',
+      daily_variables: ['temperature_2m_max'],
+    });
+
+    await openmeteoGetClimateTool.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBeUndefined();
   });
 });

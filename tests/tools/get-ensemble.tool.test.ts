@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetEnsembleTool } from '@/mcp-server/tools/definitions/get-ensemble.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
@@ -217,6 +217,105 @@ describe('openmeteoGetEnsembleTool', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'no_variables_requested' },
     });
+  });
+
+  it('names a misplaced ensemble variable and its field (#26)', async () => {
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m', 'precipitation_sum'],
+    });
+
+    await expect(openmeteoGetEnsembleTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining(
+        'precipitation_sum is not valid in hourly_variables — Open-Meteo publishes it as a daily variable.',
+      ),
+      data: { reason: 'variable_wrong_cadence' },
+    });
+    expect(mockGetEnsemble).not.toHaveBeenCalled();
+  });
+
+  it('accepts temperature_2m_max in hourly_variables — the ensemble API publishes it there', async () => {
+    // The forecast endpoint publishes it under daily only, so a shared catalog would
+    // reject this valid request. The ensemble catalog is its own.
+    mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m_max'],
+    });
+
+    await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    const callArgs = mockGetEnsemble.mock.calls[0]?.[2] as { hourly?: string[] };
+    expect(callArgs?.hourly).toEqual(['temperature_2m_max']);
+  });
+
+  it('sends an unknown ensemble variable name upstream unrejected (#7)', async () => {
+    mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m', 'a_variable_open_meteo_added_later'],
+    });
+
+    await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    const callArgs = mockGetEnsemble.mock.calls[0]?.[2] as { hourly?: string[] };
+    expect(callArgs?.hourly).toEqual(['temperature_2m', 'a_variable_open_meteo_added_later']);
+  });
+
+  it('notices a variable the selected model does not carry, naming it once per variable', async () => {
+    // temperature_2m_max under hourly is real data on ecmwf_ifs025 and an all-null
+    // column with unit "undefined" on gfs025 — verified live. The notice strips the
+    // _memberNN suffix so a wide fan-out names the variable once.
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: {
+        time: 'iso8601',
+        temperature_2m_max: 'undefined',
+        temperature_2m_max_member01: 'undefined',
+        temperature_2m_max_member02: 'undefined',
+      },
+      hourly: {
+        time: ['2026-06-03T00:00', '2026-06-03T01:00'],
+        temperature_2m_max_member01: [null, null],
+        temperature_2m_max_member02: [null, null],
+      },
+    });
+    const ctx = createMockContext();
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m_max'],
+      models: 'gfs025',
+    });
+
+    await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice;
+    expect(notice).toContain('temperature_2m_max returned no data on any member');
+    expect(notice).toContain('gfs025');
+    expect(notice).not.toContain('member01');
+  });
+
+  it('stays quiet when every requested column carries a real unit', async () => {
+    mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext();
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'ecmwf_ifs025',
+    });
+
+    await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    expect(getEnrichment(ctx).notice).toBeUndefined();
   });
 
   it('frames the upstream unknown-variable rejection with the offending name and recovery hint', async () => {
