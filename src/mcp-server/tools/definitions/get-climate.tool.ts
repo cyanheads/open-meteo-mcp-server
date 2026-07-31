@@ -13,11 +13,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
-import {
-  CLIMATE_MODEL_LIST,
-  describeUnknownClimateModels,
-  isolateUnknownClimateModels,
-} from '../model-catalog.js';
+import { CLIMATE_MODEL_LIST } from '../model-catalog.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
   boundedPreview,
@@ -257,19 +253,16 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
         );
       }
       /*
-       * The models array goes out as one percent-encoded comma list, so a rejection
-       * echoes every requested model — a valid MRI_AGCM3_2_S named alongside the one
-       * bad name, which leaves the caller nothing to converge on. Narrow the echo to
-       * the requested models the documentation does not publish; when that identifies
-       * nothing (an unknown variable, or a models rejection where every name is
-       * documented), fall through to the generic framing.
+       * The models array goes out with a literal comma, so upstream parses it as a list
+       * and its rejection names only the offending model — a valid MRI_AGCM3_2_S sent
+       * alongside a bad name is not echoed as a suspect. Reframing that message is all
+       * this needs; reconstructing the offender from a local catalog would only re-derive
+       * what upstream already stated, against a list that has to be refreshed to stay
+       * correct. The same holds for a rejected variable name.
        */
-      const unknownModels = isolateUnknownClimateModels(input.models, data.reason);
       throw ctx.fail(
         'invalid_variable',
-        unknownModels.length > 0
-          ? describeUnknownClimateModels(unknownModels, data.reason)
-          : frameInvalidVariableMessage(data.reason, 'variable or model'),
+        frameInvalidVariableMessage(data.reason, 'variable or model'),
         ctx.recoveryFor('invalid_variable'),
       );
     }

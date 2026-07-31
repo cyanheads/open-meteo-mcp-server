@@ -1,20 +1,19 @@
 /**
  * @fileoverview Documented model sets for the two tools that take a `models` input
- * (openmeteo_get_ensemble, openmeteo_get_climate), and the post-rejection isolation the
- * climate tool needs.
+ * (openmeteo_get_ensemble, openmeteo_get_climate).
  *
- * These are NOT allowlists. Nothing here is checked before a request: a model name the
- * catalog does not carry still goes upstream untouched, so a model Open-Meteo adds after
- * this file was written keeps working. Open-Meteo stays the authority on which models
- * exist. The catalog does two things instead — it keeps the advertised list honest, and
- * it isolates the offender out of a rejected multi-model climate request.
+ * These are NOT allowlists. Nothing here is checked, before a request or after: a model
+ * name the catalog does not carry goes upstream untouched, so a model Open-Meteo adds
+ * after this file was written keeps working, and a rejection is reported in the terms
+ * upstream used. Open-Meteo stays the authority on which models exist. The catalog's one
+ * job is keeping the advertised lists honest — the tool description, the `models` field
+ * description, and the `invalid_variable` recovery hint all render from here, so they
+ * cannot drift apart.
  *
- * Why isolation is needed on climate and not on ensemble: the climate tool sends its
- * `models` array as one comma-joined value, and `URLSearchParams` percent-encodes the
- * commas, so upstream parses the list as a single value and its rejection echoes all of
- * it — `Cannot initialize MultiDomains from invalid String value MRI_AGCM3_2_S,BOGUS`,
- * naming a valid model as a suspect. The ensemble tool takes one model string, so its
- * rejection already names only the offender.
+ * The climate tool also used to reconstruct the offending model locally, because a
+ * percent-encoded comma made upstream echo the whole requested list. The service now
+ * sends list parameters with a literal comma and upstream isolates the offender itself,
+ * which is the authority this catalog was standing in for.
  *
  * Provenance: each set is the model list published on the matching Open-Meteo
  * documentation page, read on 2026-07-30:
@@ -32,8 +31,6 @@
  * @module mcp-server/tools/model-catalog
  */
 
-import { extractInvalidValues } from './upstream-error.js';
-
 /** One ensemble model as its documentation page publishes it. */
 export interface EnsembleModel {
   /** Exact `models` API value. */
@@ -44,9 +41,11 @@ export interface EnsembleModel {
 
 /**
  * Documented ensemble models (19). A regional model queried outside its domain never
- * fails as a name error, but it does not fail uniformly either: the `meteoswiss_*` pair
- * returns `No data is available for this location`, while the rest answer HTTP 200 with
- * a body carrying no data blocks, which surfaces as a transient upstream failure.
+ * fails as a name error, and upstream does not report it uniformly either: the
+ * `meteoswiss_*` pair returns `No data is available for this location`, while the rest
+ * answer HTTP 200 with a body carrying `nan` coordinates and no data blocks. The service
+ * matches both shapes and throws the same non-retryable coverage-gap rejection for each —
+ * see its `NO_DATA_REASON` and `NAN_COORDINATE_BODY`.
  */
 export const ENSEMBLE_MODELS: readonly EnsembleModel[] = [
   { name: 'ecmwf_ifs025_ensemble', note: '51 members, global 0.25°' },
@@ -89,46 +88,3 @@ export const ENSEMBLE_MODEL_NAMES = ENSEMBLE_MODELS.map((m) => m.name).join(', '
 
 /** The advertised climate list, comma-joined. */
 export const CLIMATE_MODEL_LIST = CLIMATE_MODELS.join(', ');
-
-const CLIMATE_MODEL_SET = new Set(CLIMATE_MODELS);
-
-/**
- * The requested climate models the documentation does not publish — the suspects behind
- * a rejection whose message echoed the whole `models` list.
- *
- * Returns nothing unless the echoed value is exactly the requested list in order, which
- * is what the percent-encoded join produces. That guard is what keeps a rejected
- * *variable* name from being blamed on a model: its message names the variable list, so
- * the comparison fails and the caller gets the generic framing instead.
- *
- * An empty result on a real models rejection means every requested model is documented —
- * the offender is something the catalog cannot see, and the generic framing is honest.
- */
-export function isolateUnknownClimateModels(
-  requested: readonly string[] | undefined,
-  upstreamReason: string | undefined,
-): string[] {
-  if (!requested || requested.length === 0) return [];
-  const echoed = extractInvalidValues(upstreamReason);
-  if (echoed.length !== requested.length) return [];
-  if (echoed.some((value, i) => value !== requested[i])) return [];
-  return echoed.filter((name) => !CLIMATE_MODEL_SET.has(name));
-}
-
-/**
- * The surfaced message for a rejected climate request whose offending model(s)
- * {@link isolateUnknownClimateModels} identified — names only those, says why the raw
- * upstream text names more, and lists the documented set to correct against.
- */
-export function describeUnknownClimateModels(
-  unknown: readonly string[],
-  upstreamReason: string | undefined,
-): string {
-  const plural = unknown.length > 1;
-  return (
-    `Unknown climate model name${plural ? 's' : ''}: ${unknown.join(', ')}. ` +
-    `The upstream message below names every requested model, but only ${plural ? 'these are' : 'this one is'} ` +
-    `outside the documented CMIP6 set — remove or correct ${plural ? 'them' : 'it'} and retry. ` +
-    `Documented models: ${CLIMATE_MODEL_LIST}. (Upstream: ${(upstreamReason ?? '').trim()})`
-  );
-}

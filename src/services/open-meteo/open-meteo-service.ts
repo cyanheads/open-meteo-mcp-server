@@ -28,6 +28,42 @@ const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 500;
 const REQUEST_TIMEOUT_MS = 15_000;
 
+/**
+ * A body carrying a bare `nan` where a coordinate belongs:
+ * `{"latitude":nan,"longitude":nan,…}` with no data blocks. Most regional ensemble
+ * models answer a coordinate outside the area they cover with this and HTTP 200,
+ * rather than the `No data is available for this location` envelope the
+ * `meteoswiss_*` pair returns.
+ *
+ * `nan` is not valid JSON, so left alone this reaches `JSON.parse`, throws, and is
+ * classified as an unparseable — and therefore retryable — response. The retry loop
+ * then burns three attempts on a request that can never succeed and reports a
+ * transient outage for what is an input error. Matching the body shape here turns it
+ * into the non-retryable rejection the caller can act on. A bare `nan` token cannot
+ * appear in valid JSON, so there is nothing for this to false-positive on.
+ *
+ * Anchored at the head, where every observed instance of the shape puts it — which
+ * also keeps a multi-megabyte success response off a full-body scan. A body that put
+ * the token elsewhere would fall through to the parse failure below and retry, which
+ * is the behavior this replaces rather than a new failure mode.
+ */
+const NAN_COORDINATE_BODY = /^\s*\{\s*"latitude"\s*:\s*nan\b/;
+
+/**
+ * The error-envelope half of the same coverage gap: the `meteoswiss_*` ensemble pair
+ * reports an out-of-domain coordinate as a 4xx `{"error":true,"reason":"No data is
+ * available for this location"}` where the other regional models answer HTTP 200 with
+ * {@link NAN_COORDINATE_BODY}. Returning this envelope to a handler instead frames it
+ * through the unknown-variable path, which leads with the spelling of a name rather
+ * than the coordinate. Both shapes leave the client as the same rejection.
+ */
+const NO_DATA_REASON = /^no data is available for this location/i;
+
+/** What a caller does about either shape — one wording, so both read alike. */
+const COVERAGE_GAP_RECOVERY =
+  'Switch to a model whose domain includes this coordinate (any global model does), or omit ' +
+  'the model to use the default blend. Retrying returns the same response.';
+
 function isRetryable(error: unknown): boolean {
   if (error instanceof TypeError) return true;
   if (error instanceof McpError) {
@@ -68,6 +104,17 @@ async function openMeteoFetch<T>(url: string, ctx: Context): Promise<T> {
     });
   }
 
+  // Out-of-domain regional model — an input error wearing an unparseable body.
+  // See NAN_COORDINATE_BODY. Non-retryable: the same request returns the same body.
+  if (NAN_COORDINATE_BODY.test(text)) {
+    throw validationError(
+      'Open-Meteo returned no data for this location — the response carried nan coordinates and no ' +
+        'data blocks, which is how a regional model reports a coordinate outside the area it covers. ' +
+        COVERAGE_GAP_RECOVERY,
+      { url },
+    );
+  }
+
   let body: T;
   try {
     body = JSON.parse(text) as T;
@@ -87,6 +134,14 @@ async function openMeteoFetch<T>(url: string, ctx: Context): Promise<T> {
   if (asRecord.error === true && response.status >= 500) {
     const reason = typeof asRecord.reason === 'string' ? asRecord.reason : 'Unknown error';
     throw serviceUnavailable(`Open-Meteo API error: ${reason}`, { url, status: response.status });
+  }
+
+  // See NO_DATA_REASON — the envelope half of the out-of-domain regional-model shape.
+  if (asRecord.error === true && NO_DATA_REASON.test(String(asRecord.reason ?? ''))) {
+    throw validationError(
+      `Open-Meteo returned no data for this location. ${COVERAGE_GAP_RECOVERY}`,
+      { url },
+    );
   }
 
   if (!response.ok) {
@@ -236,14 +291,15 @@ export class OpenMeteoService {
     ctx: Context,
   ): Promise<GeocodingResponse> {
     const { geocodingBaseUrl } = getServerConfig();
-    const url = new URL(`${geocodingBaseUrl}/v1/search`);
-    url.searchParams.set('name', name);
-    url.searchParams.set('count', String(count));
-    url.searchParams.set('language', language);
-    if (country) url.searchParams.set('countryCode', country);
-    url.searchParams.set('format', 'json');
+    const url = openMeteoUrl(`${geocodingBaseUrl}/v1/search`, {
+      name,
+      count,
+      language,
+      countryCode: country,
+      format: 'json',
+    });
     ctx.log.info('Geocoding place', { name, count, language, country });
-    return withOpenMeteoRetry<GeocodingResponse>(url.toString(), ctx, 'geocode');
+    return withOpenMeteoRetry<GeocodingResponse>(url, ctx, 'geocode');
   }
 
   /** Forecast endpoint — hourly/daily for up to 16 days forward, 92 days back. */
@@ -325,25 +381,19 @@ export class OpenMeteoService {
     ctx: Context,
   ): Promise<EnsembleEnvelope> {
     const { ensembleBaseUrl } = getServerConfig();
-    const url = new URL(`${ensembleBaseUrl}/v1/ensemble`);
-    url.searchParams.set('latitude', String(lat));
-    url.searchParams.set('longitude', String(lon));
-
-    if (params.hourly && params.hourly.length > 0) {
-      url.searchParams.set('hourly', params.hourly.join(','));
-    }
-    if (params.daily && params.daily.length > 0) {
-      url.searchParams.set('daily', params.daily.join(','));
-    }
-    if (params.models) url.searchParams.set('models', params.models);
-    if (params.forecast_days != null)
-      url.searchParams.set('forecast_days', String(params.forecast_days));
-    if (params.past_days != null) url.searchParams.set('past_days', String(params.past_days));
-    if (params.temperature_unit) url.searchParams.set('temperature_unit', params.temperature_unit);
-    if (params.wind_speed_unit) url.searchParams.set('wind_speed_unit', params.wind_speed_unit);
-    if (params.precipitation_unit)
-      url.searchParams.set('precipitation_unit', params.precipitation_unit);
-    url.searchParams.set('timezone', params.timezone ?? 'auto');
+    const url = openMeteoUrl(`${ensembleBaseUrl}/v1/ensemble`, {
+      latitude: lat,
+      longitude: lon,
+      hourly: params.hourly,
+      daily: params.daily,
+      models: params.models,
+      forecast_days: params.forecast_days,
+      past_days: params.past_days,
+      temperature_unit: params.temperature_unit,
+      wind_speed_unit: params.wind_speed_unit,
+      precipitation_unit: params.precipitation_unit,
+      timezone: params.timezone ?? 'auto',
+    });
 
     ctx.log.info('Fetching ensemble forecast', {
       lat,
@@ -351,21 +401,21 @@ export class OpenMeteoService {
       models: params.models,
       forecast_days: params.forecast_days,
     });
-    return withOpenMeteoRetry<EnsembleEnvelope>(url.toString(), ctx, 'ensemble');
+    return withOpenMeteoRetry<EnsembleEnvelope>(url, ctx, 'ensemble');
   }
 
   /** GloFAS Flood endpoint — river discharge forecasts and reanalysis history. */
   getFlood(lat: number, lon: number, params: FloodParams, ctx: Context): Promise<FloodEnvelope> {
     const { floodBaseUrl } = getServerConfig();
-    const url = new URL(`${floodBaseUrl}/v1/flood`);
-    url.searchParams.set('latitude', String(lat));
-    url.searchParams.set('longitude', String(lon));
-    url.searchParams.set('daily', params.daily.join(','));
-    if (params.forecast_days != null)
-      url.searchParams.set('forecast_days', String(params.forecast_days));
-    if (params.start_date) url.searchParams.set('start_date', params.start_date);
-    if (params.end_date) url.searchParams.set('end_date', params.end_date);
-    url.searchParams.set('timezone', params.timezone ?? 'auto');
+    const url = openMeteoUrl(`${floodBaseUrl}/v1/flood`, {
+      latitude: lat,
+      longitude: lon,
+      daily: params.daily,
+      forecast_days: params.forecast_days,
+      start_date: params.start_date,
+      end_date: params.end_date,
+      timezone: params.timezone ?? 'auto',
+    });
 
     ctx.log.info('Fetching flood forecast', {
       lat,
@@ -374,7 +424,7 @@ export class OpenMeteoService {
       start_date: params.start_date,
       end_date: params.end_date,
     });
-    return withOpenMeteoRetry<FloodEnvelope>(url.toString(), ctx, 'flood');
+    return withOpenMeteoRetry<FloodEnvelope>(url, ctx, 'flood');
   }
 
   /**
@@ -390,20 +440,18 @@ export class OpenMeteoService {
     ctx: Context,
   ): Promise<WeatherEnvelope> {
     const { climateBaseUrl } = getServerConfig();
-    const url = new URL(`${climateBaseUrl}/v1/climate`);
-    url.searchParams.set('latitude', String(lat));
-    url.searchParams.set('longitude', String(lon));
-    url.searchParams.set('start_date', params.start_date);
-    url.searchParams.set('end_date', params.end_date);
-    url.searchParams.set('daily', params.daily.join(','));
-    if (params.models && params.models.length > 0) {
-      url.searchParams.set('models', params.models.join(','));
-    }
-    if (params.temperature_unit) url.searchParams.set('temperature_unit', params.temperature_unit);
-    if (params.wind_speed_unit) url.searchParams.set('wind_speed_unit', params.wind_speed_unit);
-    if (params.precipitation_unit)
-      url.searchParams.set('precipitation_unit', params.precipitation_unit);
-    url.searchParams.set('timezone', params.timezone ?? 'auto');
+    const url = openMeteoUrl(`${climateBaseUrl}/v1/climate`, {
+      latitude: lat,
+      longitude: lon,
+      start_date: params.start_date,
+      end_date: params.end_date,
+      daily: params.daily,
+      models: params.models,
+      temperature_unit: params.temperature_unit,
+      wind_speed_unit: params.wind_speed_unit,
+      precipitation_unit: params.precipitation_unit,
+      timezone: params.timezone ?? 'auto',
+    });
 
     ctx.log.info('Fetching climate projections', {
       lat,
@@ -412,7 +460,7 @@ export class OpenMeteoService {
       end: params.end_date,
       models: params.models,
     });
-    return withOpenMeteoRetry<WeatherEnvelope>(url.toString(), ctx, 'climate');
+    return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, 'climate');
   }
 
   /** Elevation endpoint — up to 100 coordinate pairs. */
@@ -422,49 +470,112 @@ export class OpenMeteoService {
     ctx: Context,
   ): Promise<ElevationResponse> {
     const { apiBaseUrl } = getServerConfig();
-    const url = new URL(`${apiBaseUrl}/v1/elevation`);
-    url.searchParams.set('latitude', latitudes.join(','));
-    url.searchParams.set('longitude', longitudes.join(','));
+    const url = openMeteoUrl(`${apiBaseUrl}/v1/elevation`, {
+      latitude: latitudes.map(String),
+      longitude: longitudes.map(String),
+    });
     ctx.log.info('Fetching elevation', { count: latitudes.length });
-    return withOpenMeteoRetry<ElevationResponse>(url.toString(), ctx, 'elevation');
+    return withOpenMeteoRetry<ElevationResponse>(url, ctx, 'elevation');
   }
 }
 
 // ---------------------------------------------------------------------------
-// URL builder helper
+// URL builder helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * One query parameter: a scalar, or a list that goes on the wire as a single
+ * comma-joined value. `undefined`, an empty string, and an empty list are omitted
+ * from the query.
+ */
+type QueryValue = string | number | string[] | undefined;
+
+/**
+ * Build a request URL, joining a list parameter with a LITERAL comma.
+ *
+ * `URLSearchParams` percent-encodes the comma, and Open-Meteo then reads the whole
+ * list as one opaque value: it rejects `MRI_AGCM3_2_S%2CBOGUS_MODEL` as
+ * `invalid String value MRI_AGCM3_2_S,BOGUS_MODEL`, naming a valid model alongside
+ * the bad one and leaving the caller nothing to converge on. The same request with a
+ * literal comma is rejected as `invalid String value BOGUS_MODEL` — upstream, the
+ * authority on which names exist, isolates the offender itself, so no local catalog
+ * has to re-derive it. This holds for every comma-joined parameter the service sends:
+ * `models`, `hourly`, `daily`, and the coordinate lists on the elevation endpoint.
+ *
+ * A valid list still fans out identically — verified per endpoint against the keyless
+ * API: per-model suffixed climate columns, per-variable blocks everywhere else,
+ * elevations in input order. RFC 3986 lists the comma as a sub-delimiter permitted
+ * unencoded in a query value, so this is a legal request rather than a trick.
+ *
+ * Every character that could alter the query's structure is escaped: `encodeURIComponent`
+ * runs per list element and per scalar, so `&`, `=`, `#`, `?`, `%`, whitespace, and any
+ * non-ASCII byte are percent-encoded, and a comma inside an element encodes to `%2C` and
+ * cannot forge a separator. What it leaves literal beyond the separator — `!`, `'`, `(`,
+ * `)`, `~`, `*`, and a space as `%20` rather than `+` — are all characters RFC 3986
+ * permits unencoded in a query value; none is a delimiter, so none can split a parameter.
+ * Keys are literals in this module and need no escaping.
+ *
+ * An empty value is omitted rather than sent as a bare `key=`. No Open-Meteo parameter
+ * reads an empty value as a default: `models=` on the ensemble endpoint is rejected with
+ * `No data is available for this location`, pointing the caller at the coordinate for
+ * what is an empty field, where omitting `models` selects the default blend. A schema
+ * that admits an empty string (a form-based client sending a blank field) therefore has
+ * to reach the wire as an absent parameter, not an empty one.
+ */
+function openMeteoUrl(base: string, params: Record<string, QueryValue>): string {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === '') continue;
+    if (Array.isArray(value)) {
+      if (value.length === 0) continue;
+      parts.push(`${key}=${value.map(encodeURIComponent).join(',')}`);
+    } else {
+      parts.push(`${key}=${encodeURIComponent(value)}`);
+    }
+  }
+  return `${base}?${parts.join('&')}`;
+}
+
+/**
+ * The union of query fields the four columnar weather endpoints accept. Each of
+ * {@link ForecastParams}, {@link HistoricalParams}, {@link MarineParams}, and
+ * {@link AirQualityParams} is assignable to it, so {@link buildWeatherUrl} reads them
+ * without casting through `Record<string, unknown>`; a field an endpoint does not
+ * declare is simply never present, and an absent field is omitted from the query.
+ */
+interface WeatherQueryParams {
+  daily?: string[] | undefined;
+  end_date?: string | undefined;
+  forecast_days?: number | undefined;
+  hourly?: string[] | undefined;
+  past_days?: number | undefined;
+  precipitation_unit?: string | undefined;
+  start_date?: string | undefined;
+  temperature_unit?: string | undefined;
+  timezone?: string | undefined;
+  wind_speed_unit?: string | undefined;
+}
 
 function buildWeatherUrl(
   base: string,
   lat: number,
   lon: number,
-  params: ForecastParams | HistoricalParams | MarineParams | AirQualityParams,
+  params: WeatherQueryParams,
 ): string {
-  const url = new URL(base);
-  url.searchParams.set('latitude', String(lat));
-  url.searchParams.set('longitude', String(lon));
-
-  const p = params as Record<string, unknown>;
-
-  if (Array.isArray(p.hourly) && (p.hourly as string[]).length > 0) {
-    url.searchParams.set('hourly', (p.hourly as string[]).join(','));
-  }
-  if (Array.isArray(p.daily) && (p.daily as string[]).length > 0) {
-    url.searchParams.set('daily', (p.daily as string[]).join(','));
-  }
-  if (p.start_date) url.searchParams.set('start_date', String(p.start_date));
-  if (p.end_date) url.searchParams.set('end_date', String(p.end_date));
-  if (p.forecast_days != null) url.searchParams.set('forecast_days', String(p.forecast_days));
-  if (p.past_days != null) url.searchParams.set('past_days', String(p.past_days));
-  if (p.temperature_unit) url.searchParams.set('temperature_unit', String(p.temperature_unit));
-  if (p.wind_speed_unit) url.searchParams.set('wind_speed_unit', String(p.wind_speed_unit));
-  if (p.precipitation_unit)
-    url.searchParams.set('precipitation_unit', String(p.precipitation_unit));
-
-  const tz = (p.timezone as string | undefined) ?? 'auto';
-  url.searchParams.set('timezone', tz);
-
-  return url.toString();
+  return openMeteoUrl(base, {
+    latitude: lat,
+    longitude: lon,
+    hourly: params.hourly,
+    daily: params.daily,
+    start_date: params.start_date,
+    end_date: params.end_date,
+    forecast_days: params.forecast_days,
+    past_days: params.past_days,
+    temperature_unit: params.temperature_unit,
+    wind_speed_unit: params.wind_speed_unit,
+    precipitation_unit: params.precipitation_unit,
+    timezone: params.timezone ?? 'auto',
+  });
 }
 
 // ---------------------------------------------------------------------------

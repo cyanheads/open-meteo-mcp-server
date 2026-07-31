@@ -14,13 +14,17 @@
 const INVALID_VALUE_PATTERN = /from invalid String value (.+?)\.?$/;
 
 /**
- * The value(s) an upstream type-init rejection named — one name, or the whole
- * comma-joined list the request sent when `URLSearchParams` percent-encoded its commas
- * and upstream read the list as a single value. Empty when the message is some other
- * shape. `model-catalog.ts` reads the same values to tell a models rejection from a
- * variable one.
+ * The value(s) an upstream type-init rejection named. Normally one: the service sends
+ * every comma-joined list with a literal comma, so upstream parses it as a list and
+ * names the single offending entry rather than echoing the whole request. The split
+ * stays because the message is upstream's to shape — a parameter it does read as one
+ * opaque value would come back as a list, and naming all of it beats naming none of it.
+ * Empty when the message is some other shape.
+ *
+ * Module-private: {@link frameInvalidVariableMessage} is the only reader, and the only
+ * surface a caller needs.
  */
-export function extractInvalidValues(upstreamReason: string | undefined): string[] {
+function extractInvalidValues(upstreamReason: string | undefined): string[] {
   return (
     INVALID_VALUE_PATTERN.exec((upstreamReason ?? '').trim())?.[1]
       ?.split(',')
@@ -52,8 +56,8 @@ export function frameInvalidVariableMessage(
   }
 
   if (offenders.length > 1) {
-    // Upstream echoes the whole requested list here, valid names included —
-    // without an allowlist we can only say at least one of them is invalid.
+    // Upstream named several values in one message — without an allowlist we can only
+    // say at least one of them is invalid.
     return (
       `At least one of the requested ${label} names is not a valid Open-Meteo API name: ` +
       `${offenders.join(', ')}. Correct or remove the invalid name(s) and retry. (Upstream: ${raw})`

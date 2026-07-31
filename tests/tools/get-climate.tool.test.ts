@@ -306,7 +306,7 @@ describe('openmeteoGetClimateTool', () => {
     });
     await expect(openmeteoGetClimateTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      message: expect.stringMatching(/^Unknown climate model name: BOGUS_MODEL\./),
+      message: expect.stringMatching(/^Unknown variable or model name: BOGUS_MODEL\./),
       data: {
         reason: 'invalid_variable',
         recovery: { hint: expect.stringContaining('CMCC_CM2_VHR4') },
@@ -314,17 +314,18 @@ describe('openmeteoGetClimateTool', () => {
     });
   });
 
-  it('isolates the one bad model out of a rejected multi-model request (#31)', async () => {
+  it('names only the offending model out of a rejected multi-model request (#34)', async () => {
     /*
-     * Live shape: the models array goes out as one percent-encoded comma list, so
-     * upstream reads it as a single value and echoes the whole thing — naming
-     * MRI_AGCM3_2_S and EC_Earth3P_HR, both valid, as suspects.
+     * Live shape once the models list goes out with a literal comma: upstream parses
+     * it as a list and its rejection names the one bad entry. Verified against the
+     * keyless endpoint — the percent-encoded form of the same request comes back as
+     * `invalid String value MRI_AGCM3_2_S,BOGUS_MODEL`, naming a valid model too.
      */
     mockGetClimate.mockResolvedValue({
       ...MOCK_MULTI_MODEL_RESPONSE,
       error: true,
       reason:
-        "Data corrupted at path ''. Cannot initialize MultiDomains from invalid String value MRI_AGCM3_2_S,BOGUS_MODEL,EC_Earth3P_HR.",
+        "Data corrupted at path ''. Cannot initialize MultiDomains from invalid String value BOGUS_MODEL.",
     });
     const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
@@ -338,15 +339,16 @@ describe('openmeteoGetClimateTool', () => {
 
     const error = await openmeteoGetClimateTool.handler(input, ctx).catch((e: Error) => e);
 
-    expect(error.message).toMatch(/^Unknown climate model name: BOGUS_MODEL\./);
-    // The valid siblings are named only inside the quoted upstream text, never as suspects.
-    expect(error.message.split('(Upstream:')[0]).not.toContain('MRI_AGCM3_2_S,BOGUS_MODEL');
+    expect(error.message).toMatch(/^Unknown variable or model name: BOGUS_MODEL\./);
+    // Neither valid sibling is named anywhere — not as a suspect, not in the raw text.
+    expect(error.message).not.toContain('MRI_AGCM3_2_S');
+    expect(error.message).not.toContain('EC_Earth3P_HR');
     expect(error.message).toContain('(Upstream:');
   });
 
-  it('does not blame a model when the rejected name is a variable (#31)', async () => {
-    // Same request shape, but upstream names the variable list — the models echo
-    // guard must not fire and hand back a model as the suspect.
+  it('does not blame a model when the rejected name is a variable', async () => {
+    // Same request shape, but upstream names the variable — a model must never be
+    // handed back as the suspect for it.
     mockGetClimate.mockResolvedValue({
       ...MOCK_MULTI_MODEL_RESPONSE,
       error: true,
