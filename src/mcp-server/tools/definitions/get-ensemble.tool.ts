@@ -1,6 +1,6 @@
 /**
  * @fileoverview Tool: openmeteo_get_ensemble — probabilistic ensemble weather forecast.
- * Returns per-member hourly/daily time series from NWP ensemble models (up to 51 members,
+ * Returns per-member hourly/daily time series from NWP ensemble models (up to 64 members,
  * 16 days ahead). Large multi-member pulls spill to DataCanvas when canvas is enabled,
  * and return a bounded preview with truncated: true when it is not.
  * @module mcp-server/tools/definitions/get-ensemble
@@ -12,6 +12,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { type ColumnarBlock, toUnitsMap } from '@/services/open-meteo/types.js';
+import { ENSEMBLE_MODEL_LIST, ENSEMBLE_MODEL_NAMES } from '../model-catalog.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
   boundedPreview,
@@ -60,13 +61,16 @@ function countMembers(...blocks: (ColumnarBlock | undefined)[]): number | undefi
 
 export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
   description:
-    'Probabilistic ensemble weather forecast — up to 51 ensemble members, up to 16 days ahead ' +
+    'Probabilistic ensemble weather forecast — up to 64 ensemble members, up to 16 days ahead ' +
     "with optional past_days (0–92). Each member's values appear as separate columns named " +
     'with a member suffix (e.g. temperature_2m_member01, temperature_2m_member02). Use the spread ' +
     'across members to compute exceedance probabilities, quantify forecast uncertainty, and build ' +
-    'decision thresholds. Available models: "ecmwf_ifs025" (51 members, global, 0.25°), ' +
-    '"gfs025" (31 members, global, 0.25°), "icon_seamless" (40 members, global/Europe blend), ' +
-    '"gem_global" (21 members, global, 0.25°). Omit models to use the API default blend. ' +
+    `decision thresholds. Available models: ${ENSEMBLE_MODEL_LIST}. Omit models to use the API ` +
+    'default blend. A regional model returns no data outside the area it covers, and how it fails ' +
+    'varies by model: some report "No data is available for this location", others surface a ' +
+    'transient-looking upstream failure. Read either against the coordinate before retrying, and ' +
+    'pick a global model outside the region. A model name this list does not carry is still sent ' +
+    'upstream, so a newly added one keeps working. ' +
     'Large multi-member, multi-day pulls produce thousands of records and spill to DataCanvas ' +
     'when canvas is enabled, returning a bounded preview with truncated: true when it is not. ' +
     'At least one of hourly_variables or daily_variables is required.',
@@ -84,8 +88,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
       when: 'An unknown variable name or unsupported model was requested',
-      recovery:
-        'Check the variable name against Open-Meteo ensemble docs. Common hourly: temperature_2m, precipitation, wind_speed_10m. Common daily: temperature_2m_max, temperature_2m_min, precipitation_sum. Valid models: ecmwf_ifs025, gfs025, icon_seamless, gem_global.',
+      recovery: `Check the variable name against Open-Meteo ensemble docs. Common hourly: temperature_2m, precipitation, wind_speed_10m. Common daily: temperature_2m_max, temperature_2m_min, precipitation_sum. Documented models: ${ENSEMBLE_MODEL_NAMES}.`,
       retryable: false,
     },
     {
@@ -125,7 +128,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       .string()
       .optional()
       .describe(
-        'Ensemble model to use: "ecmwf_ifs025" (51 members, global 0.25°), "gfs025" (31 members), "icon_seamless" (40 members), "gem_global" (21 members). Omit to use the API default blend.',
+        `Ensemble model to use, one name: ${ENSEMBLE_MODEL_LIST}. Member counts include the control run. Omit to use the API default blend. A name outside this list is sent upstream rather than rejected here, so a model Open-Meteo adds later still works.`,
       ),
     forecast_days: z
       .number()
@@ -176,7 +179,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       .string()
       .optional()
       .describe(
-        'Ensemble model used (e.g. "ecmwf_ifs025") — echoes the requested models parameter. Absent when models was omitted (API default blend; the API reports no provenance).',
+        'Ensemble model used (e.g. "ecmwf_ifs025_ensemble") — echoes the requested models parameter. Absent when models was omitted (API default blend; the API reports no provenance).',
       ),
     member_count: z
       .number()
@@ -439,7 +442,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       );
     } else if (result.truncated) {
       lines.push(
-        `\n${noCanvasNotice('fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or a models value with fewer members (gem_global has 21, ecmwf_ifs025 51)')}`,
+        `\n${noCanvasNotice('fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or a models value with fewer members (gem_global_ensemble has 21, ecmwf_ifs025_ensemble 51)')}`,
       );
     }
 

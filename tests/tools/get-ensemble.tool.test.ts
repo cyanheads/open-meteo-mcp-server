@@ -210,6 +210,41 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(result.member_count).toBeUndefined();
   });
 
+  it('sends an undocumented model name upstream unrejected (#31)', async () => {
+    // The advertised list is not an allowlist: a model Open-Meteo adds after this
+    // release must reach the API rather than die on a local check.
+    mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'a_model_open_meteo_added_later',
+    });
+
+    const result = await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    const params = mockGetEnsemble.mock.calls[0]?.[2] as { models?: string };
+    expect(params?.models).toBe('a_model_open_meteo_added_later');
+    expect(result.model).toBe('a_model_open_meteo_added_later');
+  });
+
+  it('advertises the documented ensemble models in the description and recovery hint (#31)', () => {
+    const invalidVariable = openmeteoGetEnsembleTool.errors?.find(
+      (entry) => entry.reason === 'invalid_variable',
+    );
+
+    for (const model of [
+      'ecmwf_ifs025_ensemble',
+      'ecmwf_aifs025_ensemble',
+      'ukmo_global_ensemble_20km',
+      'google_weathernext2_ensemble',
+    ]) {
+      expect(openmeteoGetEnsembleTool.description).toContain(model);
+      expect(invalidVariable?.recovery).toContain(model);
+    }
+  });
+
   it('throws no_variables_requested when neither hourly nor daily provided', async () => {
     const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({ latitude: 47.6, longitude: -122.3 });

@@ -10,13 +10,24 @@
  * @module mcp-server/tools/upstream-error
  */
 
-/**
- * Extracts the offending value(s) from the upstream type-init message shape
- * `… from invalid String value <value>.` — a single name, or (when the request
- * sent a percent-encoded comma list, as URLSearchParams does) the full
- * comma-joined list of requested variables, valid names included.
- */
+/** The upstream type-init message shape: `… from invalid String value <value>.` */
 const INVALID_VALUE_PATTERN = /from invalid String value (.+?)\.?$/;
+
+/**
+ * The value(s) an upstream type-init rejection named — one name, or the whole
+ * comma-joined list the request sent when `URLSearchParams` percent-encoded its commas
+ * and upstream read the list as a single value. Empty when the message is some other
+ * shape. `model-catalog.ts` reads the same values to tell a models rejection from a
+ * variable one.
+ */
+export function extractInvalidValues(upstreamReason: string | undefined): string[] {
+  return (
+    INVALID_VALUE_PATTERN.exec((upstreamReason ?? '').trim())?.[1]
+      ?.split(',')
+      .map((s) => s.trim())
+      .filter(Boolean) ?? []
+  );
+}
 
 /**
  * Builds the surfaced error message for an upstream unknown-variable rejection.
@@ -31,11 +42,7 @@ export function frameInvalidVariableMessage(
   label = 'variable',
 ): string {
   const raw = (upstreamReason ?? '').trim();
-  const offenders =
-    INVALID_VALUE_PATTERN.exec(raw)?.[1]
-      ?.split(',')
-      .map((s) => s.trim())
-      .filter(Boolean) ?? [];
+  const offenders = extractInvalidValues(raw);
 
   if (offenders.length === 1) {
     return (

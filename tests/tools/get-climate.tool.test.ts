@@ -287,7 +287,7 @@ describe('openmeteoGetClimateTool', () => {
     });
   });
 
-  it('throws invalid_variable with framed message when API rejects an unknown model', async () => {
+  it('throws invalid_variable naming the model when API rejects a lone unknown model', async () => {
     // Real upstream reason shape from the live climate endpoint for models=BOGUS_MODEL.
     mockGetClimate.mockResolvedValue({
       ...MOCK_MULTI_MODEL_RESPONSE,
@@ -306,12 +306,109 @@ describe('openmeteoGetClimateTool', () => {
     });
     await expect(openmeteoGetClimateTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      message: expect.stringMatching(/^Unknown variable or model name: BOGUS_MODEL\./),
+      message: expect.stringMatching(/^Unknown climate model name: BOGUS_MODEL\./),
       data: {
         reason: 'invalid_variable',
         recovery: { hint: expect.stringContaining('CMCC_CM2_VHR4') },
       },
     });
+  });
+
+  it('isolates the one bad model out of a rejected multi-model request (#31)', async () => {
+    /*
+     * Live shape: the models array goes out as one percent-encoded comma list, so
+     * upstream reads it as a single value and echoes the whole thing — naming
+     * MRI_AGCM3_2_S and EC_Earth3P_HR, both valid, as suspects.
+     */
+    mockGetClimate.mockResolvedValue({
+      ...MOCK_MULTI_MODEL_RESPONSE,
+      error: true,
+      reason:
+        "Data corrupted at path ''. Cannot initialize MultiDomains from invalid String value MRI_AGCM3_2_S,BOGUS_MODEL,EC_Earth3P_HR.",
+    });
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.33,
+      start_date: '2049-01-01',
+      end_date: '2049-01-02',
+      daily_variables: ['temperature_2m_max'],
+      models: ['MRI_AGCM3_2_S', 'BOGUS_MODEL', 'EC_Earth3P_HR'],
+    });
+
+    const error = await openmeteoGetClimateTool.handler(input, ctx).catch((e: Error) => e);
+
+    expect(error.message).toMatch(/^Unknown climate model name: BOGUS_MODEL\./);
+    // The valid siblings are named only inside the quoted upstream text, never as suspects.
+    expect(error.message.split('(Upstream:')[0]).not.toContain('MRI_AGCM3_2_S,BOGUS_MODEL');
+    expect(error.message).toContain('(Upstream:');
+  });
+
+  it('does not blame a model when the rejected name is a variable (#31)', async () => {
+    // Same request shape, but upstream names the variable list — the models echo
+    // guard must not fire and hand back a model as the suspect.
+    mockGetClimate.mockResolvedValue({
+      ...MOCK_MULTI_MODEL_RESPONSE,
+      error: true,
+      reason:
+        "Data corrupted at path ''. Cannot initialize ForecastVariableDaily from invalid String value bogus_var.",
+    });
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.33,
+      start_date: '2049-01-01',
+      end_date: '2049-01-02',
+      daily_variables: ['bogus_var'],
+      models: ['MRI_AGCM3_2_S', 'AN_UNDOCUMENTED_MODEL'],
+    });
+
+    await expect(openmeteoGetClimateTool.handler(input, ctx)).rejects.toMatchObject({
+      message: expect.stringMatching(/^Unknown variable or model name: bogus_var\./),
+      data: { reason: 'invalid_variable' },
+    });
+  });
+
+  it('sends an undocumented model name upstream unrejected (#31)', async () => {
+    // The catalog is not an allowlist: a model Open-Meteo adds after this release
+    // must reach the API, not die on a local check.
+    mockGetClimate.mockResolvedValue(MOCK_SINGLE_MODEL_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.33,
+      start_date: '2049-01-01',
+      end_date: '2049-01-02',
+      daily_variables: ['temperature_2m_max'],
+      models: ['A_MODEL_OPEN_METEO_ADDED_LATER'],
+    });
+
+    const result = await openmeteoGetClimateTool.handler(input, ctx);
+
+    const params = mockGetClimate.mock.calls[0]?.[2] as { models?: string[] };
+    expect(params?.models).toEqual(['A_MODEL_OPEN_METEO_ADDED_LATER']);
+    expect(result.models).toEqual(['A_MODEL_OPEN_METEO_ADDED_LATER']);
+  });
+
+  it('forwards every documented model on a valid multi-model request', async () => {
+    mockGetClimate.mockResolvedValue(MOCK_MULTI_MODEL_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.33,
+      start_date: '2049-01-01',
+      end_date: '2049-01-05',
+      daily_variables: ['temperature_2m_max'],
+      models: ALL_MODELS,
+    });
+
+    const result = await openmeteoGetClimateTool.handler(input, ctx);
+
+    const params = mockGetClimate.mock.calls[0]?.[2] as { models?: string[] };
+    expect(params?.models).toEqual(ALL_MODELS);
+    expect(result.models).toEqual(ALL_MODELS);
+    expect(result.record_count).toBe(5);
+    expect(result.truncated).toBe(false);
   });
 
   it('throws invalid_variable with framed message when API rejects an unknown variable', async () => {

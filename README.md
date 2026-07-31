@@ -133,8 +133,11 @@ Probabilistic ensemble weather forecast exposing all individual model member tra
 
 - Up to 16 forecast days (`forecast_days 1–16`, default 7) with optional `past_days` (0–92)
 - Each requested variable is returned as per-member columns: `temperature_2m_member01`, `temperature_2m_member02`, … Use the spread across members to compute exceedance probabilities, interquantile ranges, and decision thresholds
-- Available ensemble models: `ecmwf_ifs025` (51 members, global 0.25°), `gfs025` (31 members), `icon_seamless` (40 members, global/Europe blend), `gem_global` (21 members). Omit `models` to use the API default
-- Response includes `model` (system used) and `member_count` (number of members)
+- Available ensemble models (member counts include the control run):
+  - Global — `ecmwf_ifs025_ensemble` (51), `ecmwf_aifs025_ensemble` (51), `google_weathernext2_ensemble` (64), `ncep_gefs_seamless` (31), `ncep_gefs025` (31), `ncep_gefs05` (31, 35-day horizon), `ncep_aigefs025` (31), `icon_seamless_eps` (20–40, global/Europe blend), `icon_global_eps` (40), `gem_global_ensemble` (21), `bom_access_global_ensemble` (18), `ukmo_global_ensemble_20km` (18)
+  - Regional — `ecmwf_ifs_europe_ensemble` (51), `ecmwf_aifs_europe_ensemble` (51), `icon_eu_eps` (40), `icon_d2_eps` (20), `meteoswiss_icon_ch2_ensemble` (21), `meteoswiss_icon_ch1_ensemble` (11), `ukmo_uk_ensemble_2km` (3). A regional model returns no data outside the area it covers, and how it fails varies by model — some report `No data is available for this location`, others surface a transient-looking upstream failure. Read either against the coordinate before retrying
+- Omit `models` to use the API default blend. The list is not an allowlist — a model name it does not carry is still sent upstream, so a model Open-Meteo adds later keeps working
+- Response includes `model` (system used) and `member_count` (perturbed members, excluding the control run)
 - At least one of `hourly_variables` or `daily_variables` is required
 - Hourly and daily are separate variable sets; a variable documented under the other cadence is rejected before the request, by name, with the field it belongs in. The ensemble API's own catalog applies — it publishes `temperature_2m_max` and `temperature_2m_min` as 3-hourly aggregations as well as daily, so those are accepted in either field
 - Large multi-member, multi-day pulls spill to DataCanvas when `CANVAS_PROVIDER_TYPE=duckdb` — output includes `canvas_id` and `truncated: true`; query with `openmeteo_dataframe_query`
@@ -161,7 +164,7 @@ GloFAS (Global Flood Awareness System) river discharge forecast and reanalysis v
 Long-range climate projections from bias-corrected daily CMIP6 models — the future-projection counterpart to `openmeteo_get_historical`.
 
 - Coverage: 1950-01-01 to 2050-12-31, daily resolution only
-- Available models: `CMCC_CM2_VHR4`, `FGOALS_f3_H`, `HiRAM_SIT_HR`, `MRI_AGCM3_2_S`, `EC_Earth3P_HR`, `MPI_ESM1_2_XR`, `NICAM16_8S`
+- Available models: `CMCC_CM2_VHR4`, `FGOALS_f3_H`, `HiRAM_SIT_HR`, `MRI_AGCM3_2_S`, `EC_Earth3P_HR`, `MPI_ESM1_2_XR`, `NICAM16_8S`. Not an allowlist — an unlisted name is still sent upstream; when upstream rejects a multi-model request, the error names only the model outside the documented set, not the whole list
 - With 2+ models, each variable appears once per model with the model name as column suffix (e.g. `temperature_2m_max_CMCC_CM2_VHR4`); a single or omitted model returns plain variable names
 - Common daily variables: `temperature_2m_max`, `temperature_2m_min`, `temperature_2m_mean`, `precipitation_sum`, `rain_sum`, `snowfall_sum`, `wind_speed_10m_mean`, `wind_speed_10m_max`, `shortwave_radiation_sum`, `cloud_cover_mean`, `relative_humidity_2m_mean`, `pressure_msl_mean`
 - Not all models carry all variables — missing combinations return null (e.g. `CMCC_CM2_VHR4` has no `shortwave_radiation_sum`)

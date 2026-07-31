@@ -13,6 +13,11 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
+import {
+  CLIMATE_MODEL_LIST,
+  describeUnknownClimateModels,
+  isolateUnknownClimateModels,
+} from '../model-catalog.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
   boundedPreview,
@@ -29,8 +34,10 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     'Long-range climate projections from bias-corrected daily CMIP6 models, covering ' +
     '1950-01-01 to 2050-12-31 at any coordinate. Answers "what will conditions look like ' +
     'through 2050?" — the future-projection counterpart to openmeteo_get_historical (ERA5, ' +
-    'what happened). Daily resolution only. Available models: "CMCC_CM2_VHR4", "FGOALS_f3_H", ' +
-    '"HiRAM_SIT_HR", "MRI_AGCM3_2_S", "EC_Earth3P_HR", "MPI_ESM1_2_XR", "NICAM16_8S". ' +
+    `what happened). Daily resolution only. Available models: ${CLIMATE_MODEL_LIST}. ` +
+    'A model name outside that list is sent upstream rather than rejected here, so a model ' +
+    'Open-Meteo adds later still works; if upstream rejects the request, the error names the ' +
+    'offending model on its own rather than the whole requested list. ' +
     'With 2+ models each variable appears once per model with the model name as suffix ' +
     '(e.g. temperature_2m_max_CMCC_CM2_VHR4); a single or omitted model returns plain ' +
     'variable names. Not all models carry all variables — missing combinations return null. ' +
@@ -67,8 +74,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
       when: 'An unknown variable name or unsupported climate model was requested',
-      recovery:
-        'Check names against Open-Meteo Climate API docs. Common daily variables: temperature_2m_max, temperature_2m_min, temperature_2m_mean, precipitation_sum, rain_sum, snowfall_sum, wind_speed_10m_mean, wind_speed_10m_max, shortwave_radiation_sum, cloud_cover_mean. Valid models: CMCC_CM2_VHR4, FGOALS_f3_H, HiRAM_SIT_HR, MRI_AGCM3_2_S, EC_Earth3P_HR, MPI_ESM1_2_XR, NICAM16_8S.',
+      recovery: `Check names against Open-Meteo Climate API docs. Common daily variables: temperature_2m_max, temperature_2m_min, temperature_2m_mean, precipitation_sum, rain_sum, snowfall_sum, wind_speed_10m_mean, wind_speed_10m_max, shortwave_radiation_sum, cloud_cover_mean. Documented models: ${CLIMATE_MODEL_LIST}. When the message names one model, correct only that one — the rest of the models list is valid.`,
       retryable: false,
     },
   ],
@@ -106,7 +112,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       .max(7)
       .optional()
       .describe(
-        'CMIP6 models to include: "CMCC_CM2_VHR4", "FGOALS_f3_H", "HiRAM_SIT_HR", "MRI_AGCM3_2_S", "EC_Earth3P_HR", "MPI_ESM1_2_XR", "NICAM16_8S". With 2+ models each variable column is suffixed with the model name (e.g. temperature_2m_max_MRI_AGCM3_2_S). Omit to use the API default (a single model, unsuffixed columns).',
+        `CMIP6 models to include: ${CLIMATE_MODEL_LIST}. With 2+ models each variable column is suffixed with the model name (e.g. temperature_2m_max_MRI_AGCM3_2_S). Omit to use the API default (a single model, unsuffixed columns). A name outside this list is sent upstream rather than rejected here.`,
       ),
     temperature_unit: z
       .enum(['celsius', 'fahrenheit'])
@@ -250,9 +256,20 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
           ctx.recoveryFor('date_out_of_range'),
         );
       }
+      /*
+       * The models array goes out as one percent-encoded comma list, so a rejection
+       * echoes every requested model — a valid MRI_AGCM3_2_S named alongside the one
+       * bad name, which leaves the caller nothing to converge on. Narrow the echo to
+       * the requested models the documentation does not publish; when that identifies
+       * nothing (an unknown variable, or a models rejection where every name is
+       * documented), fall through to the generic framing.
+       */
+      const unknownModels = isolateUnknownClimateModels(input.models, data.reason);
       throw ctx.fail(
         'invalid_variable',
-        frameInvalidVariableMessage(data.reason, 'variable or model'),
+        unknownModels.length > 0
+          ? describeUnknownClimateModels(unknownModels, data.reason)
+          : frameInvalidVariableMessage(data.reason, 'variable or model'),
         ctx.recoveryFor('invalid_variable'),
       );
     }
