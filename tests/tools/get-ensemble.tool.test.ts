@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetEnsembleTool } from '@/mcp-server/tools/definitions/get-ensemble.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { firstText } from '../helpers/content.js';
 
 const mockGetEnsemble = vi.fn();
 const mockSpillover = vi.fn();
@@ -100,7 +101,7 @@ describe('openmeteoGetEnsembleTool', () => {
 
   it('reshapes per-member columnar response into per-timestamp records', async () => {
     mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -140,7 +141,7 @@ describe('openmeteoGetEnsembleTool', () => {
         temperature_2m_max_member01: [18.5, 20.1],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -174,7 +175,7 @@ describe('openmeteoGetEnsembleTool', () => {
         temperature_2m_max_member03: [17.8],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -197,7 +198,7 @@ describe('openmeteoGetEnsembleTool', () => {
         temperature_2m: [14.0],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -322,7 +323,7 @@ describe('openmeteoGetEnsembleTool', () => {
         temperature_2m_max_member02: [null, null],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -340,7 +341,7 @@ describe('openmeteoGetEnsembleTool', () => {
 
   it('stays quiet when every requested column carries a real unit', async () => {
     mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -407,7 +408,7 @@ describe('openmeteoGetEnsembleTool', () => {
         temperature_2m_member02: [14.9],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -440,7 +441,7 @@ describe('openmeteoGetEnsembleTool', () => {
     const mockCanvas = { acquire: vi.fn().mockResolvedValue(mockInstance) };
     mockCanvasInstance = mockCanvas;
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -475,7 +476,7 @@ describe('openmeteoGetEnsembleTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-wide' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -506,7 +507,7 @@ describe('openmeteoGetEnsembleTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-unused-2' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -530,7 +531,7 @@ describe('openmeteoGetEnsembleTool', () => {
     const acquire = vi.fn();
     mockCanvasInstance = { acquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -564,7 +565,7 @@ describe('openmeteoGetEnsembleTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-types' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -604,7 +605,7 @@ describe('openmeteoGetEnsembleTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-union' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -636,10 +637,10 @@ describe('openmeteoGetEnsembleTool', () => {
       hourly: [{ time: '2026-06-03T00:00', temperature_2m_member01: 14.2 }],
       hourly_units: { temperature_2m_member01: '°C' },
     });
-    expect(blocks[0]?.text).toContain('Ensemble');
-    expect(blocks[0]?.text).toContain('ecmwf_ifs025');
-    expect(blocks[0]?.text).toContain('51');
-    expect(blocks[0]?.text).toContain('Open-Meteo.com');
+    expect(firstText(blocks)).toContain('Ensemble');
+    expect(firstText(blocks)).toContain('ecmwf_ifs025');
+    expect(firstText(blocks)).toContain('51');
+    expect(firstText(blocks)).toContain('Open-Meteo.com');
   });
 
   it('surfaces non-null rows in the truncated preview when past_days leads with nulls, and reports the staged total in the heading', async () => {
@@ -677,7 +678,7 @@ describe('openmeteoGetEnsembleTool', () => {
     const mockInstance = { canvasId: 'Ij7fx6D3bo' };
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -700,7 +701,7 @@ describe('openmeteoGetEnsembleTool', () => {
     // The staged canvas keeps every row; the preview is a strict subset of them.
     expect(result.hourly!.length).toBeLessThan(total);
 
-    const text = openmeteoGetEnsembleTool.format!(result)[0]?.text ?? '';
+    const text = firstText(openmeteoGetEnsembleTool.format!(result));
     // #13: heading references the staged total (624), not the preview length.
     expect(text).toContain(`of ${total} total`);
     // #14: discloses that omitted preview rows may be null past-day rows.
@@ -750,7 +751,7 @@ describe('openmeteoGetEnsembleTool', () => {
         mockCanvasInstance = undefined;
       }
 
-      const ctx = createMockContext();
+      const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
       const input = openmeteoGetEnsembleTool.input.parse({
         latitude: 47.6,
         longitude: -122.3,
@@ -789,8 +790,8 @@ describe('openmeteoGetEnsembleTool', () => {
       daily: [{ time: '2026-06-03', temperature_2m_max_member01: 18.5 }],
       daily_units: { temperature_2m_max_member01: '°C' },
     });
-    expect(blocks[0]?.text).toContain('default blend');
-    expect(blocks[0]?.text).toContain('**Members:** 30');
+    expect(firstText(blocks)).toContain('default blend');
+    expect(firstText(blocks)).toContain('**Members:** 30');
   });
 
   it('renders every hourly row (non-truncated) with no cap or "…and N more" (format parity)', () => {
@@ -799,7 +800,7 @@ describe('openmeteoGetEnsembleTool', () => {
       time: `2026-06-03T00:00+${i}`,
       temperature_2m_member01: 1000 + i,
     }));
-    const text =
+    const text = firstText(
       openmeteoGetEnsembleTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -811,7 +812,8 @@ describe('openmeteoGetEnsembleTool', () => {
         truncated: false,
         hourly,
         hourly_units: { temperature_2m_member01: '°C' },
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('### Hourly ensemble (30 records)');
     expect(text).toContain('temperature_2m_member01: 1000');
     expect(text).toContain('temperature_2m_member01: 1029'); // last row — not sliced at 24
@@ -829,7 +831,7 @@ describe('openmeteoGetEnsembleTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -863,7 +865,7 @@ describe('openmeteoGetEnsembleTool', () => {
     });
     mockCanvasInstance = undefined;
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -882,7 +884,7 @@ describe('openmeteoGetEnsembleTool', () => {
   });
 
   it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
-    const text =
+    const text = firstText(
       openmeteoGetEnsembleTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -896,7 +898,8 @@ describe('openmeteoGetEnsembleTool', () => {
         table_name: undefined,
         hourly: [{ time: '2026-06-18T00:00', temperature_2m_member01: 12.1 }],
         hourly_units: { temperature_2m_member01: '°C' },
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
     expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
     // models takes one model, so the lever is a lighter model — not a shorter list.

@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetAirQualityTool } from '@/mcp-server/tools/definitions/get-air-quality.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { firstText } from '../helpers/content.js';
 
 const mockGetAirQuality = vi.fn();
 const mockSpillover = vi.fn();
@@ -64,7 +65,7 @@ describe('openmeteoGetAirQualityTool', () => {
 
   it('reshapes columnar air quality response with exact alignment', async () => {
     mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -141,7 +142,7 @@ describe('openmeteoGetAirQualityTool', () => {
         temperature_2m_max: [null, null],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -156,7 +157,7 @@ describe('openmeteoGetAirQualityTool', () => {
 
   it('stays quiet when every requested column carries a real unit', async () => {
     mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -170,7 +171,7 @@ describe('openmeteoGetAirQualityTool', () => {
 
   it('always includes data_source: CAMS in output regardless of variables requested', async () => {
     mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -195,7 +196,7 @@ describe('openmeteoGetAirQualityTool', () => {
 
   it('forwards forecast_days and past_days as the forecast window', async () => {
     mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -217,7 +218,7 @@ describe('openmeteoGetAirQualityTool', () => {
     // past_days: 0 is the schema default, and upstream rejects it alongside a date
     // range as a mutually exclusive parameter — so neither may ride along.
     mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -285,7 +286,7 @@ describe('openmeteoGetAirQualityTool', () => {
 
   it('past_days at its 0 default does not conflict with a date range', async () => {
     mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -303,7 +304,7 @@ describe('openmeteoGetAirQualityTool', () => {
       ...MOCK_RESPONSE,
       hourly: { time: ['2022-08-01T00:00', '2022-08-01T01:00'], pm2_5: [null, null] },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -340,7 +341,7 @@ describe('openmeteoGetAirQualityTool', () => {
     const mockCanvas = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-aq-123' }) };
     mockCanvasInstance = mockCanvas;
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -372,7 +373,7 @@ describe('openmeteoGetAirQualityTool', () => {
     const acquire = vi.fn().mockResolvedValue({ canvasId: 'existingcv1' });
     mockCanvasInstance = { acquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -395,7 +396,7 @@ describe('openmeteoGetAirQualityTool', () => {
     mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-unused' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -415,7 +416,7 @@ describe('openmeteoGetAirQualityTool', () => {
     const acquire = vi.fn();
     mockCanvasInstance = { acquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -444,7 +445,7 @@ describe('openmeteoGetAirQualityTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -478,12 +479,12 @@ describe('openmeteoGetAirQualityTool', () => {
       table_name: undefined,
       truncated: false,
     });
-    expect(blocks[0]?.text).toContain('CAMS');
-    expect(blocks[0]?.text).toContain('Open-Meteo.com');
+    expect(firstText(blocks)).toContain('CAMS');
+    expect(firstText(blocks)).toContain('Open-Meteo.com');
   });
 
   it('formats truncated result with the canvas and table handles', () => {
-    const text =
+    const text = firstText(
       openmeteoGetAirQualityTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -495,14 +496,15 @@ describe('openmeteoGetAirQualityTool', () => {
         canvas_id: 'canvas-aq-123',
         table_name: 'spilled_aq01',
         truncated: true,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('canvas-aq-123');
     expect(text).toContain('spilled_aq01');
     expect(text).toContain('1 shown of 2232 total rows on canvas');
   });
 
   it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
-    const text =
+    const text = firstText(
       openmeteoGetAirQualityTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -514,7 +516,8 @@ describe('openmeteoGetAirQualityTool', () => {
         canvas_id: undefined,
         table_name: undefined,
         truncated: true,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
     expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
     expect(text).toContain('past_days');
@@ -530,7 +533,7 @@ describe('openmeteoGetAirQualityTool', () => {
       time: `2026-05-30T00:00+${i}`,
       pm2_5: 1000 + i,
     }));
-    const text =
+    const text = firstText(
       openmeteoGetAirQualityTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -542,7 +545,8 @@ describe('openmeteoGetAirQualityTool', () => {
         canvas_id: undefined,
         table_name: undefined,
         truncated: false,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('### Hourly air quality (50 records)');
     expect(text).toContain('pm2_5: 1000');
     expect(text).toContain('pm2_5: 1049'); // last row — not sliced at 48

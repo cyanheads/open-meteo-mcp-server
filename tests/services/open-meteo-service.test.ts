@@ -66,6 +66,7 @@ describe('OpenMeteoService upstream classification', () => {
       .catch((e: Error) => e);
 
     expect(error).toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+    if (!(error instanceof Error)) throw new Error('Expected getEnsemble to reject');
     expect(error.message).toContain('no data for this location');
     expect(error.message).toContain('global model');
     expect(error.message).not.toContain('unavailable after');
@@ -84,6 +85,7 @@ describe('OpenMeteoService upstream classification', () => {
       .catch((e: Error) => e);
 
     expect(error).toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+    if (!(error instanceof Error)) throw new Error('Expected getEnsemble to reject');
     expect(error.message).toContain('unavailable after 3 attempts');
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
@@ -134,6 +136,7 @@ describe('OpenMeteoService upstream classification', () => {
       .catch((e: Error) => e);
 
     expect(error).toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+    if (!(error instanceof Error)) throw new Error('Expected getEnsemble to reject');
     expect(error.message).toContain('no data for this location');
     expect(error.message).toContain('global model');
     expect(error.message).not.toContain('variable');

@@ -7,6 +7,7 @@ import { JsonRpcErrorCode, notFound, validationError } from '@cyanheads/mcp-ts-c
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoDataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
+import { firstText } from '../helpers/content.js';
 
 // Canvas mock — returns undefined by default; individual tests override
 let mockCanvasInstance: unknown;
@@ -124,8 +125,8 @@ describe('openmeteoDataframeQueryTool', () => {
       sql: 'SELECT COUNT(*) FROM spillover_0',
     });
 
-    const err = (await openmeteoDataframeQueryTool
-      .handler(input, ctx)
+    const err = (await Promise.resolve()
+      .then(() => openmeteoDataframeQueryTool.handler(input, ctx))
       .catch((e: unknown) => e)) as {
       code: number;
       message: string;
@@ -177,7 +178,7 @@ describe('openmeteoDataframeQueryTool', () => {
     };
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
       canvas_id: 'testcanvas01',
       sql: 'SELECT time, temperature_2m FROM spilled_testcanvas01 LIMIT 2',
@@ -205,7 +206,7 @@ describe('openmeteoDataframeQueryTool', () => {
     };
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
       canvas_id: 'testcanvas01',
       sql: 'SELECT i, v FROM spilled_testcanvas01',
@@ -226,7 +227,7 @@ describe('openmeteoDataframeQueryTool', () => {
     const mockAcquire = vi.fn().mockResolvedValue(mockInstance);
     mockCanvasInstance = { acquire: mockAcquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
       canvas_id: 'mycanvasid1',
       sql: 'SELECT COUNT(*) AS n FROM spilled_mycanvasid1',
@@ -242,8 +243,8 @@ describe('openmeteoDataframeQueryTool', () => {
       rows: [],
       row_count: 0,
     });
-    expect(blocks[0]?.text).toContain('testcanvas01');
-    expect(blocks[0]?.text).toContain('No rows returned');
+    expect(firstText(blocks)).toContain('testcanvas01');
+    expect(firstText(blocks)).toContain('No rows returned');
   });
 
   it('formats result rows as a markdown table', () => {
@@ -255,7 +256,7 @@ describe('openmeteoDataframeQueryTool', () => {
       ],
       row_count: 2,
     });
-    const text = blocks[0]?.text ?? '';
+    const text = firstText(blocks) ?? '';
     expect(text).toContain('testcanvas01');
     expect(text).toContain('time');
     expect(text).toContain('avg_temp');
@@ -268,7 +269,7 @@ describe('openmeteoDataframeQueryTool', () => {
     // [temperature_2m, precipitation] AS values`. String() renders the struct as
     // [object Object] and flattens the list to a bare comma join — content[] must
     // carry the same values structuredContent.rows does.
-    const text =
+    const text = firstText(
       openmeteoDataframeQueryTool.format!({
         canvas_id: 'testcanvas01',
         rows: [
@@ -276,7 +277,8 @@ describe('openmeteoDataframeQueryTool', () => {
           { nested: { temp: 3.2, rain: 0 }, values: [3.2, 0] },
         ],
         row_count: 2,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('| {"temp":3.6,"rain":0} | [3.6,0] |');
     expect(text).toContain('| {"temp":3.2,"rain":0} | [3.2,0] |');
     expect(text).not.toContain('[object Object]');
@@ -286,12 +288,13 @@ describe('openmeteoDataframeQueryTool', () => {
     // A pipe is not JSON-significant, so JSON.stringify passes it through verbatim;
     // unescaped it ends the cell early and misaligns the row's column count. Plain
     // string cells carry the same hazard.
-    const text =
+    const text = firstText(
       openmeteoDataframeQueryTool.format!({
         canvas_id: 'testcanvas01',
         rows: [{ nested: { note: 'pipe|test' }, plain: 'a|b' }],
         row_count: 1,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('| {"note":"pipe\\|test"} | a\\|b |');
     // Header + separator + one data row, each with exactly 2 columns.
     const dataRow = text.split('\n').find((l) => l.includes('pipe'));
@@ -301,7 +304,7 @@ describe('openmeteoDataframeQueryTool', () => {
   it('renders primitive and null cells on the unserialized path', () => {
     // BIGINT/DATE/TIMESTAMP arrive pre-marshaled as strings, so they must render
     // bare — not JSON-quoted — and a null cell stays empty.
-    const text =
+    const text = firstText(
       openmeteoDataframeQueryTool.format!({
         canvas_id: 'testcanvas01',
         rows: [
@@ -315,7 +318,8 @@ describe('openmeteoDataframeQueryTool', () => {
           },
         ],
         row_count: 1,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain(
       '| 123456789012345 | 2020-01-01 | 2020-01-01 00:00:00 | -2.3 | true |  |',
     );
@@ -331,7 +335,7 @@ describe('openmeteoDataframeQueryTool', () => {
       rows,
       row_count: 150,
     });
-    const text = blocks[0]?.text ?? '';
+    const text = firstText(blocks) ?? '';
     expect(text).toContain('Showing first 100 of 150 rows');
     expect(text).toContain('LIMIT / OFFSET');
   });

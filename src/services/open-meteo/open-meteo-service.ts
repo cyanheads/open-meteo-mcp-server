@@ -10,6 +10,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import {
   JsonRpcErrorCode,
   McpError,
+  rateLimited,
   serviceUnavailable,
   timeout,
   validationError,
@@ -146,11 +147,7 @@ async function openMeteoFetch<T>(url: string, ctx: Context): Promise<T> {
 
   if (!response.ok) {
     if (response.status === 429) {
-      throw new McpError(
-        JsonRpcErrorCode.RateLimited,
-        'Open-Meteo rate limit reached. Retry in a minute.',
-        { url },
-      );
+      throw rateLimited('Open-Meteo rate limit reached. Retry in a minute.', { url });
     }
     if (response.status >= 500) {
       throw serviceUnavailable(`Open-Meteo API returned ${response.status}.`, { url });
@@ -179,6 +176,7 @@ function withOpenMeteoRetry<T>(url: string, ctx: Context, operation: string): Pr
       maxDelayMs: RETRY_DELAY_MS * Math.max(MAX_RETRIES, 1),
       jitter: 0,
       operation,
+      context: ctx,
       signal: ctx.signal,
       isTransient: isRetryable,
     },

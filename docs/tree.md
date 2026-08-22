@@ -1,10 +1,9 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-07-31 01:47:25
+Generated on: 2026-08-22 13:54:26
 
 ```text
 open-meteo-mcp-server/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -15,6 +14,8 @@ open-meteo-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
@@ -163,12 +164,20 @@ open-meteo-mcp-server/
 │   │   └── canvas-accessor.ts
 │   └── index.ts
 ├── tests/
+│   ├── fuzz/
+│   │   └── search-locations.tool.fuzz.test.ts
+│   ├── helpers/
+│   │   └── content.ts
+│   ├── integration/
+│   │   └── search-locations-contract.int.test.ts
 │   ├── prompts/
 │   ├── resources/
 │   ├── scripts/
 │   │   └── packaging-entry-regex-sync.test.ts
 │   ├── services/
 │   │   └── open-meteo-service.test.ts
+│   ├── smoke/
+│   │   └── definitions.smoke.test.ts
 │   └── tools/
 │       ├── dataframe-describe.tool.test.ts
 │       ├── dataframe-query.tool.test.ts

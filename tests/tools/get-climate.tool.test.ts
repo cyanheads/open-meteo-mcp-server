@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetClimateTool } from '@/mcp-server/tools/definitions/get-climate.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { firstText } from '../helpers/content.js';
 
 const mockGetClimate = vi.fn();
 const mockSpillover = vi.fn();
@@ -134,7 +135,7 @@ describe('openmeteoGetClimateTool', () => {
 
   it('reshapes multi-model data into per-date records with per-model suffixed columns', async () => {
     mockGetClimate.mockResolvedValue(MOCK_MULTI_MODEL_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -171,7 +172,7 @@ describe('openmeteoGetClimateTool', () => {
 
   it('returns unsuffixed columns and preserves upstream nulls for a single model', async () => {
     mockGetClimate.mockResolvedValue(MOCK_SINGLE_MODEL_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -193,7 +194,7 @@ describe('openmeteoGetClimateTool', () => {
 
   it('omits models from output when models was not requested', async () => {
     mockGetClimate.mockResolvedValue(MOCK_SINGLE_MODEL_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -337,8 +338,11 @@ describe('openmeteoGetClimateTool', () => {
       models: ['MRI_AGCM3_2_S', 'BOGUS_MODEL', 'EC_Earth3P_HR'],
     });
 
-    const error = await openmeteoGetClimateTool.handler(input, ctx).catch((e: Error) => e);
+    const error = await Promise.resolve()
+      .then(() => openmeteoGetClimateTool.handler(input, ctx))
+      .catch((e: Error) => e);
 
+    if (!(error instanceof Error)) throw new Error('Expected climate handler to reject');
     expect(error.message).toMatch(/^Unknown variable or model name: BOGUS_MODEL\./);
     // Neither valid sibling is named anywhere — not as a suspect, not in the raw text.
     expect(error.message).not.toContain('MRI_AGCM3_2_S');
@@ -505,7 +509,7 @@ describe('openmeteoGetClimateTool', () => {
     const mockCanvas = { acquire: vi.fn().mockResolvedValue(mockInstance) };
     mockCanvasInstance = mockCanvas;
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -543,7 +547,7 @@ describe('openmeteoGetClimateTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-wide' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -584,7 +588,7 @@ describe('openmeteoGetClimateTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-sparse' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -626,7 +630,7 @@ describe('openmeteoGetClimateTool', () => {
     const mockInstance = { canvasId: 'canvas-unused-1' };
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -656,7 +660,7 @@ describe('openmeteoGetClimateTool', () => {
     const acquire = vi.fn();
     mockCanvasInstance = { acquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -695,9 +699,9 @@ describe('openmeteoGetClimateTool', () => {
       canvas_id: undefined,
       truncated: false,
     });
-    expect(blocks[0]?.text).toContain('CMIP6');
-    expect(blocks[0]?.text).toContain('CMCC_CM2_VHR4, MRI_AGCM3_2_S');
-    expect(blocks[0]?.text).toContain('Open-Meteo.com');
+    expect(firstText(blocks)).toContain('CMIP6');
+    expect(firstText(blocks)).toContain('CMCC_CM2_VHR4, MRI_AGCM3_2_S');
+    expect(firstText(blocks)).toContain('Open-Meteo.com');
   });
 
   it('formats truncated result with canvas_id notice and default-model label', () => {
@@ -715,16 +719,16 @@ describe('openmeteoGetClimateTool', () => {
       table_name: 'spilled_clim789',
       truncated: true,
     });
-    expect(blocks[0]?.text).toContain('canvas-xyz-789');
-    expect(blocks[0]?.text).toContain('spilled_clim789'); // #18: table name named in the hint
-    expect(blocks[0]?.text).toContain('API default');
+    expect(firstText(blocks)).toContain('canvas-xyz-789');
+    expect(firstText(blocks)).toContain('spilled_clim789'); // #18: table name named in the hint
+    expect(firstText(blocks)).toContain('API default');
     // Format uses bold label: **Truncated:** true
-    expect(blocks[0]?.text).toContain('Truncated:');
-    expect(blocks[0]?.text).toContain('true');
+    expect(firstText(blocks)).toContain('Truncated:');
+    expect(firstText(blocks)).toContain('true');
     // #13: the truncated heading reports record_count (11322), not the 1-row preview
     // length — text-only clients must not read the preview size as the dataset total.
-    expect(blocks[0]?.text).toContain('1 shown of 11322 total');
-    expect(blocks[0]?.text).not.toMatch(/### Daily projections \(first \d+ of 1\)/);
+    expect(firstText(blocks)).toContain('1 shown of 11322 total');
+    expect(firstText(blocks)).not.toMatch(/### Daily projections \(first \d+ of 1\)/);
   });
 
   it('renders every daily row in content[] with no cap or "…and N more" (format parity)', () => {
@@ -733,7 +737,7 @@ describe('openmeteoGetClimateTool', () => {
       time: `2049-01-${String(i + 1).padStart(2, '0')}`,
       temperature_2m_max: 1000 + i,
     }));
-    const text =
+    const text = firstText(
       openmeteoGetClimateTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -747,7 +751,8 @@ describe('openmeteoGetClimateTool', () => {
         canvas_id: undefined,
         table_name: undefined,
         truncated: false,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('### Daily projections (35 records)');
     expect(text).toContain('temperature_2m_max: 1000');
     expect(text).toContain('temperature_2m_max: 1034'); // last row — not sliced at 30
@@ -765,7 +770,7 @@ describe('openmeteoGetClimateTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -788,7 +793,7 @@ describe('openmeteoGetClimateTool', () => {
   });
 
   it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
-    const text =
+    const text = firstText(
       openmeteoGetClimateTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -802,7 +807,8 @@ describe('openmeteoGetClimateTool', () => {
         canvas_id: undefined,
         table_name: undefined,
         truncated: true,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
     expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
     expect(text).toContain('fewer models');
@@ -836,7 +842,7 @@ describe('openmeteoGetClimateTool unserved-variable notice', () => {
         river_discharge_max: [null, null],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -852,7 +858,7 @@ describe('openmeteoGetClimateTool unserved-variable notice', () => {
 
   it('stays quiet when every requested column carries a real unit', async () => {
     mockGetClimate.mockResolvedValue(MOCK_SINGLE_MODEL_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,

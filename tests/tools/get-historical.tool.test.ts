@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetHistoricalTool } from '@/mcp-server/tools/definitions/get-historical.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { firstText } from '../helpers/content.js';
 
 const mockGetHistorical = vi.fn();
 const mockSpillover = vi.fn();
@@ -84,7 +85,7 @@ describe('openmeteoGetHistoricalTool', () => {
 
   it('reshapes daily ERA5 data into per-date records with exact values', async () => {
     mockGetHistorical.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -171,7 +172,7 @@ describe('openmeteoGetHistoricalTool', () => {
       hourly_units: { time: 'iso8601', some_new_daily_name: 'undefined' },
       hourly: { time: ['2024-07-01T00:00'], some_new_daily_name: [null] },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -311,7 +312,7 @@ describe('openmeteoGetHistoricalTool', () => {
     const mockCanvas = { acquire: vi.fn().mockResolvedValue(mockInstance) };
     mockCanvasInstance = mockCanvas;
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -364,7 +365,7 @@ describe('openmeteoGetHistoricalTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-hist-mix' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -410,7 +411,7 @@ describe('openmeteoGetHistoricalTool', () => {
     const mockInstance = { canvasId: 'canvas-unused-1' };
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -441,7 +442,7 @@ describe('openmeteoGetHistoricalTool', () => {
     const acquire = vi.fn();
     mockCanvasInstance = { acquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -479,7 +480,7 @@ describe('openmeteoGetHistoricalTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-wide' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -521,7 +522,7 @@ describe('openmeteoGetHistoricalTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-union' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -555,8 +556,8 @@ describe('openmeteoGetHistoricalTool', () => {
       canvas_id: undefined,
       truncated: false,
     });
-    expect(blocks[0]?.text).toContain('ERA5');
-    expect(blocks[0]?.text).toContain('Open-Meteo.com');
+    expect(firstText(blocks)).toContain('ERA5');
+    expect(firstText(blocks)).toContain('Open-Meteo.com');
   });
 
   it('formats truncated result with canvas_id notice', () => {
@@ -574,11 +575,11 @@ describe('openmeteoGetHistoricalTool', () => {
       table_name: 'spilled_hist789',
       truncated: true,
     });
-    expect(blocks[0]?.text).toContain('canvas-xyz-789');
-    expect(blocks[0]?.text).toContain('spilled_hist789'); // #18: table name named in the hint
+    expect(firstText(blocks)).toContain('canvas-xyz-789');
+    expect(firstText(blocks)).toContain('spilled_hist789'); // #18: table name named in the hint
     // Format uses bold label: **Truncated:** true
-    expect(blocks[0]?.text).toContain('Truncated:');
-    expect(blocks[0]?.text).toContain('true');
+    expect(firstText(blocks)).toContain('Truncated:');
+    expect(firstText(blocks)).toContain('true');
   });
 
   it('reports the staged total (record_count), not the preview length, in the truncated hourly heading', () => {
@@ -603,7 +604,7 @@ describe('openmeteoGetHistoricalTool', () => {
       table_name: 'spilled_hist1',
       truncated: true,
     });
-    const text = blocks[0]?.text ?? '';
+    const text = firstText(blocks) ?? '';
     expect(text).toContain('2 shown of 2184 total');
     expect(text).not.toMatch(/### Hourly \(first \d+ of 2\)/);
   });
@@ -614,7 +615,7 @@ describe('openmeteoGetHistoricalTool', () => {
       time: `2024-07-01T00:00+${i}`,
       temperature_2m: 1000 + i,
     }));
-    const text =
+    const text = firstText(
       openmeteoGetHistoricalTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -629,7 +630,8 @@ describe('openmeteoGetHistoricalTool', () => {
         canvas_id: undefined,
         table_name: undefined,
         truncated: false,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('### Hourly (60 records)');
     expect(text).toContain('temperature_2m: 1000');
     expect(text).toContain('temperature_2m: 1059'); // last row — not sliced at 48
@@ -643,7 +645,7 @@ describe('openmeteoGetHistoricalTool', () => {
       time: `2024-07-01T00:00+${i}`,
       temperature_2m: 2000 + i,
     }));
-    const text =
+    const text = firstText(
       openmeteoGetHistoricalTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -658,7 +660,8 @@ describe('openmeteoGetHistoricalTool', () => {
         canvas_id: 'canvas-hist-big',
         table_name: 'spilled_histbig',
         truncated: true,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('### Hourly (preview — 60 shown of 5000 total rows on canvas)');
     expect(text).toContain('temperature_2m: 2000');
     expect(text).toContain('temperature_2m: 2059'); // full preview rendered, not capped at 48
@@ -689,7 +692,7 @@ describe('openmeteoGetHistoricalTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -723,7 +726,7 @@ describe('openmeteoGetHistoricalTool', () => {
   });
 
   it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
-    const text =
+    const text = firstText(
       openmeteoGetHistoricalTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -738,7 +741,8 @@ describe('openmeteoGetHistoricalTool', () => {
         canvas_id: undefined,
         table_name: undefined,
         truncated: true,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
     expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
     expect(text).toContain('start_date–end_date');

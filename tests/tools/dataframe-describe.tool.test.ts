@@ -7,6 +7,7 @@ import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/err
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoDataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
+import { firstText } from '../helpers/content.js';
 
 // Canvas mock — returns undefined by default; individual tests override
 let mockCanvasInstance: unknown;
@@ -88,7 +89,7 @@ describe('openmeteoDataframeDescribeTool', () => {
     };
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoDataframeDescribeTool.errors });
     const input = openmeteoDataframeDescribeTool.input.parse({ canvas_id: 'testcanvas01' });
     const result = await openmeteoDataframeDescribeTool.handler(input, ctx);
 
@@ -115,7 +116,7 @@ describe('openmeteoDataframeDescribeTool', () => {
     const mockAcquire = vi.fn().mockResolvedValue(mockInstance);
     mockCanvasInstance = { acquire: mockAcquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoDataframeDescribeTool.errors });
     const input = openmeteoDataframeDescribeTool.input.parse({ canvas_id: 'mycanvasid1' });
     await openmeteoDataframeDescribeTool.handler(input, ctx);
 
@@ -138,7 +139,7 @@ describe('openmeteoDataframeDescribeTool', () => {
         },
       ],
     });
-    const text = blocks[0]?.text ?? '';
+    const text = firstText(blocks) ?? '';
     expect(text).toContain('testcanvas01');
     expect(text).toContain('spilled_abc1234567');
     expect(text).toContain('8760');
@@ -152,7 +153,7 @@ describe('openmeteoDataframeDescribeTool', () => {
       expires_at: '2026-06-01T00:00:00.000Z',
       tables: [],
     });
-    const text = blocks[0]?.text ?? '';
+    const text = firstText(blocks) ?? '';
     expect(text).toContain('emptycv0001');
     expect(text).toContain('Tables:** 0');
   });

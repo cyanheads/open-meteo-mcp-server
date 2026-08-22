@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetForecastTool } from '@/mcp-server/tools/definitions/get-forecast.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { firstText } from '../helpers/content.js';
 
 const mockGetForecast = vi.fn();
 const mockSpillover = vi.fn();
@@ -97,7 +98,7 @@ describe('openmeteoGetForecastTool', () => {
 
   it('reshapes columnar response into per-timestamp records', async () => {
     mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -135,7 +136,7 @@ describe('openmeteoGetForecastTool', () => {
         cloud_cover: [20, 35, 50],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -303,7 +304,7 @@ describe('openmeteoGetForecastTool', () => {
         some_new_daily_name: [null, null],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -318,7 +319,7 @@ describe('openmeteoGetForecastTool', () => {
 
   it('stays quiet when every requested column carries a real unit', async () => {
     mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -332,7 +333,7 @@ describe('openmeteoGetForecastTool', () => {
 
   it('passes timezone=auto by default', async () => {
     mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -351,7 +352,7 @@ describe('openmeteoGetForecastTool', () => {
       timezone: 'Europe/Berlin',
       utc_offset_seconds: 7200,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 52.52,
       longitude: 13.4,
@@ -370,7 +371,7 @@ describe('openmeteoGetForecastTool', () => {
       daily_units: { time: 'iso8601', temperature_2m_max: '°C' },
       daily: { time: ['2026-05-30'], temperature_2m_max: [15.9] },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -395,14 +396,14 @@ describe('openmeteoGetForecastTool', () => {
       hourly_units: { temperature_2m: '°C' },
       truncated: false,
     });
-    expect(blocks[0]?.text).toContain('Weather forecast');
-    expect(blocks[0]?.text).toContain('Open-Meteo.com');
+    expect(firstText(blocks)).toContain('Weather forecast');
+    expect(firstText(blocks)).toContain('Open-Meteo.com');
   });
 
   it('renders the full units map including the time unit in content[] (#24)', () => {
     // structuredContent.*_units carries time: iso8601 — content[] must too, or
     // text-only clients read an incomplete units map.
-    const text =
+    const text = firstText(
       openmeteoGetForecastTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -415,7 +416,8 @@ describe('openmeteoGetForecastTool', () => {
         daily: [{ time: '2026-05-30', temperature_2m_max: 18.0 }],
         daily_units: { time: 'iso8601', temperature_2m_max: '°C' },
         truncated: false,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('**Hourly units:** time: iso8601 | temperature_2m: °C');
     expect(text).toContain('**Daily units:** time: iso8601 | temperature_2m_max: °C');
   });
@@ -427,7 +429,7 @@ describe('openmeteoGetForecastTool', () => {
       time: `2026-05-30T00:00+${i}`,
       temperature_2m: 1000 + i,
     }));
-    const text =
+    const text = firstText(
       openmeteoGetForecastTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -438,7 +440,8 @@ describe('openmeteoGetForecastTool', () => {
         hourly,
         hourly_units: { temperature_2m: '°C' },
         truncated: false,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('### Hourly (50 records)');
     expect(text).toContain('temperature_2m: 1000'); // first row
     expect(text).toContain('temperature_2m: 1049'); // last row — not sliced at 48
@@ -458,7 +461,7 @@ describe('openmeteoGetForecastTool', () => {
     const acquire = vi.fn().mockResolvedValue({ canvasId: 'canvas-fc-1' });
     mockCanvasInstance = { acquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -487,7 +490,7 @@ describe('openmeteoGetForecastTool', () => {
     mockGetForecast.mockResolvedValue({ ...MOCK_RESPONSE, hourly: wideHourlyBlock(time) });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -527,7 +530,7 @@ describe('openmeteoGetForecastTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -562,7 +565,7 @@ describe('openmeteoGetForecastTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -584,7 +587,7 @@ describe('openmeteoGetForecastTool', () => {
     const acquire = vi.fn();
     mockCanvasInstance = { acquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -634,7 +637,7 @@ describe('openmeteoGetForecastTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-fc-mix' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -660,13 +663,13 @@ describe('openmeteoGetForecastTool', () => {
     expect(result.record_count).toBe(hourlyTime.length + dailyTime.length);
 
     // format() renders the daily section the empty array used to gate away.
-    const text = openmeteoGetForecastTool.format!(result)[0]?.text ?? '';
+    const text = firstText(openmeteoGetForecastTool.format!(result));
     expect(text).toContain('### Daily');
     expect(text).toContain(`of ${hourlyTime.length + dailyTime.length} total rows on canvas`);
   });
 
   it('renders the canvas handles in the truncated format()', () => {
-    const text =
+    const text = firstText(
       openmeteoGetForecastTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -679,7 +682,8 @@ describe('openmeteoGetForecastTool', () => {
         canvas_id: 'canvas-fc-1',
         table_name: 'spilled_fc123',
         truncated: true,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('canvas-fc-1');
     expect(text).toContain('spilled_fc123');
     expect(text).toContain('**Records:** 2592');
@@ -687,7 +691,7 @@ describe('openmeteoGetForecastTool', () => {
   });
 
   it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
-    const text =
+    const text = firstText(
       openmeteoGetForecastTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -700,7 +704,8 @@ describe('openmeteoGetForecastTool', () => {
         canvas_id: undefined,
         table_name: undefined,
         truncated: true,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
     expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
     expect(text).toContain('fewer past_days / forecast_days');

@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetMarineTool } from '@/mcp-server/tools/definitions/get-marine.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { firstText } from '../helpers/content.js';
 
 const mockGetMarine = vi.fn();
 const mockSpillover = vi.fn();
@@ -64,7 +65,7 @@ describe('openmeteoGetMarineTool', () => {
 
   it('reshapes columnar marine response with exact per-timestamp alignment', async () => {
     mockGetMarine.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -100,7 +101,7 @@ describe('openmeteoGetMarineTool', () => {
         ocean_current_velocity: [null],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -173,7 +174,7 @@ describe('openmeteoGetMarineTool', () => {
         temperature_2m: [null, null],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -188,7 +189,7 @@ describe('openmeteoGetMarineTool', () => {
 
   it('stays quiet when every requested column carries a real unit', async () => {
     mockGetMarine.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -233,7 +234,7 @@ describe('openmeteoGetMarineTool', () => {
         wave_height_max: [1.2, 0.9],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -269,7 +270,7 @@ describe('openmeteoGetMarineTool', () => {
 
   it('forwards forecast_days and past_days as the forecast window', async () => {
     mockGetMarine.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -291,7 +292,7 @@ describe('openmeteoGetMarineTool', () => {
     // past_days: 0 is the schema default, and upstream rejects it alongside a date
     // range as a mutually exclusive parameter — so neither may ride along.
     mockGetMarine.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -359,7 +360,7 @@ describe('openmeteoGetMarineTool', () => {
 
   it('past_days at its 0 default does not conflict with a date range', async () => {
     mockGetMarine.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -400,7 +401,7 @@ describe('openmeteoGetMarineTool', () => {
     const mockCanvas = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-marine-1' }) };
     mockCanvasInstance = mockCanvas;
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -469,7 +470,7 @@ describe('openmeteoGetMarineTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-marine-mix' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 36.8,
       longitude: -75.0,
@@ -491,7 +492,7 @@ describe('openmeteoGetMarineTool', () => {
     ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
     expect(result.record_count).toBe(time.length + dailyTime.length);
 
-    const text = openmeteoGetMarineTool.format!(result)[0]?.text ?? '';
+    const text = firstText(openmeteoGetMarineTool.format!(result));
     expect(text).toContain('### Daily marine summary (preview —');
     expect(text).toContain(`of ${time.length + dailyTime.length} total rows on canvas`);
   });
@@ -510,7 +511,7 @@ describe('openmeteoGetMarineTool', () => {
     const acquire = vi.fn().mockResolvedValue({ canvasId: 'existingcv1' });
     mockCanvasInstance = { acquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -533,7 +534,7 @@ describe('openmeteoGetMarineTool', () => {
     mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-unused' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -553,7 +554,7 @@ describe('openmeteoGetMarineTool', () => {
     const acquire = vi.fn();
     mockCanvasInstance = { acquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -582,7 +583,7 @@ describe('openmeteoGetMarineTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -637,7 +638,7 @@ describe('openmeteoGetMarineTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 36.8,
       longitude: -75.0,
@@ -659,7 +660,7 @@ describe('openmeteoGetMarineTool', () => {
     expect(result.record_count).toBe(time.length + dailyTime.length);
 
     // format() renders the daily section the empty array used to gate away.
-    const text = openmeteoGetMarineTool.format!(result)[0]?.text ?? '';
+    const text = firstText(openmeteoGetMarineTool.format!(result));
     expect(text).toContain('### Daily marine summary (preview —');
     expect(text).toContain(`of ${time.length + dailyTime.length} total rows`);
   });
@@ -678,12 +679,12 @@ describe('openmeteoGetMarineTool', () => {
       table_name: undefined,
       truncated: false,
     });
-    expect(blocks[0]?.text).toContain('Marine');
-    expect(blocks[0]?.text).toContain('Open-Meteo.com');
+    expect(firstText(blocks)).toContain('Marine');
+    expect(firstText(blocks)).toContain('Open-Meteo.com');
   });
 
   it('formats truncated result with the canvas and table handles', () => {
-    const text =
+    const text = firstText(
       openmeteoGetMarineTool.format!({
         latitude: 47.8,
         longitude: -122.5,
@@ -694,14 +695,15 @@ describe('openmeteoGetMarineTool', () => {
         canvas_id: 'canvas-marine-1',
         table_name: 'spilled_marine01',
         truncated: true,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('canvas-marine-1');
     expect(text).toContain('spilled_marine01');
     expect(text).toContain('1 shown of 2232 total rows on canvas');
   });
 
   it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
-    const text =
+    const text = firstText(
       openmeteoGetMarineTool.format!({
         latitude: 47.8,
         longitude: -122.5,
@@ -712,7 +714,8 @@ describe('openmeteoGetMarineTool', () => {
         canvas_id: undefined,
         table_name: undefined,
         truncated: true,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
     expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
     expect(text).toContain('past_days');
@@ -728,7 +731,7 @@ describe('openmeteoGetMarineTool', () => {
       time: `2026-05-30T00:00+${i}`,
       wave_height: 1000 + i,
     }));
-    const text =
+    const text = firstText(
       openmeteoGetMarineTool.format!({
         latitude: 47.8,
         longitude: -122.5,
@@ -739,7 +742,8 @@ describe('openmeteoGetMarineTool', () => {
         canvas_id: undefined,
         table_name: undefined,
         truncated: false,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('### Hourly marine (50 records)');
     expect(text).toContain('wave_height: 1000');
     expect(text).toContain('wave_height: 1049'); // last row — not sliced at 48

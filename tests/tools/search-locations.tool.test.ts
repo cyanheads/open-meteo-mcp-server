@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoSearchLocationsTool } from '@/mcp-server/tools/definitions/search-locations.tool.js';
+import { firstText } from '../helpers/content.js';
 
 const mockGetGeocode = vi.fn();
 
@@ -98,7 +99,7 @@ describe('openmeteoSearchLocationsTool', () => {
 
   it('returns ranked geocoding results', async () => {
     mockGetGeocode.mockResolvedValue({ results: [SEATTLE_RESULT] });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
     const input = openmeteoSearchLocationsTool.input.parse({ name: 'Seattle' });
     const result = await openmeteoSearchLocationsTool.handler(input, ctx);
 
@@ -136,8 +137,8 @@ describe('openmeteoSearchLocationsTool', () => {
     mockGetGeocode.mockResolvedValue({ generationtime_ms: 0.1 });
     const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
     const input = openmeteoSearchLocationsTool.input.parse({ name: 'Baoding Hebei' });
-    const err = (await openmeteoSearchLocationsTool
-      .handler(input, ctx)
+    const err = (await Promise.resolve()
+      .then(() => openmeteoSearchLocationsTool.handler(input, ctx))
       .catch((e: unknown) => e)) as {
       data: { recovery: { hint: string } };
     };
@@ -152,7 +153,7 @@ describe('openmeteoSearchLocationsTool', () => {
 
   it('tolerates results missing country/country_code (continent features)', async () => {
     mockGetGeocode.mockResolvedValue({ results: [ANTARCTICA_CONT_RESULT] });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
     const input = openmeteoSearchLocationsTool.input.parse({ name: 'Antarctica' });
     const result = await openmeteoSearchLocationsTool.handler(input, ctx);
 
@@ -169,7 +170,7 @@ describe('openmeteoSearchLocationsTool', () => {
     mockGetGeocode
       .mockResolvedValueOnce({ generationtime_ms: 0.1 }) // en pass: no results key
       .mockResolvedValueOnce({ results: [SHANGHAI_ZH_RESULT] });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
     const input = openmeteoSearchLocationsTool.input.parse({ name: '上海' });
     const result = await openmeteoSearchLocationsTool.handler(input, ctx);
 
@@ -185,7 +186,7 @@ describe('openmeteoSearchLocationsTool', () => {
     mockGetGeocode.mockResolvedValueOnce({ generationtime_ms: 0.1 }).mockResolvedValueOnce({
       results: [{ ...SHANGHAI_ZH_RESULT, country: undefined, country_code: undefined }],
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
     const input = openmeteoSearchLocationsTool.input.parse({ name: '上海' });
     const result = await openmeteoSearchLocationsTool.handler(input, ctx);
 
@@ -221,7 +222,7 @@ describe('openmeteoSearchLocationsTool', () => {
       const country = args[3] as string | undefined;
       return Promise.resolve({ results: country === 'US' ? [PARIS_US] : [PARIS_FR, PARIS_US] });
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
 
     const unfiltered = await openmeteoSearchLocationsTool.handler(
       openmeteoSearchLocationsTool.input.parse({ name: 'Paris' }),
@@ -240,7 +241,7 @@ describe('openmeteoSearchLocationsTool', () => {
 
   it('uppercases a lowercase country code before querying upstream', async () => {
     mockGetGeocode.mockResolvedValue({ results: [PARIS_US] });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
     const input = openmeteoSearchLocationsTool.input.parse({ name: 'Paris', country: 'us' });
     await openmeteoSearchLocationsTool.handler(input, ctx);
     // Lowercase accepted by the schema, normalized to uppercase for the upstream countryCode filter.
@@ -266,7 +267,7 @@ describe('openmeteoSearchLocationsTool', () => {
       admin2: null,
     };
     mockGetGeocode.mockResolvedValue({ results: [partialResult] });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
     const input = openmeteoSearchLocationsTool.input.parse({ name: 'SomePlace' });
     const result = await openmeteoSearchLocationsTool.handler(input, ctx);
     expect(result.results[0]?.elevation).toBeNull();
@@ -295,8 +296,8 @@ describe('openmeteoSearchLocationsTool', () => {
       count: 1,
     });
     expect(blocks[0]?.type).toBe('text');
-    expect(blocks[0]?.text).toContain('Seattle');
-    expect(blocks[0]?.text).toContain('Open-Meteo.com');
+    expect(firstText(blocks)).toContain('Seattle');
+    expect(firstText(blocks)).toContain('Open-Meteo.com');
   });
 
   it('format omits country markers instead of rendering null for sparse results', () => {
@@ -319,7 +320,7 @@ describe('openmeteoSearchLocationsTool', () => {
       ],
       count: 1,
     });
-    const text = blocks[0]?.text ?? '';
+    const text = firstText(blocks) ?? '';
     expect(text).toContain('Antarctica');
     expect(text).not.toContain('null');
     expect(text).not.toContain('undefined');

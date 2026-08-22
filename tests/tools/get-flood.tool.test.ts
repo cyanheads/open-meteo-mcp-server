@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetFloodTool } from '@/mcp-server/tools/definitions/get-flood.tool.js';
 import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { firstText } from '../helpers/content.js';
 
 const mockGetFlood = vi.fn();
 const mockSpillover = vi.fn();
@@ -73,7 +74,7 @@ describe('openmeteoGetFloodTool', () => {
 
   it('reshapes daily discharge response into per-date records', async () => {
     mockGetFlood.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -107,7 +108,7 @@ describe('openmeteoGetFloodTool', () => {
         river_discharge: [null],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 0,
       longitude: 0,
@@ -217,7 +218,7 @@ describe('openmeteoGetFloodTool', () => {
 
   it('accepts forecast_days alone and a paired range alone', async () => {
     mockGetFlood.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
 
     const forecastOnly = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
@@ -320,7 +321,7 @@ describe('openmeteoGetFloodTool', () => {
       ...MOCK_RESPONSE,
       daily: undefined,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 0,
       longitude: 0,
@@ -363,7 +364,7 @@ describe('openmeteoGetFloodTool', () => {
     const mockCanvas = { acquire: vi.fn().mockResolvedValue(mockInstance) };
     mockCanvasInstance = mockCanvas;
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -395,7 +396,7 @@ describe('openmeteoGetFloodTool', () => {
     const acquire = vi.fn().mockResolvedValue({ canvasId: 'existingcv1' });
     mockCanvasInstance = { acquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -428,7 +429,7 @@ describe('openmeteoGetFloodTool', () => {
     });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-types' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -457,7 +458,7 @@ describe('openmeteoGetFloodTool', () => {
     mockSpillover.mockResolvedValue({ spilled: false, previewRows: records });
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-unused' }) };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -478,7 +479,7 @@ describe('openmeteoGetFloodTool', () => {
     const acquire = vi.fn();
     mockCanvasInstance = { acquire };
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -507,7 +508,7 @@ describe('openmeteoGetFloodTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -529,7 +530,7 @@ describe('openmeteoGetFloodTool', () => {
   });
 
   it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
-    const text =
+    const text = firstText(
       openmeteoGetFloodTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -540,7 +541,8 @@ describe('openmeteoGetFloodTool', () => {
         canvas_id: undefined,
         table_name: undefined,
         truncated: true,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
     expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
     expect(text).toContain('fewer daily_variables');
@@ -561,9 +563,9 @@ describe('openmeteoGetFloodTool', () => {
       table_name: undefined,
       truncated: false,
     });
-    expect(blocks[0]?.text).toContain('GloFAS');
-    expect(blocks[0]?.text).toContain('river_discharge');
-    expect(blocks[0]?.text).toContain('Open-Meteo.com');
+    expect(firstText(blocks)).toContain('GloFAS');
+    expect(firstText(blocks)).toContain('river_discharge');
+    expect(firstText(blocks)).toContain('Open-Meteo.com');
   });
 
   it('formats empty result with coverage notice', () => {
@@ -577,11 +579,11 @@ describe('openmeteoGetFloodTool', () => {
       table_name: undefined,
       truncated: false,
     });
-    expect(blocks[0]?.text).toContain('GloFAS coverage');
+    expect(firstText(blocks)).toContain('GloFAS coverage');
   });
 
   it('formats truncated result with the canvas and table handles', () => {
-    const text =
+    const text = firstText(
       openmeteoGetFloodTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -592,7 +594,8 @@ describe('openmeteoGetFloodTool', () => {
         canvas_id: 'canvas-flood-123',
         table_name: 'spilled_flood01',
         truncated: true,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('canvas-flood-123');
     expect(text).toContain('spilled_flood01');
     expect(text).toContain('openmeteo_dataframe_query');
@@ -608,7 +611,7 @@ describe('openmeteoGetFloodTool', () => {
       time: `2026-06-${String(i + 1).padStart(2, '0')}`,
       river_discharge: 1000 + i,
     }));
-    const text =
+    const text = firstText(
       openmeteoGetFloodTool.format!({
         latitude: 47.6,
         longitude: -122.3,
@@ -619,7 +622,8 @@ describe('openmeteoGetFloodTool', () => {
         canvas_id: undefined,
         table_name: undefined,
         truncated: false,
-      })[0]?.text ?? '';
+      }),
+    );
     expect(text).toContain('### Daily discharge (35 records)');
     expect(text).toContain('river_discharge: 1000');
     expect(text).toContain('river_discharge: 1034'); // last row — not sliced at 30
@@ -647,7 +651,7 @@ describe('openmeteoGetFloodTool unserved-variable notice', () => {
         precipitation_sum: [null, null],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -662,7 +666,7 @@ describe('openmeteoGetFloodTool unserved-variable notice', () => {
 
   it('stays quiet when every requested column carries a real unit', async () => {
     mockGetFlood.mockResolvedValue(MOCK_RESPONSE);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,

@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetElevationTool } from '@/mcp-server/tools/definitions/get-elevation.tool.js';
+import { firstText } from '../helpers/content.js';
 
 const mockGetElevation = vi.fn();
 
@@ -21,7 +22,7 @@ describe('openmeteoGetElevationTool', () => {
 
   it('returns elevations zipped with input coordinates in input order', async () => {
     mockGetElevation.mockResolvedValue({ elevation: [59.0, 1800.0] });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetElevationTool.errors });
     const input = openmeteoGetElevationTool.input.parse({
       latitudes: [47.6062, 46.853],
       longitudes: [-122.3321, -121.734],
@@ -43,7 +44,7 @@ describe('openmeteoGetElevationTool', () => {
 
   it('handles a single coordinate pair', async () => {
     mockGetElevation.mockResolvedValue({ elevation: [432.0] });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: openmeteoGetElevationTool.errors });
     const input = openmeteoGetElevationTool.input.parse({
       latitudes: [46.853],
       longitudes: [-121.734],
@@ -70,7 +71,7 @@ describe('openmeteoGetElevationTool', () => {
       elevations: [{ latitude: 47.6, longitude: -122.3, elevation_m: 59 }],
     });
     expect(blocks[0]?.type).toBe('text');
-    expect(blocks[0]?.text).toContain('59 m');
-    expect(blocks[0]?.text).toContain('Open-Meteo.com');
+    expect(firstText(blocks)).toContain('59 m');
+    expect(firstText(blocks)).toContain('Open-Meteo.com');
   });
 });
