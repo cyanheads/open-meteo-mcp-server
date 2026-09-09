@@ -151,6 +151,44 @@ describe('openmeteoSearchLocationsTool', () => {
     expect(hint).toMatch(/nearest town/i);
   });
 
+  it('no_results recovery names the full-administrative-name and romanized fallback for a short native-script query (#46)', async () => {
+    /*
+     * Upstream exact-matches a one- or two-character query and prefix-matches anything
+     * longer, so "서울" misses even under language "ko" — the indexed name is
+     * "서울특별시". The tool's script-inferred retry already covers 3+ character names;
+     * the recovery has to name what a caller retries a short one with.
+     */
+    mockGetGeocode.mockResolvedValue({ generationtime_ms: 0.1 });
+    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
+    const input = openmeteoSearchLocationsTool.input.parse({ name: '서울' });
+    const err = (await Promise.resolve()
+      .then(() => openmeteoSearchLocationsTool.handler(input, ctx))
+      .catch((e: unknown) => e)) as { data: { recovery: { hint: string } } };
+    const hint = err.data.recovery.hint;
+
+    expect(hint).toMatch(/one- or two-character|1-2 character/i);
+    // Both working next steps: the full administrative name and the romanized name.
+    expect(hint).toMatch(/서울특별시/);
+    expect(hint).toMatch(/romani[sz]ed/i);
+    // And it must not send the caller back to a language override, which cannot help here.
+    expect(hint).toMatch(/language alone/i);
+  });
+
+  it.each([
+    ['name', () => openmeteoSearchLocationsTool.input.shape.name.description ?? ''],
+    ['language', () => openmeteoSearchLocationsTool.input.shape.language.description ?? ''],
+  ])('the %s field description carries the short-native-name fallback (#46)', (_field, read) => {
+    const text = read();
+    expect(text).toMatch(/서울특별시|大阪市/);
+    expect(text).toMatch(/romani[sz]ed/i);
+  });
+
+  it('the language field description states the three-or-more-character threshold (#46)', () => {
+    const text = openmeteoSearchLocationsTool.input.shape.language.description ?? '';
+    expect(text).toMatch(/three or more characters/i);
+    expect(text).toMatch(/language alone/i);
+  });
+
   it('tolerates results missing country/country_code (continent features)', async () => {
     mockGetGeocode.mockResolvedValue({ results: [ANTARCTICA_CONT_RESULT] });
     const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });

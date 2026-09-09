@@ -67,7 +67,7 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The search returned no matching places',
       recovery:
-        'If a region or country qualifier was folded into name, drop it and search the bare place name ("Baoding", not "Baoding Hebei") — use the country input or read admin1 on the results to disambiguate. The index covers populated places only: a physical feature or landmark ("Sahara Desert") often will not resolve, so search the nearest town or city instead. Otherwise check the spelling, or set language to match the script of name (e.g. "zh" for a Chinese place name).',
+        'If a region or country qualifier was folded into name, drop it and search the bare place name ("Baoding", not "Baoding Hebei") — use the country input or read admin1 on the results to disambiguate. A one- or two-character native-script name ("서울", "大阪", "東京") is matched only against an index entry of exactly that length, so retry with the full administrative name ("서울특별시", "大阪市", "東京都") or the romanized name ("Seoul", "Osaka", "Tokyo") — setting language alone will not resolve it. The index covers populated places only: a physical feature or landmark ("Sahara Desert") often will not resolve, so search the nearest town or city instead. Otherwise check the spelling.',
       retryable: false,
     },
   ],
@@ -78,7 +78,7 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
       .min(1)
       .max(100)
       .describe(
-        'Place name to search — a bare city, region, or landmark ("Seattle", "Mount Rainier"). Do not fold in a region or country qualifier ("Baoding", not "Baoding Hebei"); use the country input to disambiguate. Weather tools require coordinates — use the lat/lon from this result.',
+        'Place name to search — a bare city, region, or landmark ("Seattle", "Mount Rainier"). Do not fold in a region or country qualifier ("Baoding", not "Baoding Hebei"); use the country input to disambiguate. A one- or two-character native-script name ("서울", "大阪") needs the full administrative name ("서울특별시", "大阪市") or the romanized name ("Seoul", "Osaka") — see the language field. Weather tools require coordinates — use the lat/lon from this result.',
       ),
     country: z
       .string()
@@ -100,7 +100,7 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
       .string()
       .default('en')
       .describe(
-        'Language for matching and returning place names (ISO 639-1, e.g., "en", "de", "zh"). The API matches name against the localized index for this language, so set it to match the script of name — e.g. language "zh" for "上海", "ru" for "Москва". Default "en"; a query in a recognized non-Latin script (CJK, Hangul, Cyrillic, Arabic, Greek, Hebrew, Thai, Devanagari) that misses under "en" is retried once with the language inferred from its script.',
+        'Language for matching and returning place names (ISO 639-1, e.g., "en", "de", "zh"). The API matches name against the localized index for this language, so set it to match the script of name — e.g. language "zh" for "上海", "ru" for "Москва". This resolves a native-script name of three or more characters, which is matched by normalized prefix; a one- or two-character name must equal an index entry exactly, so setting language alone will not find "서울" or "大阪" — retry those with the full administrative name ("서울특별시", "大阪市") or the romanized name ("Seoul", "Osaka"). Default "en"; a query in a recognized non-Latin script (CJK, Hangul, Cyrillic, Arabic, Greek, Hebrew, Thai, Devanagari) that misses under "en" is retried once with the language inferred from its script.',
       ),
   }),
 
