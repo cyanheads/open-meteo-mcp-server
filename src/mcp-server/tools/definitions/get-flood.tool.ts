@@ -21,6 +21,11 @@ import {
   noCanvasNotice,
   PREVIEW_CHARS,
 } from '../spill-utils.js';
+import {
+  BLANK_TIMEZONE_MESSAGE,
+  frameInvalidTimezoneMessage,
+  isInvalidTimezoneReason,
+} from '../timezone-input.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
 import { undefinedUnitColumns } from '../variable-cadence.js';
 
@@ -86,6 +91,14 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       when: 'An unknown discharge variable name was requested',
       recovery:
         'Valid variables: river_discharge, river_discharge_mean, river_discharge_min, river_discharge_max, river_discharge_median, river_discharge_p25, river_discharge_p75.',
+      retryable: false,
+    },
+    {
+      reason: 'invalid_timezone',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'timezone was blank, or upstream did not recognize the requested time zone',
+      recovery:
+        'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
       retryable: false,
     },
   ],
@@ -239,6 +252,19 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       );
     }
 
+    /*
+     * A blank timezone is omitted by the URL builder, so it reaches upstream as an
+     * absent parameter and resolves to GMT rather than the documented "auto". Reject it
+     * before the call — no documented workflow asks a caller to send one.
+     */
+    if (input.timezone.trim() === '') {
+      throw ctx.fail(
+        'invalid_timezone',
+        BLANK_TIMEZONE_MESSAGE,
+        ctx.recoveryFor('invalid_timezone'),
+      );
+    }
+
     const service = getOpenMeteoService();
     const data = await service.getFlood(
       input.latitude,
@@ -255,6 +281,13 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
 
     if (data.error) {
       const reason = data.reason ?? '';
+      if (isInvalidTimezoneReason(data.reason)) {
+        throw ctx.fail(
+          'invalid_timezone',
+          frameInvalidTimezoneMessage(data.reason),
+          ctx.recoveryFor('invalid_timezone'),
+        );
+      }
       if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
         throw ctx.fail(
           'date_out_of_range',

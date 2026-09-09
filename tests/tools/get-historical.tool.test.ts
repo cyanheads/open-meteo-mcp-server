@@ -239,6 +239,96 @@ describe('openmeteoGetHistoricalTool', () => {
     });
   });
 
+  // --- timezone (#38) --------------------------------------------------------
+
+  it('rejects a blank timezone before the network call (#38)', async () => {
+    // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
+    // upstream's GMT default rather than the documented "auto".
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      daily_variables: ['temperature_2m_max'],
+      timezone: '',
+    });
+    await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('timezone was blank'),
+      data: {
+        reason: 'invalid_timezone',
+        recovery: { hint: expect.stringContaining('IANA') },
+      },
+    });
+    expect(mockGetHistorical).not.toHaveBeenCalled();
+  });
+
+  it('reclassifies the upstream Invalid timezone envelope away from invalid_variable (#38)', async () => {
+    // Live upstream shape for an unknown zone: HTTP 400, {"reason":"Invalid timezone","error":true}.
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason: 'Invalid timezone',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      daily_variables: ['temperature_2m_max'],
+      timezone: 'Mars/Olympus',
+    });
+    await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
+      data: {
+        reason: 'invalid_timezone',
+        recovery: { hint: expect.stringContaining('auto') },
+      },
+    });
+  });
+
+  it('still defaults an omitted timezone to auto (#38)', async () => {
+    mockGetHistorical.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      daily_variables: ['temperature_2m_max'],
+    });
+    await openmeteoGetHistoricalTool.handler(input, ctx);
+    expect(mockGetHistorical).toHaveBeenCalledWith(
+      47.6062,
+      -122.3321,
+      expect.objectContaining({ timezone: 'auto' }),
+      ctx,
+    );
+  });
+
+  it('passes a valid IANA zone through unchanged (#38)', async () => {
+    mockGetHistorical.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      daily_variables: ['temperature_2m_max'],
+      timezone: 'America/Los_Angeles',
+    });
+    await openmeteoGetHistoricalTool.handler(input, ctx);
+    expect(mockGetHistorical).toHaveBeenCalledWith(
+      47.6062,
+      -122.3321,
+      expect.objectContaining({ timezone: 'America/Los_Angeles' }),
+      ctx,
+    );
+  });
+
   it('throws invalid_variable (not date_out_of_range) when API error envelope has non-date reason', async () => {
     // Regression: the handler catch-all previously mapped ALL API errors to date_out_of_range,
     // including invalid variable names. Non-date errors must produce invalid_variable.

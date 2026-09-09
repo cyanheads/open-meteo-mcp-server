@@ -22,6 +22,11 @@ import {
   noCanvasNotice,
   PREVIEW_CHARS,
 } from '../spill-utils.js';
+import {
+  BLANK_TIMEZONE_MESSAGE,
+  frameInvalidTimezoneMessage,
+  isInvalidTimezoneReason,
+} from '../timezone-input.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
 import { undefinedUnitColumns } from '../variable-cadence.js';
 
@@ -71,6 +76,14 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'An unknown variable name or unsupported climate model was requested',
       recovery: `Check names against Open-Meteo Climate API docs. Common daily variables: temperature_2m_max, temperature_2m_min, temperature_2m_mean, precipitation_sum, rain_sum, snowfall_sum, wind_speed_10m_mean, wind_speed_10m_max, shortwave_radiation_sum, cloud_cover_mean. Documented models: ${CLIMATE_MODEL_LIST}. When the message names one model, correct only that one — the rest of the models list is valid.`,
+      retryable: false,
+    },
+    {
+      reason: 'invalid_timezone',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'timezone was blank, or upstream did not recognize the requested time zone',
+      recovery:
+        'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
       retryable: false,
     },
   ],
@@ -226,6 +239,19 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       );
     }
 
+    /*
+     * A blank timezone is omitted by the URL builder, so it reaches upstream as an
+     * absent parameter and resolves to GMT rather than the documented "auto". Reject it
+     * before the call — no documented workflow asks a caller to send one.
+     */
+    if (input.timezone.trim() === '') {
+      throw ctx.fail(
+        'invalid_timezone',
+        BLANK_TIMEZONE_MESSAGE,
+        ctx.recoveryFor('invalid_timezone'),
+      );
+    }
+
     const service = getOpenMeteoService();
     const data = await service.getClimate(
       input.latitude,
@@ -245,6 +271,13 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
 
     if (data.error) {
       const reason = data.reason ?? '';
+      if (isInvalidTimezoneReason(data.reason)) {
+        throw ctx.fail(
+          'invalid_timezone',
+          frameInvalidTimezoneMessage(data.reason),
+          ctx.recoveryFor('invalid_timezone'),
+        );
+      }
       if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
         throw ctx.fail(
           'date_out_of_range',

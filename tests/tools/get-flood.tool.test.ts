@@ -291,6 +291,84 @@ describe('openmeteoGetFloodTool', () => {
     });
   });
 
+  // --- timezone (#38) --------------------------------------------------------
+
+  it('rejects a blank timezone before the network call (#38)', async () => {
+    // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
+    // upstream's GMT default rather than the documented "auto".
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const input = openmeteoGetFloodTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: ['river_discharge'],
+      timezone: '',
+    });
+    await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('timezone was blank'),
+      data: {
+        reason: 'invalid_timezone',
+        recovery: { hint: expect.stringContaining('IANA') },
+      },
+    });
+    expect(mockGetFlood).not.toHaveBeenCalled();
+  });
+
+  it('reclassifies the upstream Invalid timezone envelope away from invalid_variable (#38)', async () => {
+    // Live upstream shape for an unknown zone: HTTP 400, {"reason":"Invalid timezone","error":true}.
+    mockGetFlood.mockResolvedValue({ ...MOCK_RESPONSE, error: true, reason: 'Invalid timezone' });
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const input = openmeteoGetFloodTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: ['river_discharge'],
+      timezone: 'Mars/Olympus',
+    });
+    await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
+      data: {
+        reason: 'invalid_timezone',
+        recovery: { hint: expect.stringContaining('auto') },
+      },
+    });
+  });
+
+  it('still defaults an omitted timezone to auto (#38)', async () => {
+    mockGetFlood.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const input = openmeteoGetFloodTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: ['river_discharge'],
+    });
+    await openmeteoGetFloodTool.handler(input, ctx);
+    expect(mockGetFlood).toHaveBeenCalledWith(
+      47.6,
+      -122.3,
+      expect.objectContaining({ timezone: 'auto' }),
+      ctx,
+    );
+  });
+
+  it('passes a valid IANA zone through unchanged (#38)', async () => {
+    mockGetFlood.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const input = openmeteoGetFloodTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: ['river_discharge'],
+      timezone: 'America/Los_Angeles',
+    });
+    await openmeteoGetFloodTool.handler(input, ctx);
+    expect(mockGetFlood).toHaveBeenCalledWith(
+      47.6,
+      -122.3,
+      expect.objectContaining({ timezone: 'America/Los_Angeles' }),
+      ctx,
+    );
+  });
+
   it('frames the upstream unknown-variable rejection with the offending name and recovery hint', async () => {
     // Real upstream reason shape from the live flood endpoint (Swift type-init jargon).
     // Non-date reasons must route to invalid_variable, not date_out_of_range.

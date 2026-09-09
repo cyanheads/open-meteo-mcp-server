@@ -183,6 +183,88 @@ describe('openmeteoGetForecastTool', () => {
     });
   });
 
+  // --- timezone (#38) --------------------------------------------------------
+
+  it('rejects a blank timezone before the network call (#38)', async () => {
+    // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
+    // upstream's GMT default rather than the documented "auto".
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m'],
+      timezone: '',
+    });
+    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('timezone was blank'),
+      data: {
+        reason: 'invalid_timezone',
+        recovery: { hint: expect.stringContaining('IANA') },
+      },
+    });
+    expect(mockGetForecast).not.toHaveBeenCalled();
+  });
+
+  it('reclassifies the upstream Invalid timezone envelope away from invalid_variable (#38)', async () => {
+    // Live upstream shape for an unknown zone: HTTP 400, {"reason":"Invalid timezone","error":true}.
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason: 'Invalid timezone',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m'],
+      timezone: 'Mars/Olympus',
+    });
+    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
+      data: {
+        reason: 'invalid_timezone',
+        recovery: { hint: expect.stringContaining('auto') },
+      },
+    });
+  });
+
+  it('still defaults an omitted timezone to auto (#38)', async () => {
+    mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m'],
+    });
+    await openmeteoGetForecastTool.handler(input, ctx);
+    expect(mockGetForecast).toHaveBeenCalledWith(
+      47.6062,
+      -122.3321,
+      expect.objectContaining({ timezone: 'auto' }),
+      ctx,
+    );
+  });
+
+  it('passes a valid IANA zone through unchanged (#38)', async () => {
+    mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m'],
+      timezone: 'America/Los_Angeles',
+    });
+    await openmeteoGetForecastTool.handler(input, ctx);
+    expect(mockGetForecast).toHaveBeenCalledWith(
+      47.6062,
+      -122.3321,
+      expect.objectContaining({ timezone: 'America/Los_Angeles' }),
+      ctx,
+    );
+  });
+
   it('frames the upstream unknown-variable rejection: names the values, leads with guidance, demotes the raw reason', async () => {
     // A rejection naming more than one value: upstream read the list as one opaque
     // value. Without an allowlist the framing can only say at least one is invalid,

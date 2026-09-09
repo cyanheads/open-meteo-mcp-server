@@ -25,6 +25,11 @@ import {
   noCanvasNotice,
   PREVIEW_CHARS,
 } from '../spill-utils.js';
+import {
+  BLANK_TIMEZONE_MESSAGE,
+  frameInvalidTimezoneMessage,
+  isInvalidTimezoneReason,
+} from '../timezone-input.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
 import {
   describeCadenceMismatches,
@@ -90,6 +95,21 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       when: 'forecast_days or a non-zero past_days was combined with start_date or end_date',
       recovery:
         'Drop forecast_days and past_days to pull the archive range, or drop start_date and end_date to pull the forecast window — the endpoint accepts one window per call, never both.',
+      retryable: false,
+    },
+    {
+      reason: 'date_order_invalid',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'end_date is before start_date',
+      recovery: 'Ensure end_date is on or after start_date.',
+      retryable: false,
+    },
+    {
+      reason: 'invalid_timezone',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'timezone was blank, or upstream did not recognize the requested time zone',
+      recovery:
+        'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
       retryable: false,
     },
   ],
@@ -278,12 +298,36 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       );
     }
 
+    // Ordering, last of the three range checks: upstream answers a reversed pair with a
+    // bare `Bad Request` carrying no per-field detail, which the post-call branch frames
+    // as an unknown variable name. A single-day range (start_date == end_date) is valid.
+    if (input.start_date && input.end_date && input.end_date < input.start_date) {
+      throw ctx.fail(
+        'date_order_invalid',
+        `end_date (${input.end_date}) is before start_date (${input.start_date}).`,
+        ctx.recoveryFor('date_order_invalid'),
+      );
+    }
+
     // past_days: 0 is the schema default, not an opt-in — sending it alongside a date
     // range is exactly the combination upstream rejects, so the two windows are built
     // as disjoint parameter sets rather than merged.
     const window: MarineParams = hasStart
       ? { start_date: input.start_date, end_date: input.end_date }
       : { forecast_days: input.forecast_days, past_days: input.past_days };
+
+    /*
+     * A blank timezone is omitted by the URL builder, so it reaches upstream as an
+     * absent parameter and resolves to GMT rather than the documented "auto". Reject it
+     * before the call — no documented workflow asks a caller to send one.
+     */
+    if (input.timezone.trim() === '') {
+      throw ctx.fail(
+        'invalid_timezone',
+        BLANK_TIMEZONE_MESSAGE,
+        ctx.recoveryFor('invalid_timezone'),
+      );
+    }
 
     const service = getOpenMeteoService();
     const data = await service.getMarine(
@@ -299,6 +343,13 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     );
 
     if (data.error) {
+      if (isInvalidTimezoneReason(data.reason)) {
+        throw ctx.fail(
+          'invalid_timezone',
+          frameInvalidTimezoneMessage(data.reason),
+          ctx.recoveryFor('invalid_timezone'),
+        );
+      }
       throw ctx.fail(
         'invalid_variable',
         frameInvalidVariableMessage(data.reason),

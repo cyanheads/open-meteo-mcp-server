@@ -21,6 +21,11 @@ import {
   noCanvasNotice,
   PREVIEW_CHARS,
 } from '../spill-utils.js';
+import {
+  BLANK_TIMEZONE_MESSAGE,
+  frameInvalidTimezoneMessage,
+  isInvalidTimezoneReason,
+} from '../timezone-input.js';
 import { frameInvalidVariableMessage } from '../upstream-error.js';
 import {
   describeCadenceMismatches,
@@ -96,6 +101,14 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       when: 'A variable the ensemble API documents under one cadence was passed in the other cadence field — for example precipitation_sum in hourly_variables, or precipitation in daily_variables',
       recovery:
         'Move each variable the message names to the field the message names, or drop it — hourly_variables and daily_variables take separate ensemble variable sets, and the message lists the same-cadence alternatives when the endpoint publishes any.',
+      retryable: false,
+    },
+    {
+      reason: 'invalid_timezone',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'timezone was blank, or upstream did not recognize the requested time zone',
+      recovery:
+        'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
       retryable: false,
     },
   ],
@@ -274,6 +287,19 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       );
     }
 
+    /*
+     * A blank timezone is omitted by the URL builder, so it reaches upstream as an
+     * absent parameter and resolves to GMT rather than the documented "auto". Reject it
+     * before the call — no documented workflow asks a caller to send one.
+     */
+    if (input.timezone.trim() === '') {
+      throw ctx.fail(
+        'invalid_timezone',
+        BLANK_TIMEZONE_MESSAGE,
+        ctx.recoveryFor('invalid_timezone'),
+      );
+    }
+
     const service = getOpenMeteoService();
     const data = await service.getEnsemble(
       input.latitude,
@@ -293,6 +319,13 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     );
 
     if (data.error) {
+      if (isInvalidTimezoneReason(data.reason)) {
+        throw ctx.fail(
+          'invalid_timezone',
+          frameInvalidTimezoneMessage(data.reason),
+          ctx.recoveryFor('invalid_timezone'),
+        );
+      }
       throw ctx.fail(
         'invalid_variable',
         frameInvalidVariableMessage(data.reason, 'variable or model'),

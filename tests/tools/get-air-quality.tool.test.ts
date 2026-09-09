@@ -105,6 +105,88 @@ describe('openmeteoGetAirQualityTool', () => {
     });
   });
 
+  // --- timezone (#38) --------------------------------------------------------
+
+  it('rejects a blank timezone before the network call (#38)', async () => {
+    // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
+    // upstream's GMT default rather than the documented "auto".
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const input = openmeteoGetAirQualityTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['pm2_5'],
+      timezone: '',
+    });
+    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('timezone was blank'),
+      data: {
+        reason: 'invalid_timezone',
+        recovery: { hint: expect.stringContaining('IANA') },
+      },
+    });
+    expect(mockGetAirQuality).not.toHaveBeenCalled();
+  });
+
+  it('reclassifies the upstream Invalid timezone envelope away from invalid_variable (#38)', async () => {
+    // Live upstream shape for an unknown zone: HTTP 400, {"reason":"Invalid timezone","error":true}.
+    mockGetAirQuality.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason: 'Invalid timezone',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const input = openmeteoGetAirQualityTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['pm2_5'],
+      timezone: 'Mars/Olympus',
+    });
+    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
+      data: {
+        reason: 'invalid_timezone',
+        recovery: { hint: expect.stringContaining('auto') },
+      },
+    });
+  });
+
+  it('still defaults an omitted timezone to auto (#38)', async () => {
+    mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const input = openmeteoGetAirQualityTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['pm2_5'],
+    });
+    await openmeteoGetAirQualityTool.handler(input, ctx);
+    expect(mockGetAirQuality).toHaveBeenCalledWith(
+      47.6062,
+      -122.3321,
+      expect.objectContaining({ timezone: 'auto' }),
+      ctx,
+    );
+  });
+
+  it('passes a valid IANA zone through unchanged (#38)', async () => {
+    mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const input = openmeteoGetAirQualityTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['pm2_5'],
+      timezone: 'America/Los_Angeles',
+    });
+    await openmeteoGetAirQualityTool.handler(input, ctx);
+    expect(mockGetAirQuality).toHaveBeenCalledWith(
+      47.6062,
+      -122.3321,
+      expect.objectContaining({ timezone: 'America/Los_Angeles' }),
+      ctx,
+    );
+  });
+
   it('frames the upstream unknown-variable rejection with the offending name and recovery hint', async () => {
     // Real upstream reason shape from the live air-quality endpoint
     mockGetAirQuality.mockResolvedValue({
@@ -282,6 +364,68 @@ describe('openmeteoGetAirQualityTool', () => {
       },
     });
     expect(mockGetAirQuality).not.toHaveBeenCalled();
+  });
+
+  it('throws date_order_invalid for a reversed archive range (#39)', async () => {
+    // Upstream answers a reversed range with a bare `{"error":true,"reason":"Bad Request"}`,
+    // which the post-call branch frames as an unknown variable name — advice that fixes
+    // nothing. The three sibling tools already reject the pair locally.
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const input = openmeteoGetAirQualityTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['pm2_5'],
+      start_date: '2024-07-02',
+      end_date: '2024-07-01',
+    });
+    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('end_date (2024-07-01) is before start_date (2024-07-02)'),
+      data: {
+        reason: 'date_order_invalid',
+        recovery: { hint: 'Ensure end_date is on or after start_date.' },
+      },
+    });
+    expect(mockGetAirQuality).not.toHaveBeenCalled();
+  });
+
+  it('accepts a single-day range where start_date equals end_date (#39)', async () => {
+    // Confirmed live to still resolve upstream — the order check must not reject it.
+    mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const input = openmeteoGetAirQualityTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['pm2_5'],
+      start_date: '2024-07-01',
+      end_date: '2024-07-01',
+    });
+    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).resolves.toMatchObject({
+      truncated: false,
+    });
+    expect(mockGetAirQuality).toHaveBeenCalledWith(
+      47.6062,
+      -122.3321,
+      expect.objectContaining({ start_date: '2024-07-01', end_date: '2024-07-01' }),
+      ctx,
+    );
+  });
+
+  it('reports the window conflict, not the order, when a reversed range rides a forecast window (#39)', async () => {
+    // Validation order is unchanged: forecast_window_conflict still outranks the pair
+    // checks, so a caller who supplied both windows hears about the choice they made.
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const input = openmeteoGetAirQualityTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['pm2_5'],
+      forecast_days: 5,
+      start_date: '2024-07-02',
+      end_date: '2024-07-01',
+    });
+    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'forecast_window_conflict' },
+    });
   });
 
   it('past_days at its 0 default does not conflict with a date range', async () => {

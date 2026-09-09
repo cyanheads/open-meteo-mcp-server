@@ -354,6 +354,92 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(getEnrichment(ctx).notice).toBeUndefined();
   });
 
+  // --- timezone (#38) --------------------------------------------------------
+
+  it('rejects a blank timezone before the network call (#38)', async () => {
+    // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
+    // upstream's GMT default rather than the documented "auto".
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'ecmwf_ifs025',
+      timezone: '',
+    });
+    await expect(openmeteoGetEnsembleTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('timezone was blank'),
+      data: {
+        reason: 'invalid_timezone',
+        recovery: { hint: expect.stringContaining('IANA') },
+      },
+    });
+    expect(mockGetEnsemble).not.toHaveBeenCalled();
+  });
+
+  it('reclassifies the upstream Invalid timezone envelope away from invalid_variable (#38)', async () => {
+    // Live upstream shape for an unknown zone: HTTP 400, {"reason":"Invalid timezone","error":true}.
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason: 'Invalid timezone',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'ecmwf_ifs025',
+      timezone: 'Mars/Olympus',
+    });
+    await expect(openmeteoGetEnsembleTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
+      data: {
+        reason: 'invalid_timezone',
+        recovery: { hint: expect.stringContaining('auto') },
+      },
+    });
+  });
+
+  it('still defaults an omitted timezone to auto (#38)', async () => {
+    mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'ecmwf_ifs025',
+    });
+    await openmeteoGetEnsembleTool.handler(input, ctx);
+    expect(mockGetEnsemble).toHaveBeenCalledWith(
+      47.6,
+      -122.3,
+      expect.objectContaining({ timezone: 'auto' }),
+      ctx,
+    );
+  });
+
+  it('passes a valid IANA zone through unchanged (#38)', async () => {
+    mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'ecmwf_ifs025',
+      timezone: 'America/Los_Angeles',
+    });
+    await openmeteoGetEnsembleTool.handler(input, ctx);
+    expect(mockGetEnsemble).toHaveBeenCalledWith(
+      47.6,
+      -122.3,
+      expect.objectContaining({ timezone: 'America/Los_Angeles' }),
+      ctx,
+    );
+  });
+
   it('frames the upstream unknown-variable rejection with the offending name and recovery hint', async () => {
     // Real upstream reason shape from the live ensemble endpoint
     mockGetEnsemble.mockResolvedValue({
