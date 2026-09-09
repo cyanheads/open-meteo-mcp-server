@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-08-22 13:54:26
+Generated on: 2026-09-09 22:39:30
 
 ```text
 open-meteo-mcp-server/
@@ -116,6 +116,8 @@ open-meteo-mcp-server/
 │   │   └── SKILL.md
 │   ├── release-and-publish/
 │   │   └── SKILL.md
+│   ├── release-pr-review/
+│   │   └── SKILL.md
 │   ├── report-issue-framework/
 │   │   └── SKILL.md
 │   ├── report-issue-local/
@@ -155,6 +157,7 @@ open-meteo-mcp-server/
 │   │       ├── model-catalog.ts
 │   │       ├── reshape-utils.ts
 │   │       ├── spill-utils.ts
+│   │       ├── timezone-input.ts
 │   │       ├── upstream-error.ts
 │   │       └── variable-cadence.ts
 │   ├── services/
