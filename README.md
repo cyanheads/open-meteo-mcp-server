@@ -315,7 +315,7 @@ All configuration is validated at startup via Zod schemas. No API key is require
 | `MCP_HTTP_ENDPOINT_PATH` | HTTP endpoint path | `/mcp` |
 | `MCP_HTTP_MAX_BODY_BYTES` | Maximum HTTP request body bytes; `0` disables the limit. | `1048576` |
 | `MCP_PUBLIC_URL` | Public origin for TLS-terminating reverse-proxy deployments | — |
-| `MCP_SESSION_MODE` | HTTP session mode: `stateful` or `stateless`. | `stateful` |
+| `MCP_SESSION_MODE` | HTTP session mode: `auto`, `stateful`, or `stateless`. `auto` resolves to `stateful`; this server holds no per-session state and ships `stateless` as its explicit default. | `stateless` |
 | `MCP_HTTP_RESUMABILITY` | Replay missed SSE events for stateful HTTP sessions. No effect on stateless mode or protocol revision 2026-07-28. | `true` |
 | `MCP_HTTP_RESUMABILITY_MAX_EVENTS` | Events retained per stateful session for replay; oldest evicted first. | `512` |
 | `MCP_HTTP_RESUMABILITY_TTL_MS` | How long retained events remain replayable (ms). | `300000` |
