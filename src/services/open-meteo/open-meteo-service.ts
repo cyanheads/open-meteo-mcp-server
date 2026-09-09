@@ -60,10 +60,75 @@ const NAN_COORDINATE_BODY = /^\s*\{\s*"latitude"\s*:\s*nan\b/;
  */
 const NO_DATA_REASON = /^no data is available for this location/i;
 
-/** What a caller does about either shape — one wording, so both read alike. */
-const COVERAGE_GAP_RECOVERY =
+/**
+ * What a caller does about either shape when the calling tool exposes `models` —
+ * `openmeteo_get_ensemble` and `openmeteo_get_climate`, the two for which choosing a
+ * different model is a move the caller can actually make.
+ */
+const COVERAGE_GAP_MODEL_RECOVERY =
   'Switch to a model whose domain includes this coordinate (any global model does), or omit ' +
   'the model to use the default blend. Retrying returns the same response.';
+
+/**
+ * Identifies the call for a coverage-gap rejection. Both shape checks fire inside
+ * {@link openMeteoFetch}, which sees only the built URL, so the two facts the message
+ * needs travel with the call: which endpoint asked, and the coordinate it asked about.
+ */
+interface RequestOrigin {
+  /**
+   * The coordinate as the caller supplied it, before upstream snaps it to a grid point.
+   * Absent on `geocode` and `elevation`, neither of which carries a single pair —
+   * neither can produce either coverage-gap shape (their responses have no top-level
+   * `latitude`, and neither serves a gridded dataset), so they fall through to the
+   * coordinate-free wording only in principle.
+   */
+  coordinate?: { latitude: number; longitude: number } | undefined;
+  /** Per-endpoint label — the retry `operation`, and the dataset the wording names. */
+  operation: OpenMeteoOperation;
+}
+
+type OpenMeteoOperation =
+  | 'geocode'
+  | 'forecast'
+  | 'historical'
+  | 'marine'
+  | 'air-quality'
+  | 'ensemble'
+  | 'flood'
+  | 'climate'
+  | 'elevation';
+
+const MODEL_CAPABLE_OPERATIONS: ReadonlySet<OpenMeteoOperation> = new Set(['ensemble', 'climate']);
+
+/**
+ * The coverage-gap rejection for either shape. The recovery half splits on whether the
+ * calling endpoint exposes `models`: on the two that do, "switch models" is actionable;
+ * on every other endpoint it names a parameter the tool has no input for, so the honest
+ * statement is that the dataset's grid does not reach the coordinate and only a
+ * different coordinate will. Non-retryable in both branches — the same request returns
+ * the same body.
+ */
+function coverageGapError(origin: RequestOrigin, url: string, fromNanBody: boolean): McpError {
+  const modelCapable = MODEL_CAPABLE_OPERATIONS.has(origin.operation);
+  const at = origin.coordinate
+    ? ` (${origin.coordinate.latitude}, ${origin.coordinate.longitude})`
+    : '';
+  const shape = fromNanBody
+    ? ' — the response carried nan coordinates and no data blocks, which is how ' +
+      (modelCapable
+        ? 'a regional model reports a coordinate outside the area it covers'
+        : 'the endpoint reports a coordinate outside the grid it covers')
+    : '';
+  const recovery = modelCapable
+    ? COVERAGE_GAP_MODEL_RECOVERY
+    : `The ${origin.operation} dataset's grid does not cover this coordinate — request a ` +
+      'point inside its coverage. Retrying returns the same response.';
+
+  return validationError(
+    `Open-Meteo returned no data for this location${at}${shape}. ${recovery}`,
+    { url },
+  );
+}
 
 function isRetryable(error: unknown): boolean {
   if (error instanceof TypeError) return true;
@@ -77,7 +142,7 @@ function isRetryable(error: unknown): boolean {
   return false;
 }
 
-async function openMeteoFetch<T>(url: string, ctx: Context): Promise<T> {
+async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigin): Promise<T> {
   const signal = AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), ctx.signal]);
   let response: Response;
 
@@ -108,12 +173,7 @@ async function openMeteoFetch<T>(url: string, ctx: Context): Promise<T> {
   // Out-of-domain regional model — an input error wearing an unparseable body.
   // See NAN_COORDINATE_BODY. Non-retryable: the same request returns the same body.
   if (NAN_COORDINATE_BODY.test(text)) {
-    throw validationError(
-      'Open-Meteo returned no data for this location — the response carried nan coordinates and no ' +
-        'data blocks, which is how a regional model reports a coordinate outside the area it covers. ' +
-        COVERAGE_GAP_RECOVERY,
-      { url },
-    );
+    throw coverageGapError(origin, url, true);
   }
 
   let body: T;
@@ -139,10 +199,7 @@ async function openMeteoFetch<T>(url: string, ctx: Context): Promise<T> {
 
   // See NO_DATA_REASON — the envelope half of the out-of-domain regional-model shape.
   if (asRecord.error === true && NO_DATA_REASON.test(String(asRecord.reason ?? ''))) {
-    throw validationError(
-      `Open-Meteo returned no data for this location. ${COVERAGE_GAP_RECOVERY}`,
-      { url },
-    );
+    throw coverageGapError(origin, url, false);
   }
 
   if (!response.ok) {
@@ -162,20 +219,20 @@ async function openMeteoFetch<T>(url: string, ctx: Context): Promise<T> {
   return body;
 }
 
-function withOpenMeteoRetry<T>(url: string, ctx: Context, operation: string): Promise<T> {
+function withOpenMeteoRetry<T>(url: string, ctx: Context, origin: RequestOrigin): Promise<T> {
   let attempts = 0;
   return withRetry(
     async () => {
       attempts += 1;
       if (attempts > 1) ctx.log.info('Retrying Open-Meteo request', { url, attempt: attempts - 1 });
-      return await openMeteoFetch<T>(url, ctx);
+      return await openMeteoFetch<T>(url, ctx, origin);
     },
     {
       maxRetries: MAX_RETRIES,
       baseDelayMs: RETRY_DELAY_MS,
       maxDelayMs: RETRY_DELAY_MS * Math.max(MAX_RETRIES, 1),
       jitter: 0,
-      operation,
+      operation: origin.operation,
       context: ctx,
       signal: ctx.signal,
       isTransient: isRetryable,
@@ -297,7 +354,7 @@ export class OpenMeteoService {
       format: 'json',
     });
     ctx.log.info('Geocoding place', { name, count, language, country });
-    return withOpenMeteoRetry<GeocodingResponse>(url, ctx, 'geocode');
+    return withOpenMeteoRetry<GeocodingResponse>(url, ctx, { operation: 'geocode' });
   }
 
   /** Forecast endpoint — hourly/daily for up to 16 days forward, 92 days back. */
@@ -310,7 +367,10 @@ export class OpenMeteoService {
     const { apiBaseUrl } = getServerConfig();
     const url = buildWeatherUrl(`${apiBaseUrl}/v1/forecast`, lat, lon, params);
     ctx.log.info('Fetching forecast', { lat, lon, forecast_days: params.forecast_days });
-    return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, 'forecast');
+    return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, {
+      operation: 'forecast',
+      coordinate: { latitude: lat, longitude: lon },
+    });
   }
 
   /** ERA5 historical archive endpoint — date range required. */
@@ -328,7 +388,10 @@ export class OpenMeteoService {
       start: params.start_date,
       end: params.end_date,
     });
-    return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, 'historical');
+    return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, {
+      operation: 'historical',
+      coordinate: { latitude: lat, longitude: lon },
+    });
   }
 
   /** Marine endpoint — wave, swell, ocean variables; forecast window or archive range. */
@@ -348,7 +411,10 @@ export class OpenMeteoService {
       start_date: params.start_date,
       end_date: params.end_date,
     });
-    return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, 'marine');
+    return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, {
+      operation: 'marine',
+      coordinate: { latitude: lat, longitude: lon },
+    });
   }
 
   /** CAMS Air Quality endpoint — forecast window or archive range. */
@@ -368,7 +434,10 @@ export class OpenMeteoService {
       start_date: params.start_date,
       end_date: params.end_date,
     });
-    return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, 'air-quality');
+    return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, {
+      operation: 'air-quality',
+      coordinate: { latitude: lat, longitude: lon },
+    });
   }
 
   /** Ensemble forecast endpoint — per-member hourly/daily time series up to 16 days. */
@@ -399,7 +468,10 @@ export class OpenMeteoService {
       models: params.models,
       forecast_days: params.forecast_days,
     });
-    return withOpenMeteoRetry<EnsembleEnvelope>(url, ctx, 'ensemble');
+    return withOpenMeteoRetry<EnsembleEnvelope>(url, ctx, {
+      operation: 'ensemble',
+      coordinate: { latitude: lat, longitude: lon },
+    });
   }
 
   /** GloFAS Flood endpoint — river discharge forecasts and reanalysis history. */
@@ -422,7 +494,10 @@ export class OpenMeteoService {
       start_date: params.start_date,
       end_date: params.end_date,
     });
-    return withOpenMeteoRetry<FloodEnvelope>(url, ctx, 'flood');
+    return withOpenMeteoRetry<FloodEnvelope>(url, ctx, {
+      operation: 'flood',
+      coordinate: { latitude: lat, longitude: lon },
+    });
   }
 
   /**
@@ -458,7 +533,10 @@ export class OpenMeteoService {
       end: params.end_date,
       models: params.models,
     });
-    return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, 'climate');
+    return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, {
+      operation: 'climate',
+      coordinate: { latitude: lat, longitude: lon },
+    });
   }
 
   /** Elevation endpoint — up to 100 coordinate pairs. */
@@ -473,7 +551,7 @@ export class OpenMeteoService {
       longitude: longitudes.map(String),
     });
     ctx.log.info('Fetching elevation', { count: latitudes.length });
-    return withOpenMeteoRetry<ElevationResponse>(url, ctx, 'elevation');
+    return withOpenMeteoRetry<ElevationResponse>(url, ctx, { operation: 'elevation' });
   }
 }
 

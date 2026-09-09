@@ -70,6 +70,8 @@ describe('OpenMeteoService upstream classification', () => {
     expect(error.message).toContain('no data for this location');
     expect(error.message).toContain('global model');
     expect(error.message).not.toContain('unavailable after');
+    // The refused coordinate rides along, so the caller sees which input was rejected (#45).
+    expect(error.message).toContain('47.6, -122.3');
     // The decisive part: one attempt, not three.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -140,6 +142,180 @@ describe('OpenMeteoService upstream classification', () => {
     expect(error.message).toContain('no data for this location');
     expect(error.message).toContain('global model');
     expect(error.message).not.toContain('variable');
+    expect(error.message).toContain('47.6, -122.3');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the grid rather than a models parameter marine does not expose (#45)', async () => {
+    /*
+     * Live body from the marine endpoint at the South Pole — the wave grid has no cell
+     * there, and the endpoint reports it through the same envelope the meteoswiss_*
+     * ensemble pair uses. openmeteo_get_marine has no models input, so the #33 wording
+     * asked the caller to change a parameter that does not exist on the tool.
+     */
+    respondWith('{"error":true,"reason":"No data is available for this location"}', 400);
+    const ctx = createMockContext();
+
+    const error = await getOpenMeteoService()
+      .getMarine(-90, 0, { hourly: ['wave_height'] }, ctx)
+      .catch((e: Error) => e);
+
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+    if (!(error instanceof Error)) throw new Error('Expected getMarine to reject');
+    expect(error.message).toContain('no data for this location');
+    // The refused coordinate, so the caller sees which input was rejected.
+    expect(error.message).toContain('-90, 0');
+    expect(error.message).toContain("marine dataset's grid does not cover this coordinate");
+    expect(error.message).not.toMatch(/model/i);
+    expect(error.message).not.toMatch(/switch/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the grid on the flood endpoint, which reaches the gap through the nan body (#45)', async () => {
+    // GloFAS has no grid coverage at either pole and answers HTTP 200 with the bare-nan
+    // shape rather than the null-valued column it returns for a river-free point.
+    respondWith(
+      '{"latitude":nan,"longitude":nan,"generationtime_ms":0.02,"utc_offset_seconds":0,"timezone":"GMT","timezone_abbreviation":"GMT"}',
+    );
+    const ctx = createMockContext();
+
+    const error = await getOpenMeteoService()
+      .getFlood(-90, 0, { daily: ['river_discharge'], forecast_days: 7 }, ctx)
+      .catch((e: Error) => e);
+
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+    if (!(error instanceof Error)) throw new Error('Expected getFlood to reject');
+    expect(error.message).toContain('-90, 0');
+    expect(error.message).toContain("flood dataset's grid does not cover this coordinate");
+    expect(error.message).not.toMatch(/model/i);
+    expect(error.message).not.toMatch(/switch/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      'forecast',
+      () =>
+        getOpenMeteoService().getForecast(
+          90,
+          0,
+          { hourly: ['temperature_2m'] },
+          createMockContext(),
+        ),
+    ],
+    [
+      'historical',
+      () =>
+        getOpenMeteoService().getHistorical(
+          90,
+          0,
+          { start_date: '2024-07-01', end_date: '2024-07-02', hourly: ['temperature_2m'] },
+          createMockContext(),
+        ),
+    ],
+    [
+      'air-quality',
+      () => getOpenMeteoService().getAirQuality(90, 0, { hourly: ['pm2_5'] }, createMockContext()),
+    ],
+  ])(
+    'gives the %s endpoint the same non-model wording by construction (#45)',
+    async (operation, call) => {
+      // No live case triggers the gap on these three today — their default blend has
+      // global coverage — so the guarantee is structural: an endpoint with no models
+      // input never draws the models wording.
+      respondWith('{"error":true,"reason":"No data is available for this location"}', 400);
+
+      const error = await call().catch((e: Error) => e);
+
+      if (!(error instanceof Error)) throw new Error(`Expected ${operation} to reject`);
+      expect(error.message).toContain('90, 0');
+      expect(error.message).toContain(`${operation} dataset's grid does not cover this coordinate`);
+      expect(error.message).not.toMatch(/model/i);
+    },
+  );
+
+  it.each([
+    [
+      'climate',
+      () =>
+        getOpenMeteoService().getClimate(
+          -90,
+          0,
+          {
+            start_date: '2050-01-01',
+            end_date: '2050-01-05',
+            daily: ['temperature_2m_max'],
+            models: ['MRI_AGCM3_2_S'],
+          },
+          createMockContext(),
+        ),
+    ],
+    [
+      'ensemble',
+      () =>
+        getOpenMeteoService().getEnsemble(
+          -90,
+          0,
+          { hourly: ['temperature_2m'], models: 'icon_eu_eps' },
+          createMockContext(),
+        ),
+    ],
+  ])(
+    'keeps the switch-models wording on %s, the only tools that expose it (#45)',
+    async (_op, call) => {
+      respondWith('{"error":true,"reason":"No data is available for this location"}', 400);
+
+      const error = await call().catch((e: Error) => e);
+
+      if (!(error instanceof Error)) throw new Error('Expected the call to reject');
+      expect(error.message).toContain('no data for this location');
+      expect(error.message).toContain('-90, 0');
+      expect(error.message).toContain('global model');
+      expect(error.message).toContain('omit the model');
+      expect(error.message).not.toContain('grid does not cover');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    [
+      'marine',
+      () =>
+        getOpenMeteoService().getMarine(-90, 0, { hourly: ['wave_height'] }, createMockContext()),
+    ],
+    [
+      'flood',
+      () =>
+        getOpenMeteoService().getFlood(-90, 0, { daily: ['river_discharge'] }, createMockContext()),
+    ],
+  ])('still retries a genuine 5xx to exhaustion on %s (#45)', async (_op, call) => {
+    // The non-model branch changes wording only — the retry classification #33
+    // established is untouched on the endpoints it now covers.
+    respondWith('{"error":true,"reason":"upstream down"}', 503);
+
+    const error = await call().catch((e: Error) => e);
+
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('leaves an unrelated 4xx envelope on a non-model endpoint for the handler (#45)', async () => {
+    // The coverage-gap match stays narrow on every endpoint: an unknown-variable
+    // rejection is still returned as a body for the tool's own errors[] contract.
+    respondWith(
+      '{"error":true,"reason":"Data corrupted at path \'\'. Cannot initialize ForecastVariable from invalid String value bogus_wave."}',
+      400,
+    );
+    const ctx = createMockContext();
+
+    const body = await getOpenMeteoService().getMarine(
+      47.8,
+      -122.5,
+      { hourly: ['bogus_wave'] },
+      ctx,
+    );
+
+    expect(body).toMatchObject({ error: true });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
