@@ -1,9 +1,10 @@
 /**
  * @fileoverview Tool: openmeteo_get_flood — GloFAS river discharge forecast and reanalysis.
  * Returns daily ensemble river discharge (m³/s) for up to ~7 months ahead, with reanalysis
- * history back to 1984. Coordinate-based — snaps to nearest river automatically. Wide
- * reanalysis ranges spill to DataCanvas when canvas is enabled, and return a bounded
- * preview with truncated: true when it is not.
+ * history back to 1984. Coordinate-based — the API selects the largest modeled river within
+ * 5 km of the point, which is not always the closest one. Wide reanalysis ranges spill to
+ * DataCanvas when canvas is enabled, and return a bounded preview with truncated: true when
+ * it is not.
  * @module mcp-server/tools/definitions/get-flood
  */
 
@@ -46,9 +47,13 @@ const PAYLOAD_NARROWING = 'a shorter start_date–end_date range, or fewer daily
 export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
   description:
     'GloFAS (Global Flood Awareness System) river discharge forecast and historical reanalysis. ' +
-    'Returns daily ensemble river discharge (m³/s) for the river nearest to the given coordinates ' +
-    '— no river ID needed, the API snaps to the nearest stream. Forecast horizon up to 210 days ' +
-    'ahead; reanalysis history back to 1984-01-01. One mode per call: forecast_days for the ' +
+    'Returns daily ensemble river discharge (m³/s) for the largest modeled river within 5 km of ' +
+    'the given coordinates — no river ID needed. That river is not always the closest one: at 5 km ' +
+    'resolution a point near a confluence or a pair of parallel channels can resolve to an ' +
+    'unintended reach. When the returned discharge looks unrepresentative for the intended river, ' +
+    'Open-Meteo suggests varying the coordinate by about 0.1° and comparing the values. ' +
+    'Forecast horizon up to 210 days ahead; reanalysis history back to 1984-01-01. ' +
+    'One mode per call: forecast_days for the ' +
     'future outlook, or start_date and end_date together for reanalysis history. The two modes ' +
     'are mutually exclusive, and a date range needs both ends — a lone start_date or end_date is ' +
     'rejected. Available daily variables: "river_discharge" (ensemble mean), "river_discharge_mean", ' +
@@ -131,9 +136,15 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       .min(-90)
       .max(90)
       .describe(
-        'Latitude in decimal degrees. The API snaps to the nearest river — no river ID required. Use openmeteo_search_locations to resolve a place name.',
+        'Latitude in decimal degrees. Discharge is returned for the largest modeled river within 5 km of this point — no river ID required, and not necessarily the closest river. Vary the coordinate by about 0.1° and compare when the result looks unrepresentative. Use openmeteo_search_locations to resolve a place name.',
       ),
-    longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
+    longitude: z
+      .number()
+      .min(-180)
+      .max(180)
+      .describe(
+        'Longitude in decimal degrees. With latitude it selects the largest modeled river within 5 km, which is not necessarily the closest one.',
+      ),
     daily_variables: z
       .array(z.string())
       .max(20)
@@ -174,8 +185,8 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
   }),
 
   output: z.object({
-    latitude: z.number().describe('Snapped latitude (nearest river grid point)'),
-    longitude: z.number().describe('Snapped longitude'),
+    latitude: z.number().describe('Snapped latitude — grid point of the selected river'),
+    longitude: z.number().describe('Snapped longitude — grid point of the selected river'),
     timezone: z.string().describe('Resolved IANA timezone'),
     record_count: z
       .number()
@@ -349,7 +360,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       units: [dailyUnits],
       omittedUnits,
       rowBudget,
-    } = inlineBudget(rawDailyUnits);
+    } = inlineBudget(undefined, rawDailyUnits);
 
     // One notice, composed — ctx.enrich.notice is last-write-wins on a single key.
     const notice = composeNotice(ctx);
@@ -370,7 +381,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
 
     /*
      * Temporal coverage, the case the check above cannot see: a reanalysis range
-     * opening before the nearest river's record begins comes back null with the real
+     * opening before the selected river's record begins comes back null with the real
      * m³/s unit until it does, which the null column alone cannot distinguish from a
      * coordinate outside GloFAS coverage entirely.
      */

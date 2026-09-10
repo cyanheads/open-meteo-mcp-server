@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/open-meteo-mcp-server</h1>
-  <p><b>Geocode places, fetch global weather forecasts, ERA5 historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP.</b>
+  <p><b>Geocode places, fetch global weather forecasts, historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP.</b>
   <div>11 Tools</div>
   </p>
 </div>
@@ -34,13 +34,13 @@ Eleven tools covering geocoding, weather forecasts, historical climate, probabil
 | Tool | Description |
 |:---|:---|
 | `openmeteo_search_locations` | Resolve a place name to ranked coordinate matches with country, region, elevation, timezone, and population |
-| `openmeteo_get_forecast` | Weather forecast for coordinates: hourly and/or daily variables for up to 16 days, with optional recent past data; wide windows spill to DataCanvas |
-| `openmeteo_get_historical` | Historical weather from the ERA5 reanalysis archive (1940–present); large ranges spill to DataCanvas |
+| `openmeteo_get_forecast` | Weather forecast for coordinates: current conditions and/or hourly and daily variables for up to 16 days, with optional recent past data; wide windows spill to DataCanvas |
+| `openmeteo_get_historical` | Historical weather from the Open-Meteo reanalysis archive (1940–present); Best Match by default, or pin a `models` selection; large ranges spill to DataCanvas |
 | `openmeteo_get_marine` | Marine wave and ocean conditions for coastal or ocean coordinates: wave height, period, direction, swell, and sea-surface temperature; up to 8 forecast days, `past_days`, or a `start_date`/`end_date` archive range; large windows spill to DataCanvas |
-| `openmeteo_get_air_quality` | Modeled CAMS air quality: PM2.5, PM10, NO2, O3, CO, dust, pollen, and European/US AQI indices; up to 7 forecast days, `past_days`, or a `start_date`/`end_date` archive range; large windows spill to DataCanvas |
+| `openmeteo_get_air_quality` | Modeled CAMS air quality: PM2.5, PM10, NO2, O3, CO, dust, pollen, and European/US AQI indices; current conditions, up to 7 forecast days, `past_days`, or a `start_date`/`end_date` archive range; large windows spill to DataCanvas |
 | `openmeteo_get_elevation` | Terrain elevation from Copernicus DEM (~90m resolution) for up to 100 coordinate pairs per call |
 | `openmeteo_get_ensemble` | Probabilistic ensemble forecast: per-member hourly/daily time series (up to 51 members, 16 days) for exceedance and uncertainty analysis |
-| `openmeteo_get_flood` | GloFAS river discharge forecast (up to 210 days) or reanalysis (1984–present); coordinate-based, snaps to nearest river; large ranges spill to DataCanvas |
+| `openmeteo_get_flood` | GloFAS river discharge forecast (up to 210 days) or reanalysis (1984–present); coordinate-based, resolving to the largest river within 5 km; large ranges spill to DataCanvas |
 | `openmeteo_get_climate` | Bias-corrected daily CMIP6 climate projections (1950–2050) across up to 7 models; large ranges spill to DataCanvas |
 | `openmeteo_dataframe_describe` | List tables and columns on a DataCanvas staged by `openmeteo_get_forecast`, `openmeteo_get_historical`, `openmeteo_get_marine`, `openmeteo_get_air_quality`, `openmeteo_get_ensemble`, `openmeteo_get_flood`, or `openmeteo_get_climate` |
 | `openmeteo_dataframe_query` | Run a read-only SQL SELECT against tables staged on a DataCanvas |
@@ -54,6 +54,7 @@ Resolve a free-text place name to ranked coordinate matches. Required first step
 - Disambiguate same-named places (e.g., "Springfield") with the optional `country` filter (ISO 3166-1 alpha-2, e.g. `US`) or by raising `count` (default 5, up to 10) and reading the `admin1`/`country` fields on each result — those are output fields for choosing among matches, not search inputs
 - Pass the timezone from an `openmeteo_search_locations` result directly to weather tools as the `timezone` parameter
 - Fails with a `no_results` error (not an empty array) when nothing matches — retry the bare place name without qualifiers, or for a physical feature/landmark search the nearest populated place instead
+- When the top match has null or sub-100,000 population, the response carries an advisory `notice` naming that place, its country, and its feature code. Historic and colonial exonyms ("Bangalore", "Calcutta", "Peking") resolve to unrelated small features rather than the modern city, and the index returns no error for it — the results themselves are returned unchanged, so verify the coordinates or retry with the place's current official name
 
 ---
 
@@ -62,10 +63,11 @@ Resolve a free-text place name to ranked coordinate matches. Required first step
 Weather forecast for a coordinate pair with hourly and/or daily variable selection.
 
 - Up to 16 forecast days ahead (`forecast_days 1–16`, default 7)
-- `past_days` (0–92) covers recent history via the forecast model — use instead of `openmeteo_get_historical` for dates within the last ~5 days to avoid ERA5 lag
+- `current_variables` returns conditions at this instant from Open-Meteo's 15-minute current-conditions data — a `current` object (the variables plus `time` and `interval`, the update cadence in seconds) and a matching `current_units` map. It satisfies the variable requirement on its own, so a "what's it doing right now?" call needs no hourly series; both keys are absent when it isn't requested
+- `past_days` (0–92) covers recent history via the forecast model — use instead of `openmeteo_get_historical` for dates within the last ~5 days, where the archive's ERA5 components lag
 - Common hourly variables: `temperature_2m`, `precipitation`, `wind_speed_10m`, `relative_humidity_2m`, `cloud_cover`, `uv_index`, `apparent_temperature`, `precipitation_probability`, `weather_code`, `surface_pressure`, `visibility`, `wind_direction_10m`, `wind_gusts_10m`, `dew_point_2m`
 - Common daily variables: `temperature_2m_max`, `temperature_2m_min`, `precipitation_sum`, `wind_speed_10m_max`, `sunrise`, `sunset`, `uv_index_max`, `precipitation_hours`, `weather_code`
-- At least one of `hourly_variables` or `daily_variables` is required
+- At least one of `current_variables`, `hourly_variables`, or `daily_variables` is required
 - Hourly and daily are separate variable sets. A variable Open-Meteo documents under the other cadence is rejected before the request, by name, with the field it belongs in and the same-cadence alternatives (`cloud_cover` in `daily_variables` → `cloud_cover_max`/`_mean`/`_min`). Names in neither set are passed upstream unchanged
 - Configurable temperature unit (Celsius/Fahrenheit), wind speed unit (km/h, mph, m/s, knots), and precipitation unit (mm/inch)
 - Reshapes the API's columnar response into per-timestamp records with a parallel `hourly_units` / `daily_units` map
@@ -75,9 +77,11 @@ Weather forecast for a coordinate pair with hourly and/or daily variable selecti
 
 ### `openmeteo_get_historical`
 
-Historical weather from the ERA5 reanalysis archive, covering 1940 to approximately 5 days ago.
+Historical weather from the Open-Meteo reanalysis archive, covering 1940 to the present.
 
-- Requires `start_date` and `end_date` (YYYY-MM-DD); ERA5 has a variable ~1–5 day lag
+- Requires `start_date` and `end_date` (YYYY-MM-DD)
+- Omitting `models` reads Open-Meteo's Best Match, which blends IFS HRES, ERA5, and ERA5-Land — the source varies by date, so no single update lag describes the response. Pass `models` to pin one: `era5`, `era5_land`, and `era5_ensemble` update daily with about a 5-day delay, `ecmwf_ifs` has none, and `cerra` covers Europe only (requested elsewhere it returns a coverage-gap error naming the model). Not an allowlist — an unlisted name is sent upstream unchanged, and the response echoes the selection on `models`
+- With 2+ models each variable column is suffixed with the model name
 - Same variable vocabulary as `openmeteo_get_forecast` — past and forecast data are directly comparable on one schema
 - At least one of `hourly_variables` or `daily_variables` is required
 - Hourly and daily are separate variable sets; a variable documented under the other cadence is rejected before the request, by name, with the field it belongs in
@@ -110,7 +114,8 @@ Modeled CAMS air quality, forecast and archive.
 - Or an archive range via `start_date` and `end_date` — the CAMS global archive begins in August 2022; earlier dates return rows of nulls, and `us_aqi` starts a day later than the pollutant series (`european_aqi` starts with it)
 - One window per call: a date range is mutually exclusive with `forecast_days`/`past_days`, and needs both ends — a lone `start_date` or `end_date` is rejected
 - Common variables: `pm2_5`, `pm10`, `carbon_monoxide`, `nitrogen_dioxide`, `sulphur_dioxide`, `ozone`, `dust`, `european_aqi`, `us_aqi`, `alder_pollen`, `birch_pollen`, `grass_pollen`, `mugwort_pollen`, `olive_pollen`, `ragweed_pollen`
-- At least one variable from `hourly_variables` is required
+- `current_variables` returns pollutant and index values at this instant — a `current` object (the variables plus `time` and `interval`, the update cadence in seconds, 3600 on this endpoint) and a matching `current_units` map. It satisfies the variable requirement on its own, so an "AQI right now" call needs no hourly series; both keys are absent when it isn't requested
+- At least one variable from `current_variables` or `hourly_variables` is required
 - Grid-modeled data from CAMS — resolution is coarser than ground stations; for measured station readings, cross-reference `openaq-mcp-server`
 - Output includes `data_source: "CAMS"` to distinguish modeled from measured data
 - Wide windows spill to DataCanvas when `CANVAS_PROVIDER_TYPE=duckdb` — output includes `canvas_id` and `truncated: true`; query with `openmeteo_dataframe_query`
@@ -149,7 +154,7 @@ Probabilistic ensemble weather forecast exposing all individual model member tra
 
 GloFAS (Global Flood Awareness System) river discharge forecast and reanalysis via the Open-Meteo Flood API.
 
-- Coordinate-based — no river ID needed; the API snaps to the nearest river grid point automatically
+- Coordinate-based — no river ID needed; discharge comes from the largest modeled river within 5 km of the point, which is not always the closest one. Near confluences and parallel channels this can select an unintended reach; Open-Meteo's own suggestion is to vary the coordinate by about 0.1° and compare the values when a result looks unrepresentative
 - Forecast horizon up to 210 days; reanalysis history from 1984-01-01 to present
 - One mode per call: `forecast_days` for the future outlook, or `start_date` and `end_date` together for historical analysis. The two are mutually exclusive, and a date range needs both ends — a lone `start_date` or `end_date` is rejected
 - Available daily variables: `river_discharge` (ensemble mean), `river_discharge_mean`, `river_discharge_min`, `river_discharge_max`, `river_discharge_median`, `river_discharge_p25` (25th percentile), `river_discharge_p75` (75th percentile) — all in m³/s
@@ -186,7 +191,7 @@ Open-Meteo–specific:
 
 - No API key required for non-commercial use — zero-config out of the box
 - Self-contained geocoding: `openmeteo_search_locations` resolves place names so agents don't need a separate geocoder
-- ERA5 archive from 1940 to present with same variable schema as the forecast API — direct past/forecast comparisons on one schema
+- Historical archive from 1940 to present with same variable schema as the forecast API — direct past/forecast comparisons on one schema, and a `models` selector for pinning the reanalysis source
 - Automatic columnar-to-record reshape: Open-Meteo returns parallel time/variable arrays; handlers convert to per-timestamp records with a `*_units` map
 - DataCanvas spillover for `openmeteo_get_forecast`, `openmeteo_get_historical`, `openmeteo_get_marine`, `openmeteo_get_air_quality`, `openmeteo_get_ensemble`, `openmeteo_get_flood`, and `openmeteo_get_climate`: a result too large to return inline registers a DuckDB dataframe for SQL querying, staging every hourly and daily row with its upstream numeric type intact. With `CANVAS_PROVIDER_TYPE=none` (the default) the same size check still applies — those tools return a bounded preview with `truncated: true` and no `canvas_id`, never an unbounded payload claiming to be complete, and the disclosure explaining the absent `canvas_id` and how to reach the omitted rows travels in `notice` as well as in the rendered text. A truncated response omits the cadence key that was never requested, exactly as an untruncated one does
 - Configurable base URLs for all eight API endpoints (forecast, archive, marine, air quality, geocoding, ensemble, flood, climate) — override for testing or self-hosted deployments
@@ -329,7 +334,7 @@ All configuration is validated at startup via Zod schemas. No API key is require
 | `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv/r2/d1` | `in-memory` |
 | `CANVAS_PROVIDER_TYPE` | Canvas engine for `openmeteo_get_forecast` / `openmeteo_get_historical` / `openmeteo_get_marine` / `openmeteo_get_air_quality` / `openmeteo_get_ensemble` / `openmeteo_get_flood` / `openmeteo_get_climate` spillover: `duckdb` or `none`. At `none` those tools still bound an over-budget response to a preview and set `truncated: true` — there is just no canvas holding the rows they omit | `none` |
 | `OPEN_METEO_API_BASE_URL` | Override for the main forecast + elevation API | `https://api.open-meteo.com` |
-| `OPEN_METEO_ARCHIVE_BASE_URL` | Override for the ERA5 historical archive API | `https://archive-api.open-meteo.com` |
+| `OPEN_METEO_ARCHIVE_BASE_URL` | Override for the historical archive API | `https://archive-api.open-meteo.com` |
 | `OPEN_METEO_MARINE_BASE_URL` | Override for the marine forecast API | `https://marine-api.open-meteo.com` |
 | `OPEN_METEO_AIR_QUALITY_BASE_URL` | Override for the CAMS air quality API | `https://air-quality-api.open-meteo.com` |
 | `OPEN_METEO_GEOCODING_BASE_URL` | Override for the geocoding API | `https://geocoding-api.open-meteo.com` |

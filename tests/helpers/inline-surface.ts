@@ -24,13 +24,16 @@ export function structuredSize(result: object, ctx: Context): number {
 
 /**
  * The characters this result's preview rows were allowed: the inline ceiling less the
- * response scaffold and the unit maps the result carries, recomputed the way the
- * handler computed it. Row-array assertions measure against this rather than the whole
+ * response scaffold, any fixed `current` block, and the unit maps the result carries,
+ * recomputed the way the handler computed it. Row-array assertions measure against this rather than the whole
  * ceiling, which the maps and the rendered header have already spent part of.
  */
 export function rowBudgetFor(result: {
+  current?: Record<string, unknown> | undefined;
+  current_units?: UnitsMap | undefined;
   daily_units?: UnitsMap | undefined;
   hourly_units?: UnitsMap | undefined;
 }): number {
-  return inlineBudget(result.hourly_units, result.daily_units).rowBudget;
+  return inlineBudget(result.current, result.hourly_units, result.daily_units, result.current_units)
+    .rowBudget;
 }

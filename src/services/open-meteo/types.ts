@@ -12,6 +12,18 @@ export interface ColumnarBlock {
 /** Units map for a columnar block (variable name → unit string). */
 export type UnitsMap = Record<string, string>;
 
+/**
+ * The `current` block the forecast and air-quality endpoints return: one value per
+ * requested variable at a single instant, alongside the timestamp and `interval` — the
+ * model's update cadence in seconds (900 = 15 minutes), which is metadata rather than a
+ * requested variable and is rendered as such.
+ */
+export interface CurrentBlock {
+  interval: number;
+  time: string;
+  [variable: string]: number | string | null;
+}
+
 /** Cast a potentially unknown-typed record from API response to a UnitsMap. */
 export function toUnitsMap(u: Record<string, unknown> | undefined): UnitsMap | undefined {
   if (!u) return;
@@ -21,6 +33,9 @@ export function toUnitsMap(u: Record<string, unknown> | undefined): UnitsMap | u
 
 /** Shared envelope for forecast, historical, marine, and air-quality responses. */
 export interface WeatherEnvelope {
+  /** Present only when the request asked for `current` variables. */
+  current?: CurrentBlock;
+  current_units?: UnitsMap;
   daily?: ColumnarBlock;
   daily_units?: UnitsMap;
   elevation: number;

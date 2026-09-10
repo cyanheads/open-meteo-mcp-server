@@ -242,7 +242,7 @@ describe('openmeteoGetAirQualityTool', () => {
       },
     });
     expect(error.message).toContain('too much data at once');
-    expect(error.message).toContain('fewer hourly_variables');
+    expect(error.message).toContain('fewer current_variables / hourly_variables');
     expect(error.message).not.toMatch(/exact Open-Meteo API name/);
   });
 
@@ -892,7 +892,7 @@ describe('openmeteoGetAirQualityTool', () => {
     const notice = String(getEnrichment(ctx).notice);
     expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
     expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
-    expect(notice).toContain('fewer hourly_variables');
+    expect(notice).toContain('fewer current_variables / hourly_variables');
     expect(firstText(openmeteoGetAirQualityTool.format!(result))).toContain(
       'CANVAS_PROVIDER_TYPE=none',
     );
@@ -985,5 +985,175 @@ describe('openmeteoGetAirQualityTool', () => {
     expect(text).toContain('pm2_5: 1000');
     expect(text).toContain('pm2_5: 1049'); // last row — not sliced at 48
     expect(text).not.toMatch(/and \d+ more/);
+  });
+});
+
+describe('openmeteoGetAirQualityTool current conditions (#42)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
+  });
+
+  const CURRENT_BLOCK = {
+    current_units: {
+      time: 'iso8601',
+      interval: 'seconds',
+      pm2_5: 'μg/m³',
+      european_aqi: 'EAQI',
+    },
+    current: {
+      time: '2026-05-30T14:00',
+      interval: 900,
+      pm2_5: 4.1,
+      european_aqi: 12,
+    },
+  };
+
+  const run = async (input: Record<string, unknown>, upstream: object) => {
+    mockGetAirQuality.mockResolvedValue(upstream);
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const parsed = openmeteoGetAirQualityTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      ...input,
+    });
+    const result = await openmeteoGetAirQualityTool.handler(parsed, ctx);
+    return { ctx, result, params: mockGetAirQuality.mock.calls[0]?.[2] as { current?: string[] } };
+  };
+
+  it('forwards current_variables as the upstream current parameter', async () => {
+    const { params } = await run(
+      { current_variables: ['pm2_5', 'european_aqi'] },
+      { ...MOCK_RESPONSE, ...CURRENT_BLOCK },
+    );
+    expect(params.current).toEqual(['pm2_5', 'european_aqi']);
+  });
+
+  it('accepts a current-only call with no hourly_variables', async () => {
+    const { result } = await run(
+      { current_variables: ['pm2_5'] },
+      {
+        latitude: 47.595562,
+        longitude: -122.32443,
+        elevation: 0,
+        utc_offset_seconds: -25200,
+        timezone: 'America/Los_Angeles',
+        timezone_abbreviation: 'GMT-7',
+        generationtime_ms: 0.4,
+        ...CURRENT_BLOCK,
+      },
+    );
+    expect(result.hourly).toBeUndefined();
+    expect(result.record_count).toBe(0);
+    expect(result.current).toEqual(CURRENT_BLOCK.current);
+    expect(result.current_units).toEqual(CURRENT_BLOCK.current_units);
+    expect(result.data_source).toBe('CAMS');
+    // The output schema carries the pollutant keys through, not just time/interval.
+    expect(openmeteoGetAirQualityTool.output.parse(result).current).toEqual(CURRENT_BLOCK.current);
+  });
+
+  it('omits current and current_units when not requested', async () => {
+    const { result, params } = await run({ hourly_variables: ['pm2_5'] }, MOCK_RESPONSE);
+    expect(params.current).toBeUndefined();
+    expect(result.current).toBeUndefined();
+    expect(result.current_units).toBeUndefined();
+  });
+
+  it('renders the current-conditions section without misreading interval as a pollutant', async () => {
+    const { result } = await run(
+      { current_variables: ['pm2_5', 'european_aqi'] },
+      { ...MOCK_RESPONSE, ...CURRENT_BLOCK },
+    );
+    const text = firstText(openmeteoGetAirQualityTool.format!(result));
+    expect(text).toMatch(/### Current conditions/);
+    expect(text).toContain('2026-05-30T14:00');
+    expect(text).toContain('pm2_5: 4.1');
+    expect(text).not.toContain('| interval: 900');
+    expect(text).toContain('**Current units:**');
+  });
+
+  it('names current_variables in the no_variables_requested contract', async () => {
+    mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const input = openmeteoGetAirQualityTool.input.parse({ latitude: 47.6, longitude: -122.3 });
+    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_variables_requested' },
+    });
+    const contract = openmeteoGetAirQualityTool.errors?.find(
+      (e) => e.reason === 'no_variables_requested',
+    );
+    expect(contract?.when).toContain('current_variables');
+    expect(contract?.recovery).toContain('current_variables');
+  });
+
+  it('surfaces a mis-cadenced current name through the "undefined"-unit backstop', async () => {
+    const { ctx } = await run(
+      { current_variables: ['pm2_5', 'temperature_2m_max'] },
+      {
+        ...MOCK_RESPONSE,
+        current_units: {
+          time: 'iso8601',
+          interval: 'seconds',
+          pm2_5: 'μg/m³',
+          temperature_2m_max: 'undefined',
+        },
+        current: { time: '2026-05-30T14:00', interval: 900, pm2_5: 4.1, temperature_2m_max: null },
+      },
+    );
+    expect(String(getEnrichment(ctx).notice)).toContain('temperature_2m_max returned no data');
+  });
+
+  it('keeps a wide current block inside the inline ceiling', async () => {
+    const names = Array.from({ length: 50 }, (_, i) => `pollutant_variable_number_${i}`);
+    const wideCurrent: Record<string, number | string> = {
+      time: '2026-05-30T14:00',
+      interval: 900,
+    };
+    const wideCurrentUnits: Record<string, string> = { time: 'iso8601', interval: 'seconds' };
+    for (const [i, name] of names.entries()) {
+      wideCurrent[name] = 10.5 + i;
+      wideCurrentUnits[name] = 'μg/m³';
+    }
+
+    const time = hourlyTimes(24 * 92);
+    const { ctx, result } = await run(
+      { current_variables: names, hourly_variables: ['pm2_5'], past_days: 92 },
+      {
+        ...MOCK_RESPONSE,
+        current: wideCurrent,
+        current_units: wideCurrentUnits,
+        hourly_units: { time: 'iso8601', pm2_5: 'μg/m³' },
+        hourly: { time, pm2_5: time.map((_, i) => 3 + (i % 11)) },
+      },
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetAirQualityTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+  });
+});
+
+describe('openmeteoGetAirQualityTool current cadence wording (#42)', () => {
+  /** Every caller-facing string that describes how often the current block updates. */
+  const CADENCE_SURFACES: [string, () => string][] = [
+    ['description', () => openmeteoGetAirQualityTool.description],
+    [
+      'current_variables',
+      () => openmeteoGetAirQualityTool.input.shape.current_variables.description ?? '',
+    ],
+  ];
+
+  it.each(CADENCE_SURFACES)('the %s never promises a 15-minute cadence', (_surface, read) => {
+    // The air-quality endpoint answers current with interval 3600, not the forecast
+    // endpoint's 900 — a 15-minute claim here overstates how fresh the value is.
+    expect(read()).not.toMatch(/15-minute/);
+  });
+
+  it('names the endpoint’s real 3600-second interval', () => {
+    expect(openmeteoGetAirQualityTool.description).toContain('3600');
+    expect(openmeteoGetAirQualityTool.input.shape.current_variables.description).toContain('3600');
   });
 });

@@ -1,6 +1,6 @@
 /**
- * @fileoverview Documented model sets for the two tools that take a `models` input
- * (openmeteo_get_ensemble, openmeteo_get_climate).
+ * @fileoverview Documented model sets for the three tools that take a `models` input
+ * (openmeteo_get_ensemble, openmeteo_get_climate, openmeteo_get_historical).
  *
  * These are NOT allowlists. Nothing here is checked, before a request or after: a model
  * name the catalog does not carry goes upstream untouched, so a model Open-Meteo adds
@@ -16,9 +16,10 @@
  * which is the authority this catalog was standing in for.
  *
  * Provenance: each set is the model list published on the matching Open-Meteo
- * documentation page, read on 2026-07-30:
- *   ensemble — https://open-meteo.com/en/docs/ensemble-api
- *   climate  — https://open-meteo.com/en/docs/climate-api
+ * documentation page:
+ *   ensemble — https://open-meteo.com/en/docs/ensemble-api (read 2026-07-30)
+ *   climate  — https://open-meteo.com/en/docs/climate-api (read 2026-07-30)
+ *   archive  — https://open-meteo.com/en/docs/historical-weather-api (read 2026-09-09)
  * The ensemble names are the values that page emits in its own `models=` URL, plus
  * `bom_access_global_ensemble`, which the page lists in its model table (as ACCESS-GE)
  * without offering a selector for it — the value is served all the same. Older
@@ -31,11 +32,11 @@
  * @module mcp-server/tools/model-catalog
  */
 
-/** One ensemble model as its documentation page publishes it. */
-export interface EnsembleModel {
+/** One model as its documentation page publishes it. */
+export interface CatalogModel {
   /** Exact `models` API value. */
   readonly name: string;
-  /** Members and coverage, for the advertised list. */
+  /** Coverage, resolution, or member count — the parenthetical in the advertised list. */
   readonly note: string;
 }
 
@@ -47,7 +48,7 @@ export interface EnsembleModel {
  * matches both shapes and throws the same non-retryable coverage-gap rejection for each —
  * see its `NO_DATA_REASON` and `NAN_COORDINATE_BODY`.
  */
-export const ENSEMBLE_MODELS: readonly EnsembleModel[] = [
+export const ENSEMBLE_MODELS: readonly CatalogModel[] = [
   { name: 'ecmwf_ifs025_ensemble', note: '51 members, global 0.25°' },
   { name: 'ecmwf_aifs025_ensemble', note: '51, global 0.25°' },
   { name: 'ecmwf_ifs_europe_ensemble', note: '51, Europe 9 km' },
@@ -68,6 +69,32 @@ export const ENSEMBLE_MODELS: readonly EnsembleModel[] = [
   { name: 'meteoswiss_icon_ch1_ensemble', note: '11, Central Europe 1 km' },
   { name: 'meteoswiss_icon_ch2_ensemble', note: '21, Central Europe 2 km' },
 ];
+
+/**
+ * Documented historical-archive models (8), each with the coverage and update cadence its
+ * documentation table publishes.
+ *
+ * `best_match` is the value an omitted `models` selects: a blend of IFS HRES, ERA5, and
+ * ERA5-Land, whose components update on different schedules — which is why no single lag
+ * figure describes the default response. `cerra` is the one regional entry; requested
+ * outside Europe it reaches the same coverage-gap rejection a regional ensemble model does.
+ */
+export const ARCHIVE_MODELS: readonly CatalogModel[] = [
+  { name: 'best_match', note: 'default, blends IFS HRES + ERA5 + ERA5-Land' },
+  { name: 'ecmwf_ifs', note: 'global 9 km, updated every 6 hours, no delay' },
+  { name: 'ecmwf_ifs_analysis_long_window', note: 'global 9 km, daily, 2 days delay' },
+  { name: 'era5_seamless', note: 'ERA5 and ERA5-Land combined' },
+  { name: 'era5', note: 'global 0.25° (~25 km), daily, 5 days delay' },
+  { name: 'era5_land', note: 'global 0.1° (~11 km), daily, 5 days delay' },
+  { name: 'era5_ensemble', note: 'global 0.5° (~55 km), daily, 5 days delay' },
+  { name: 'cerra', note: 'Europe only, 5 km, no real-time updates' },
+];
+
+/** The advertised archive list — `name (coverage, cadence)`, comma-joined. */
+export const ARCHIVE_MODEL_LIST = ARCHIVE_MODELS.map((m) => `${m.name} (${m.note})`).join(', ');
+
+/** The advertised archive names alone, for a recovery hint with no room for notes. */
+export const ARCHIVE_MODEL_NAMES = ARCHIVE_MODELS.map((m) => m.name).join(', ');
 
 /** Documented CMIP6 climate models (7). */
 export const CLIMATE_MODELS: readonly string[] = [

@@ -388,7 +388,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       units: [hourlyUnits, dailyUnits],
       omittedUnits,
       rowBudget,
-    } = inlineBudget(rawHourlyUnits, rawDailyUnits);
+    } = inlineBudget(undefined, rawHourlyUnits, rawDailyUnits);
 
     // One notice, composed — ctx.enrich.notice is last-write-wins on a single key.
     const notice = composeNotice(ctx);

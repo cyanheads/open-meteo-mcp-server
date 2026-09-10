@@ -183,7 +183,9 @@ describe('openmeteoGetForecastTool', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'no_variables_requested',
-        recovery: { hint: 'Provide at least one of hourly_variables or daily_variables.' },
+        recovery: {
+          hint: 'Provide at least one of current_variables (conditions right now), hourly_variables, or daily_variables.',
+        },
       },
     });
   });
@@ -435,7 +437,9 @@ describe('openmeteoGetForecastTool', () => {
     await openmeteoGetForecastTool.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toContain('some_new_daily_name returned no data');
-    expect(getEnrichment(ctx).notice).toContain('hourly_variables or daily_variables');
+    expect(getEnrichment(ctx).notice).toContain(
+      'current_variables, hourly_variables, or daily_variables',
+    );
   });
 
   it('stays quiet when every requested column carries a real unit', async () => {
@@ -1177,5 +1181,224 @@ describe('openmeteoGetForecastTool', () => {
     // The response is small enough to return whole — the gap is reported anyway.
     expect(result.truncated).toBe(false);
     expect(result.record_count).toBe(240);
+  });
+});
+
+describe('openmeteoGetForecastTool current conditions (#42)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
+  });
+
+  /** Live upstream shape: `current` carries time + interval alongside the variables. */
+  const CURRENT_BLOCK = {
+    current_units: {
+      time: 'iso8601',
+      interval: 'seconds',
+      temperature_2m: '°C',
+      precipitation: 'mm',
+      wind_speed_10m: 'km/h',
+    },
+    current: {
+      time: '2026-05-30T14:15',
+      interval: 900,
+      temperature_2m: 16.3,
+      precipitation: 0.0,
+      wind_speed_10m: 11.2,
+    },
+  };
+
+  const run = async (input: Record<string, unknown>, upstream: object) => {
+    mockGetForecast.mockResolvedValue(upstream);
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const parsed = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      ...input,
+    });
+    const result = await openmeteoGetForecastTool.handler(parsed, ctx);
+    return { ctx, result, params: mockGetForecast.mock.calls[0]?.[2] as { current?: string[] } };
+  };
+
+  it('forwards current_variables as the upstream current parameter', async () => {
+    const { params } = await run(
+      { current_variables: ['temperature_2m', 'precipitation', 'wind_speed_10m'] },
+      { ...MOCK_RESPONSE, ...CURRENT_BLOCK },
+    );
+    expect(params.current).toEqual(['temperature_2m', 'precipitation', 'wind_speed_10m']);
+  });
+
+  it('accepts a current-only call — current_variables alone satisfies the variable contract', async () => {
+    const { result } = await run(
+      { current_variables: ['temperature_2m'] },
+      {
+        latitude: 47.595562,
+        longitude: -122.32443,
+        elevation: 59.0,
+        utc_offset_seconds: -25200,
+        timezone: 'America/Los_Angeles',
+        timezone_abbreviation: 'GMT-7',
+        generationtime_ms: 0.2,
+        ...CURRENT_BLOCK,
+      },
+    );
+    expect(result.hourly).toBeUndefined();
+    expect(result.daily).toBeUndefined();
+    expect(result.current).toMatchObject({ time: '2026-05-30T14:15', interval: 900 });
+    expect(() => openmeteoGetForecastTool.output.parse(result)).not.toThrow();
+  });
+
+  it('carries the current block and unit map through verbatim', async () => {
+    const { result } = await run(
+      { current_variables: ['temperature_2m', 'precipitation', 'wind_speed_10m'] },
+      { ...MOCK_RESPONSE, ...CURRENT_BLOCK },
+    );
+    expect(result.current).toEqual(CURRENT_BLOCK.current);
+    expect(result.current_units).toEqual(CURRENT_BLOCK.current_units);
+    // The output schema must carry the variable keys through, not just time/interval —
+    // a bare z.object() would validate and then strip every requested value.
+    expect(openmeteoGetForecastTool.output.parse(result).current).toEqual(CURRENT_BLOCK.current);
+  });
+
+  it('omits current and current_units entirely when current_variables was not requested', async () => {
+    const { result, params } = await run({ hourly_variables: ['temperature_2m'] }, MOCK_RESPONSE);
+    expect(params.current).toBeUndefined();
+    expect(result.current).toBeUndefined();
+    expect(result.current_units).toBeUndefined();
+    expect('current' in result ? result.current : undefined).toBeUndefined();
+  });
+
+  it('renders a distinct current-conditions section on content[], with interval as metadata', async () => {
+    const { result } = await run(
+      { current_variables: ['temperature_2m', 'precipitation', 'wind_speed_10m'] },
+      { ...MOCK_RESPONSE, ...CURRENT_BLOCK },
+    );
+    const text = firstText(openmeteoGetForecastTool.format!(result));
+    expect(text).toMatch(/### Current conditions/);
+    expect(text).toContain('2026-05-30T14:15');
+    expect(text).toContain('temperature_2m: 16.3');
+    // interval is the model's update cadence, not a requested variable — it must not
+    // appear in the per-variable list the way formatRecord would put it there.
+    expect(text).not.toContain('| interval: 900');
+    expect(text).toMatch(/interval/);
+    // Unit map reaches content[] too, so both surfaces carry the same data.
+    expect(text).toContain('**Current units:**');
+    expect(text).toContain('wind_speed_10m: km/h');
+  });
+
+  it('renders no current section when none was requested', async () => {
+    const { result } = await run({ hourly_variables: ['temperature_2m'] }, MOCK_RESPONSE);
+    const text = firstText(openmeteoGetForecastTool.format!(result));
+    expect(text).not.toMatch(/Current conditions/);
+    expect(text).not.toContain('**Current units:**');
+  });
+
+  it('still rejects a call with no variables at all, naming current_variables', async () => {
+    mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const input = openmeteoGetForecastTool.input.parse({ latitude: 47.6, longitude: -122.3 });
+    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'no_variables_requested' },
+    });
+    const contract = openmeteoGetForecastTool.errors?.find(
+      (e) => e.reason === 'no_variables_requested',
+    );
+    expect(contract?.when).toContain('current_variables');
+    expect(contract?.recovery).toContain('current_variables');
+  });
+
+  it('treats an empty current_variables array as no request', async () => {
+    mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      current_variables: [],
+    });
+    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_variables_requested' },
+    });
+  });
+
+  it('surfaces a mis-cadenced current name through the existing "undefined"-unit backstop', async () => {
+    // Upstream answers a daily-only name passed to current with HTTP 200, a null value,
+    // and the literal unit "undefined" — the same shape hourly_variables already hits.
+    const { ctx } = await run(
+      { current_variables: ['temperature_2m', 'temperature_2m_max'] },
+      {
+        ...MOCK_RESPONSE,
+        current_units: {
+          time: 'iso8601',
+          interval: 'seconds',
+          temperature_2m: '°C',
+          temperature_2m_max: 'undefined',
+        },
+        current: {
+          time: '2026-05-30T14:15',
+          interval: 900,
+          temperature_2m: 16.3,
+          temperature_2m_max: null,
+        },
+      },
+    );
+    expect(String(getEnrichment(ctx).notice)).toContain('temperature_2m_max returned no data');
+  });
+
+  it('routes an unrecognized current name through the existing invalid_variable path', async () => {
+    mockGetForecast.mockResolvedValue({
+      error: true,
+      reason: 'Cannot initialize ForecastVariable from invalid String value totally_not_a_variable',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      current_variables: ['totally_not_a_variable'],
+    });
+    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_variable' },
+    });
+  });
+
+  it('counts a wide current block against the inline budget', async () => {
+    /*
+     * 65 current variables measured 3,927 characters of current + current_units — more
+     * than the whole scaffold reserve — so the rows have to be measured against a budget
+     * that has already paid for them. The input caps at 50, as hourly_variables does.
+     */
+    const names = Array.from({ length: 50 }, (_, i) => `current_variable_number_${i}`);
+    const wideCurrent: Record<string, number | string> = {
+      time: '2026-05-30T14:15',
+      interval: 900,
+    };
+    const wideCurrentUnits: Record<string, string> = { time: 'iso8601', interval: 'seconds' };
+    for (const [i, name] of names.entries()) {
+      wideCurrent[name] = 100.5 + i;
+      wideCurrentUnits[name] = 'μg/m³';
+    }
+
+    const time = hourlyTimes(24 * 92);
+    const { ctx, result } = await run(
+      { current_variables: names, hourly_variables: ['temperature_2m'], past_days: 92 },
+      {
+        ...MOCK_RESPONSE,
+        current: wideCurrent,
+        current_units: wideCurrentUnits,
+        hourly_units: { time: 'iso8601', temperature_2m: '°C' },
+        hourly: wideHourlyBlock(time),
+      },
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetForecastTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+    // The rows were bounded against the budget the current block left behind.
+    expect(rowBudgetFor(result)).toBeLessThan(
+      rowBudgetFor({ hourly_units: result.hourly_units, daily_units: result.daily_units }),
+    );
   });
 });

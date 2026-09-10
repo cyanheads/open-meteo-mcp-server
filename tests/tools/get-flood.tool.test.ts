@@ -1030,3 +1030,75 @@ describe('openmeteoGetFloodTool unserved-variable notice', () => {
     expect(result.record_count).toBe(30);
   });
 });
+
+describe('openmeteoGetFloodTool river-selection wording (#43)', () => {
+  /*
+   * GloFAS returns discharge for the LARGEST river within a 5 km area of the
+   * coordinate, which is not always the closest one. Every surface that used to say
+   * "snaps to the nearest river/stream" told a caller near a confluence or a pair of
+   * parallel channels to trust a reach the API never promised.
+   */
+  const RIVER_SURFACES: [string, () => string][] = [
+    ['tool description', () => openmeteoGetFloodTool.description],
+    ['latitude input', () => openmeteoGetFloodTool.input.shape.latitude.description ?? ''],
+    ['longitude input', () => openmeteoGetFloodTool.input.shape.longitude.description ?? ''],
+    ['latitude output', () => openmeteoGetFloodTool.output.shape.latitude.description ?? ''],
+    ['longitude output', () => openmeteoGetFloodTool.output.shape.longitude.description ?? ''],
+  ];
+
+  it.each(RIVER_SURFACES)('%s claims no nearest-river snap', (_surface, read) => {
+    expect(read()).not.toMatch(/nearest (river|stream)/i);
+  });
+
+  it('the tool description states the largest-river-within-5-km rule', () => {
+    const text = openmeteoGetFloodTool.description;
+    expect(text).toMatch(/largest/i);
+    expect(text).toMatch(/5\s?km/i);
+    expect(text).toMatch(/not (always|necessarily) the closest/i);
+    expect(text).toMatch(/confluence/i);
+  });
+
+  it('the tool description carries Open-Meteo’s ±0.1° coordinate-variation guidance', () => {
+    const text = openmeteoGetFloodTool.description;
+    expect(text).toMatch(/0\.1°/);
+    expect(text).toMatch(/vary|varying/i);
+  });
+
+  it.each([
+    ['latitude', () => openmeteoGetFloodTool.input.shape.latitude.description ?? ''],
+    ['longitude', () => openmeteoGetFloodTool.input.shape.longitude.description ?? ''],
+  ])('the %s input description states the selection rule', (_field, read) => {
+    const text = read();
+    expect(text).toMatch(/largest/i);
+    expect(text).toMatch(/5\s?km/i);
+  });
+
+  it('the snapped output coordinates are described as the selected river’s grid point', () => {
+    expect(openmeteoGetFloodTool.output.shape.latitude.description ?? '').toMatch(
+      /selected river/i,
+    );
+  });
+
+  it('keeps the out-of-coverage null statement distinct from river selection', () => {
+    // Two different situations: a returned-but-possibly-wrong river, and no river at all.
+    expect(openmeteoGetFloodTool.description).toMatch(/without GloFAS coverage/i);
+    expect(openmeteoGetFloodTool.output.shape.daily.description ?? '').toMatch(
+      /outside GloFAS coverage/i,
+    );
+  });
+
+  it('leaves the error contract untouched — no new reason for river selection', () => {
+    // Advisory guidance only: GloFAS answers a mis-selected river with HTTP 200.
+    const reasons = openmeteoGetFloodTool.errors?.map((e) => e.reason) ?? [];
+    expect(reasons).toEqual([
+      'no_variables_requested',
+      'date_range_incomplete',
+      'forecast_days_conflict',
+      'date_order_invalid',
+      'date_out_of_range',
+      'invalid_variable',
+      'invalid_timezone',
+      'request_too_large',
+    ]);
+  });
+});

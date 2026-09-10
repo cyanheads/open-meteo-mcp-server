@@ -255,6 +255,35 @@ describe('OpenMeteoService upstream classification', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('gives the historical endpoint the model-switch recovery now that it takes models (#37)', async () => {
+    // cerra is Europe-only. Requesting it outside that domain reaches the same
+    // coverage-gap shape a regional ensemble model does, and "switch models" is a move
+    // the caller can now actually make on this endpoint.
+    respondWith(
+      '{"latitude":nan,"longitude":nan,"generationtime_ms":0.01,"utc_offset_seconds":0,"timezone":"GMT","timezone_abbreviation":"GMT"}',
+    );
+
+    const error = await getOpenMeteoService()
+      .getHistorical(
+        47.6,
+        -122.3,
+        {
+          start_date: '2024-07-01',
+          end_date: '2024-07-02',
+          hourly: ['temperature_2m'],
+          models: ['cerra'],
+        },
+        createMockContext(),
+      )
+      .catch((e: Error) => e);
+
+    if (!(error instanceof Error)) throw new Error('Expected getHistorical to reject');
+    expect(error.message).toContain('47.6, -122.3');
+    expect(error.message).toContain('Switch to a model whose domain includes this coordinate');
+    expect(error.message).not.toContain("dataset's grid does not cover this coordinate");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     [
       'forecast',
@@ -263,16 +292,6 @@ describe('OpenMeteoService upstream classification', () => {
           90,
           0,
           { hourly: ['temperature_2m'] },
-          createMockContext(),
-        ),
-    ],
-    [
-      'historical',
-      () =>
-        getOpenMeteoService().getHistorical(
-          90,
-          0,
-          { start_date: '2024-07-01', end_date: '2024-07-02', hourly: ['temperature_2m'] },
           createMockContext(),
         ),
     ],
@@ -413,6 +432,69 @@ describe('OpenMeteoService request encoding', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('sends current_variables as a comma-joined current parameter on both endpoints (#42)', async () => {
+    const ctx = createMockContext();
+    await getOpenMeteoService().getForecast(
+      47.6,
+      -122.3,
+      { current: ['temperature_2m', 'precipitation'], hourly: ['temperature_2m'] },
+      ctx,
+    );
+    await getOpenMeteoService().getAirQuality(
+      47.6,
+      -122.3,
+      { current: ['pm2_5', 'european_aqi'] },
+      ctx,
+    );
+
+    const [forecastUrl, airQualityUrl] = requestedUrls();
+    expect(forecastUrl).toContain('current=temperature_2m,precipitation');
+    expect(forecastUrl).toContain('hourly=temperature_2m');
+    expect(airQualityUrl).toContain('current=pm2_5,european_aqi');
+    expect(airQualityUrl).not.toContain('hourly=');
+    expect(forecastUrl).not.toContain('%2C');
+  });
+
+  it('omits the current parameter when no current variables were requested (#42)', async () => {
+    await getOpenMeteoService().getForecast(
+      47.6,
+      -122.3,
+      { hourly: ['temperature_2m'] },
+      createMockContext(),
+    );
+    expect(requestedUrls()[0] ?? '').not.toContain('current=');
+  });
+
+  it('sends the archive models list with a literal comma, like the climate list (#37)', async () => {
+    const ctx = createMockContext();
+    await getOpenMeteoService().getHistorical(
+      47.6,
+      -122.3,
+      {
+        start_date: '2024-07-01',
+        end_date: '2024-07-02',
+        hourly: ['temperature_2m'],
+        models: ['era5', 'era5_land'],
+      },
+      ctx,
+    );
+
+    const url = requestedUrls()[0] ?? '';
+    expect(url).toContain('models=era5,era5_land');
+    expect(url).not.toContain('%2C');
+  });
+
+  it('omits models from the archive query when none was requested (#37)', async () => {
+    // An omitted models parameter is what selects Open-Meteo's Best Match blend.
+    await getOpenMeteoService().getHistorical(
+      47.6,
+      -122.3,
+      { start_date: '2024-07-01', end_date: '2024-07-02', hourly: ['temperature_2m'] },
+      createMockContext(),
+    );
+    expect(requestedUrls()[0] ?? '').not.toContain('models=');
   });
 
   it('sends the climate models list with a literal comma so upstream isolates the offender (#34)', async () => {

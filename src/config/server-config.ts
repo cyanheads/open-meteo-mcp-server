@@ -15,7 +15,7 @@ const ServerConfigSchema = z.object({
   archiveBaseUrl: z
     .string()
     .default('https://archive-api.open-meteo.com')
-    .describe('Base URL for the ERA5 historical archive API'),
+    .describe('Base URL for the Open-Meteo historical archive API'),
   marineBaseUrl: z
     .string()
     .default('https://marine-api.open-meteo.com')

@@ -62,8 +62,8 @@ const NO_DATA_REASON = /^no data is available for this location/i;
 
 /**
  * What a caller does about either shape when the calling tool exposes `models` —
- * `openmeteo_get_ensemble` and `openmeteo_get_climate`, the two for which choosing a
- * different model is a move the caller can actually make.
+ * `openmeteo_get_ensemble`, `openmeteo_get_climate`, and `openmeteo_get_historical`, the
+ * three for which choosing a different model is a move the caller can actually make.
  */
 const COVERAGE_GAP_MODEL_RECOVERY =
   'Switch to a model whose domain includes this coordinate (any global model does), or omit ' +
@@ -98,11 +98,20 @@ type OpenMeteoOperation =
   | 'climate'
   | 'elevation';
 
-const MODEL_CAPABLE_OPERATIONS: ReadonlySet<OpenMeteoOperation> = new Set(['ensemble', 'climate']);
+/**
+ * The endpoints whose tool takes a `models` input. `historical` belongs here because the
+ * archive's `cerra` model is Europe-only: requested elsewhere it reaches the coverage-gap
+ * shapes above, and switching models is the fix — not a different coordinate.
+ */
+const MODEL_CAPABLE_OPERATIONS: ReadonlySet<OpenMeteoOperation> = new Set([
+  'ensemble',
+  'climate',
+  'historical',
+]);
 
 /**
  * The coverage-gap rejection for either shape. The recovery half splits on whether the
- * calling endpoint exposes `models`: on the two that do, "switch models" is actionable;
+ * calling endpoint exposes `models`: on the three that do, "switch models" is actionable;
  * on every other endpoint it names a parameter the tool has no input for, so the honest
  * statement is that the dataset's grid does not reach the coordinate and only a
  * different coordinate will. Non-retryable in both branches — the same request returns
@@ -298,6 +307,8 @@ function withOpenMeteoRetry<T>(url: string, ctx: Context, origin: RequestOrigin)
 // ---------------------------------------------------------------------------
 
 export interface ForecastParams {
+  /** Variables to return at the current instant, forwarded as the upstream `current`. */
+  current?: string[] | undefined;
   daily?: string[] | undefined;
   forecast_days?: number | undefined;
   hourly?: string[] | undefined;
@@ -312,6 +323,12 @@ export interface HistoricalParams {
   daily?: string[] | undefined;
   end_date: string;
   hourly?: string[] | undefined;
+  /**
+   * Archive models to read from. Omitted selects Open-Meteo's Best Match blend
+   * (IFS HRES + ERA5 + ERA5-Land); with 2+ names the variable columns come back
+   * suffixed with the model, as the climate endpoint does.
+   */
+  models?: string[] | undefined;
   precipitation_unit?: string | undefined;
   start_date: string;
   temperature_unit?: string | undefined;
@@ -335,6 +352,8 @@ export interface MarineParams {
 }
 
 export interface AirQualityParams {
+  /** Variables to return at the current instant, forwarded as the upstream `current`. */
+  current?: string[] | undefined;
   end_date?: string | undefined;
   forecast_days?: number | undefined;
   hourly?: string[] | undefined;
@@ -419,7 +438,10 @@ export class OpenMeteoService {
     });
   }
 
-  /** ERA5 historical archive endpoint — date range required. */
+  /**
+   * Historical archive endpoint — date range required. Omitting `models` selects
+   * Open-Meteo's Best Match blend (IFS HRES + ERA5 + ERA5-Land), not pure ERA5.
+   */
   getHistorical(
     lat: number,
     lon: number,
@@ -433,6 +455,7 @@ export class OpenMeteoService {
       lon,
       start: params.start_date,
       end: params.end_date,
+      models: params.models,
     });
     return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, {
       operation: 'historical',
@@ -666,10 +689,12 @@ function openMeteoUrl(base: string, params: Record<string, QueryValue>): string 
  * declare is simply never present, and an absent field is omitted from the query.
  */
 interface WeatherQueryParams {
+  current?: string[] | undefined;
   daily?: string[] | undefined;
   end_date?: string | undefined;
   forecast_days?: number | undefined;
   hourly?: string[] | undefined;
+  models?: string[] | undefined;
   past_days?: number | undefined;
   precipitation_unit?: string | undefined;
   start_date?: string | undefined;
@@ -687,8 +712,10 @@ function buildWeatherUrl(
   return openMeteoUrl(base, {
     latitude: lat,
     longitude: lon,
+    current: params.current,
     hourly: params.hourly,
     daily: params.daily,
+    models: params.models,
     start_date: params.start_date,
     end_date: params.end_date,
     forecast_days: params.forecast_days,

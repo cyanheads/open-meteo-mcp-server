@@ -16,7 +16,7 @@ import {
   getOpenMeteoService,
 } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
-import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { formatCurrent, formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
 import {
   boundedPreview,
@@ -46,7 +46,7 @@ import { undefinedUnitColumns } from '../variable-cadence.js';
  * preview notice on both response surfaces.
  */
 const PAYLOAD_NARROWING =
-  'fewer past_days / forecast_days or a shorter start_date–end_date range, or fewer hourly_variables';
+  'fewer past_days / forecast_days or a shorter start_date–end_date range, or fewer current_variables / hourly_variables';
 
 export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
   description:
@@ -61,6 +61,9 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     'Common variables: pm2_5, pm10, carbon_monoxide, nitrogen_dioxide, sulphur_dioxide, ozone, ' +
     'dust, european_aqi, us_aqi, alder_pollen, birch_pollen, grass_pollen, mugwort_pollen, ' +
     'olive_pollen, ragweed_pollen. ' +
+    'Set current_variables for pollutant and AQI values at this instant — returned as a current ' +
+    'object plus a current_units map, and enough on its own without hourly_variables; the ' +
+    'block’s interval field reports how often that value updates (3600 seconds on this endpoint). ' +
     'A wide window — a large past_days or date range plus many variables — produces thousands of ' +
     'records; these spill to a DataCanvas when canvas is enabled, returning canvas_id and ' +
     'table_name with truncated: true — inspect the staged columns with ' +
@@ -80,8 +83,9 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'hourly_variables was not provided or is empty',
-      recovery: 'Provide hourly_variables with at least one air quality variable.',
+      when: 'Neither current_variables nor hourly_variables was provided',
+      recovery:
+        'Provide at least one air quality variable in current_variables (values right now) or hourly_variables (a time series).',
       retryable: false,
     },
     {
@@ -133,12 +137,19 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
         'Latitude in decimal degrees. Use openmeteo_search_locations to resolve a place name.',
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
+    current_variables: z
+      .array(z.string())
+      .max(50)
+      .optional()
+      .describe(
+        'Air quality variables to return for the current instant (e.g., ["pm2_5", "pm10", "european_aqi", "us_aqi"]). Uses Open-Meteo\'s current-conditions data, so it answers "what is the AQI now?" without requesting an hourly series and picking a row; the returned interval reports the update cadence, 3600 seconds on this endpoint. Satisfies the variable requirement on its own.',
+      ),
     hourly_variables: z
       .array(z.string())
       .max(50)
       .optional()
       .describe(
-        'Hourly air quality variables (e.g., ["pm2_5", "pm10", "ozone", "nitrogen_dioxide", "european_aqi", "us_aqi"]). At least one required.',
+        'Hourly air quality variables (e.g., ["pm2_5", "pm10", "ozone", "nitrogen_dioxide", "european_aqi", "us_aqi"]). At least one of current_variables or hourly_variables is required.',
       ),
     forecast_days: z
       .number()
@@ -190,11 +201,31 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       .describe(
         'Total number of hourly records — the full upstream total when truncated is true, not the length of the hourly preview.',
       ),
+    current: z
+      .object({
+        time: z.string().describe('Timestamp of these values (ISO 8601, in the resolved timezone)'),
+        interval: z
+          .number()
+          .describe(
+            'Update cadence of the current-conditions data, in seconds (3600 = hourly on this endpoint) — metadata, not a requested variable',
+          ),
+      })
+      .catchall(z.union([z.string(), z.number(), z.null()]))
+      .optional()
+      .describe(
+        'Pollutant and index values at a single instant: one key per requested current variable alongside time and interval. Units are in the current_units map. Absent when current_variables was not requested.',
+      ),
     hourly: z
       .array(z.record(z.string(), z.unknown()))
       .optional()
       .describe(
         'Per-hour records with "time" (ISO 8601) + one key per requested variable. Units: pm2_5/pm10/dust in μg/m³, carbon_monoxide in μg/m³, nitrogen_dioxide/sulphur_dioxide/ozone in μg/m³, european_aqi/us_aqi as index values. When truncated, contains only a preview — query canvas_id for the full dataset when one is present.',
+      ),
+    current_units: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe(
+        'Key → unit string for the current block, covering time and interval as well as each requested variable (e.g., {"interval": "seconds", "pm2_5": "μg/m³"}). Absent when no current_variables were requested.',
       ),
     hourly_units: z
       .record(z.string(), z.string())
@@ -236,11 +267,12 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
   },
 
   async handler(input, ctx) {
+    const hasCurrent = (input.current_variables?.length ?? 0) > 0;
     const hasHourly = (input.hourly_variables?.length ?? 0) > 0;
-    if (!hasHourly) {
+    if (!hasCurrent && !hasHourly) {
       throw ctx.fail(
         'no_variables_requested',
-        'Provide hourly_variables with at least one air quality variable.',
+        'Provide at least one air quality variable in current_variables or hourly_variables.',
         ctx.recoveryFor('no_variables_requested'),
       );
     }
@@ -310,6 +342,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       input.latitude,
       input.longitude,
       {
+        current: input.current_variables,
         hourly: input.hourly_variables,
         ...window,
         timezone: input.timezone,
@@ -345,6 +378,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     }
 
     const rawHourlyUnits = toUnitsMap(data.hourly_units as Record<string, unknown> | undefined);
+    const rawCurrentUnits = toUnitsMap(data.current_units as Record<string, unknown> | undefined);
 
     /*
      * Split the inline ceiling between the unit map and the preview rows before
@@ -353,10 +387,10 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
      * payload had to drop is still reported on.
      */
     const {
-      units: [hourlyUnits],
+      units: [hourlyUnits, currentUnits],
       omittedUnits,
       rowBudget,
-    } = inlineBudget(rawHourlyUnits);
+    } = inlineBudget(data.current, rawHourlyUnits, rawCurrentUnits);
 
     // One notice, composed — ctx.enrich.notice is last-write-wins on a single key.
     const notice = composeNotice(ctx);
@@ -367,7 +401,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
      * 200 and an all-null column whose unit is the literal string "undefined" rather
      * than an error. Left unsaid that reads as a genuine data gap.
      */
-    const emptyColumns = undefinedUnitColumns(rawHourlyUnits);
+    const emptyColumns = undefinedUnitColumns(rawHourlyUnits, rawCurrentUnits);
     if (emptyColumns.length > 0) {
       notice.add(
         `${emptyColumns.join(', ')} returned no data — Open-Meteo reported the unit as "undefined", which means the air-quality endpoint does not serve that name. Check it against the air-quality variable list (pm2_5, pm10, ozone, nitrogen_dioxide, european_aqi, us_aqi, …); weather variables belong in openmeteo_get_forecast.`,
@@ -380,7 +414,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
      * a 48-record all-null success is otherwise indistinguishable from a populated one.
      */
     notice.add(describeCoverageGaps(findCoverageGaps('hourly', data.hourly, rawHourlyUnits)));
-    notice.add(unitsTrimmedNotice(omittedUnits, 'fewer hourly_variables'));
+    notice.add(unitsTrimmedNotice(omittedUnits, 'fewer current_variables / hourly_variables'));
 
     const hourlyRecords = data.hourly ? reshapeColumnar(data.hourly) : undefined;
 
@@ -397,10 +431,12 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
           longitude: data.longitude,
           timezone: data.timezone,
           record_count: handle.rowCount,
+          current: data.current,
           // Same selection the canvas-less branch makes, so both paths return the same
           // rows for the same records — and both start at the first row carrying data,
           // which an archive range opening before CAMS coverage needs.
           hourly: boundedPreview(hourlyRecords, rowBudget),
+          current_units: currentUnits,
           hourly_units: hourlyUnits,
           data_source: 'CAMS' as const,
           canvas_id: instance.canvasId,
@@ -424,7 +460,9 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
         longitude: data.longitude,
         timezone: data.timezone,
         record_count: hourlyRecords.length,
+        current: data.current,
         hourly: boundedPreview(hourlyRecords, rowBudget),
+        current_units: currentUnits,
         hourly_units: hourlyUnits,
         data_source: 'CAMS' as const,
         canvas_id: undefined,
@@ -438,7 +476,9 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       longitude: data.longitude,
       timezone: data.timezone,
       record_count: hourlyRecords?.length ?? 0,
+      current: data.current,
       hourly: hourlyRecords,
+      current_units: currentUnits,
       hourly_units: hourlyUnits,
       data_source: 'CAMS' as const,
       canvas_id: undefined,
@@ -462,7 +502,16 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       lines.push(noCanvasNotice(PAYLOAD_NARROWING), '');
     }
 
+    if (result.current_units) {
+      lines.push(`**Current units:** ${formatUnits(result.current_units)}`);
+    }
     if (result.hourly_units) lines.push(`**Hourly units:** ${formatUnits(result.hourly_units)}`);
+
+    if (result.current) {
+      // Its own section, and its own renderer: the block is one instant rather than a
+      // series, and `interval` is the model's cadence rather than a requested variable.
+      lines.push('', '### Current conditions', formatCurrent(result.current));
+    }
 
     if (result.hourly && result.hourly.length > 0) {
       // When truncated, result.hourly is the preview array — render all of it so

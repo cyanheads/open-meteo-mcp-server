@@ -1,6 +1,7 @@
 /**
- * @fileoverview Tool: openmeteo_get_historical — ERA5 historical weather archive.
- * Reshapes columnar response into per-timestamp records.
+ * @fileoverview Tool: openmeteo_get_historical — Open-Meteo historical weather archive.
+ * Reshapes columnar response into per-timestamp records. Omitting `models` reads the
+ * Best Match blend (IFS HRES + ERA5 + ERA5-Land); a `models` selection pins the source.
  * Large date ranges (multi-year hourly) spill to DataCanvas when canvas is enabled,
  * and return a bounded preview with truncated: true when it is not.
  * @module mcp-server/tools/definitions/get-historical
@@ -11,6 +12,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
+import { ARCHIVE_MODEL_LIST, ARCHIVE_MODEL_NAMES } from '../model-catalog.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
 import {
@@ -46,13 +48,17 @@ import {
  * preview notice on both response surfaces.
  */
 const PAYLOAD_NARROWING =
-  'a shorter start_date–end_date range, or fewer hourly_variables / daily_variables';
+  'a shorter start_date–end_date range, fewer hourly_variables / daily_variables, or fewer models';
 
 export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
   description:
-    'Historical weather from the ERA5 reanalysis archive (1940–present). Requires start_date ' +
-    'and end_date (ISO 8601 date, e.g., "2024-07-01"). ERA5 has a variable lag of up to ~5 days ' +
-    '— for dates within the last week, use openmeteo_get_forecast with past_days instead. ' +
+    'Historical weather from the Open-Meteo reanalysis archive (1940–present). Requires ' +
+    'start_date and end_date (ISO 8601 date, e.g., "2024-07-01"). With models omitted the ' +
+    'archive answers from Best Match, which blends IFS HRES, ERA5, and ERA5-Land seamlessly — ' +
+    'so the source varies by date and no single update lag describes the response. Set models ' +
+    'to pin a consistent source for a multi-decade series: the ERA5 family updates daily with ' +
+    'about a 5-day delay, while IFS HRES has none, so for the last few days either request ' +
+    `models: ["ecmwf_ifs"] or use openmeteo_get_forecast with past_days. Available models: ${ARCHIVE_MODEL_LIST}. ` +
     'Uses the same variable names as the forecast API for direct comparison. Large date ranges ' +
     '(multi-year hourly) produce thousands of records — these spill to a DataCanvas when canvas ' +
     'is enabled, returning canvas_id and table_name with truncated: true; inspect the staged ' +
@@ -65,9 +71,9 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     {
       reason: 'date_out_of_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'start_date predates 1940-01-01 or end_date is within the ERA5 lag window',
+      when: 'start_date predates 1940-01-01, or the requested dates fall outside the coverage of the selected model',
       recovery:
-        'Use start_date >= 1940-01-01. For dates within the last ~5 days, use openmeteo_get_forecast with past_days instead.',
+        'Use start_date >= 1940-01-01. A selected ERA5-family model updates daily with roughly a 5-day delay, so for the last few days request models: ["ecmwf_ifs"], drop models to use the Best Match blend, or use openmeteo_get_forecast with past_days instead.',
       retryable: false,
     },
     {
@@ -87,9 +93,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An unknown variable name was requested',
-      recovery:
-        'Check the variable name against Open-Meteo docs. Common hourly: temperature_2m, precipitation, wind_speed_10m, relative_humidity_2m, cloud_cover. Common daily: temperature_2m_max, temperature_2m_min, precipitation_sum.',
+      when: 'An unknown variable name or unsupported archive model was requested',
+      recovery: `Check the variable name against Open-Meteo docs. Common hourly: temperature_2m, precipitation, wind_speed_10m, relative_humidity_2m, cloud_cover. Common daily: temperature_2m_max, temperature_2m_min, precipitation_sum. Documented models: ${ARCHIVE_MODEL_NAMES}. When the message names one model, correct only that one — the rest of the models list is valid.`,
       retryable: false,
     },
     {
@@ -97,7 +102,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'A variable Open-Meteo documents under one cadence was passed in the other cadence field — for example cloud_cover in daily_variables, or temperature_2m_max in hourly_variables',
       recovery:
-        'Move each variable the message names to the field the message names, or drop it — hourly_variables and daily_variables take separate ERA5 variable sets, and the message lists the same-cadence alternatives when the archive publishes any.',
+        'Move each variable the message names to the field the message names, or drop it — hourly_variables and daily_variables take separate archive variable sets, and the message lists the same-cadence alternatives when the archive publishes any.',
       retryable: false,
     },
     {
@@ -130,20 +135,20 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/)
       .describe(
-        'Start date (YYYY-MM-DD, e.g., "2024-07-01"). ERA5 covers from 1940-01-01 to approximately 5 days ago.',
+        'Start date (YYYY-MM-DD, e.g., "2024-07-01"). The archive covers from 1940-01-01; how close to today it reaches depends on the model — the ERA5 family runs about 5 days behind, IFS HRES is current.',
       ),
     end_date: z
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/)
       .describe(
-        'End date (YYYY-MM-DD, inclusive). Must be on or after start_date. For dates within the last ~5 days, use openmeteo_get_forecast with past_days instead.',
+        'End date (YYYY-MM-DD, inclusive). Must be on or after start_date. For the last few days, either request models: ["ecmwf_ifs"] or use openmeteo_get_forecast with past_days.',
       ),
     hourly_variables: z
       .array(z.string())
       .max(50)
       .optional()
       .describe(
-        'Hourly ERA5 variables (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "relative_humidity_2m", "cloud_cover", "soil_moisture_0_to_7cm"]). Hourly names only — a daily aggregate such as temperature_2m_max or precipitation_sum belongs in daily_variables and is rejected here. At least one of hourly_variables or daily_variables required.',
+        'Hourly archive variables (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "relative_humidity_2m", "cloud_cover", "soil_moisture_0_to_7cm"]). Hourly names only — a daily aggregate such as temperature_2m_max or precipitation_sum belongs in daily_variables and is rejected here. At least one of hourly_variables or daily_variables required.',
       ),
     daily_variables: z
       .array(z.string())
@@ -151,6 +156,13 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .optional()
       .describe(
         'Daily summary variables (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_max"]). Daily names only — an hourly name such as cloud_cover or temperature_2m belongs in hourly_variables and is rejected here; for a daily summary of an hourly variable use its published aggregate (cloud_cover_max, cloud_cover_mean, cloud_cover_min). At least one of hourly_variables or daily_variables required.',
+      ),
+    models: z
+      .array(z.string())
+      .max(8)
+      .optional()
+      .describe(
+        `Archive models to read from: ${ARCHIVE_MODEL_LIST}. Omit to use Open-Meteo's Best Match default, which blends IFS HRES, ERA5, and ERA5-Land — pin a model instead when a consistent source matters across the range. With 2+ models each variable column is suffixed with the model name. cerra covers Europe only and is rejected as a coverage gap elsewhere. A name outside this list is sent upstream rather than rejected here.`,
       ),
     temperature_unit: z
       .enum(['celsius', 'fahrenheit'])
@@ -178,6 +190,12 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     longitude: z.number().describe('Snapped longitude'),
     elevation: z.number().describe('Elevation at grid point (meters)'),
     timezone: z.string().describe('Resolved IANA timezone'),
+    models: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Archive models requested — echoes the models parameter. Absent when models was omitted, which means the data came from Open-Meteo Best Match (IFS HRES + ERA5 + ERA5-Land) and the source varies by date.',
+      ),
     date_range: z
       .object({
         start: z.string().describe('Actual start date of returned data'),
@@ -283,7 +301,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     if (input.start_date < '1940-01-01') {
       throw ctx.fail(
         'date_out_of_range',
-        `start_date ${input.start_date} predates ERA5 coverage (1940-01-01).`,
+        `start_date ${input.start_date} predates the archive's coverage (1940-01-01).`,
         ctx.recoveryFor('date_out_of_range'),
       );
     }
@@ -310,6 +328,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
         end_date: input.end_date,
         hourly: input.hourly_variables,
         daily: input.daily_variables,
+        models: input.models,
         temperature_unit: input.temperature_unit,
         wind_speed_unit: input.wind_speed_unit,
         precipitation_unit: input.precipitation_unit,
@@ -343,13 +362,18 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
         throw ctx.fail(
           'date_out_of_range',
-          reason || 'Date out of ERA5 range.',
+          reason || 'Date out of archive range.',
           ctx.recoveryFor('date_out_of_range'),
         );
       }
+      /*
+       * The models array goes out with a literal comma, so upstream parses it as a list
+       * and its rejection names only the offending model rather than the whole request.
+       * Reframing that message is all this needs — the same holds for a variable name.
+       */
       throw ctx.fail(
         'invalid_variable',
-        frameInvalidVariableMessage(data.reason),
+        frameInvalidVariableMessage(data.reason, 'variable or model'),
         ctx.recoveryFor('invalid_variable'),
       );
     }
@@ -367,7 +391,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       units: [hourlyUnits, dailyUnits],
       omittedUnits,
       rowBudget,
-    } = inlineBudget(rawHourlyUnits, rawDailyUnits);
+    } = inlineBudget(undefined, rawHourlyUnits, rawDailyUnits);
 
     // One notice, composed — ctx.enrich.notice is last-write-wins on a single key.
     const notice = composeNotice(ctx);
@@ -385,7 +409,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     }
 
     /*
-     * Temporal coverage, the case the check above cannot see: ERA5 leaves a
+     * Temporal coverage, the case the check above cannot see: the archive leaves a
      * recognized variable null wherever the reanalysis carries nothing for the grid
      * point, with the unit intact — success and emptiness look identical without this.
      */
@@ -395,10 +419,13 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
         findCoverageGaps('daily', data.daily, rawDailyUnits),
       ),
     );
-    notice.add(unitsTrimmedNotice(omittedUnits, 'fewer hourly_variables / daily_variables'));
+    notice.add(
+      unitsTrimmedNotice(omittedUnits, 'fewer hourly_variables / daily_variables, or fewer models'),
+    );
 
     const hourlyRecords = data.hourly ? reshapeColumnar(data.hourly) : undefined;
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : undefined;
+    const models = input.models && input.models.length > 0 ? input.models : undefined;
 
     const records = hourlyRecords ?? dailyRecords;
     const allRecords = [...(hourlyRecords ?? []), ...(dailyRecords ?? [])];
@@ -429,6 +456,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
           longitude: data.longitude,
           elevation: data.elevation,
           timezone: data.timezone,
+          models,
           date_range: dateRange,
           record_count: handle.rowCount,
           hourly: preview.hourly,
@@ -458,6 +486,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
         longitude: data.longitude,
         elevation: data.elevation,
         timezone: data.timezone,
+        models,
         date_range: dateRange,
         record_count: allRecords.length,
         hourly: preview.hourly,
@@ -475,6 +504,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       longitude: data.longitude,
       elevation: data.elevation,
       timezone: data.timezone,
+      models,
       date_range: dateRange,
       record_count: allRecords.length,
       hourly: hourlyRecords,
@@ -489,8 +519,11 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
 
   format: (result) => {
     const lines = [
-      `## Historical weather (ERA5)`,
+      `## Historical weather`,
       `**Location:** ${result.latitude}, ${result.longitude} | **Elevation:** ${result.elevation}m | **Timezone:** ${result.timezone}`,
+      // An omitted models parameter is the Best Match blend, whose source varies by
+      // date — naming the components is the only honest provenance line for it.
+      `**Models:** ${result.models?.join(', ') ?? 'Best Match (IFS HRES + ERA5 + ERA5-Land)'}`,
       `**Date range:** ${result.date_range.start} → ${result.date_range.end} | **Records:** ${result.record_count} | **Truncated:** ${result.truncated}`,
     ];
 

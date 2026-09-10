@@ -30,7 +30,7 @@ const typeOf = (schema: ReturnType<typeof deriveSpillSchema>, name: string) =>
 const names = (schema: ReturnType<typeof deriveSpillSchema>) => schema.map((c) => c.name);
 
 /** The row budget a response with no unit maps gets — the plain scaffold deduction. */
-const BARE_BUDGET = inlineBudget().rowBudget;
+const BARE_BUDGET = inlineBudget(undefined).rowBudget;
 
 describe('deriveSpillSchema', () => {
   it('types a column from its real values when a long all-null run leads the set', () => {
@@ -140,7 +140,7 @@ describe('inlineBudget', () => {
 
   it('charges the unit maps against the ceiling so rows only get what is left', () => {
     const hourly = unitsWith(200);
-    const { rowBudget, omittedUnits, units } = inlineBudget(hourly);
+    const { rowBudget, omittedUnits, units } = inlineBudget(undefined, hourly);
 
     expect(omittedUnits).toBe(0);
     expect(units[0]).toBe(hourly); // untouched, same object
@@ -149,24 +149,24 @@ describe('inlineBudget', () => {
   });
 
   it('leaves the whole ceiling to rows when there are no unit maps', () => {
-    expect(inlineBudget(undefined, undefined).rowBudget).toBe(BARE_BUDGET);
+    expect(inlineBudget(undefined, undefined, undefined).rowBudget).toBe(BARE_BUDGET);
   });
 
   it('splits one budget across both cadences rather than giving each its own', () => {
     const hourly = unitsWith(120);
     const daily = unitsWith(80, 'temperature_2m_max_member');
 
-    const pair = inlineBudget(hourly, daily).rowBudget;
+    const pair = inlineBudget(undefined, hourly, daily).rowBudget;
 
-    expect(pair).toBeLessThan(inlineBudget(hourly).rowBudget);
-    expect(pair).toBeLessThan(inlineBudget(daily).rowBudget);
+    expect(pair).toBeLessThan(inlineBudget(undefined, hourly).rowBudget);
+    expect(pair).toBeLessThan(inlineBudget(undefined, daily).rowBudget);
   });
 
   it('keeps the maps whole and the whole response inside the ceiling', () => {
     // The realistic case: even a wide fan-out fits, so nothing is dropped and the
     // rows plus the maps plus the reserved scaffold land under the ceiling.
     const hourly = unitsWith(400);
-    const { rowBudget, units, omittedUnits } = inlineBudget(hourly);
+    const { rowBudget, units, omittedUnits } = inlineBudget(undefined, hourly);
 
     expect(omittedUnits).toBe(0);
     expect(Object.keys(units[0] ?? {})).toHaveLength(401);
@@ -177,7 +177,7 @@ describe('inlineBudget', () => {
     // 40 variables against a 51-member model publishes a unit entry per member per
     // variable — the maps alone outweigh the whole ceiling.
     const hourly = unitsWith(2500);
-    const { rowBudget, units, omittedUnits } = inlineBudget(hourly);
+    const { rowBudget, units, omittedUnits } = inlineBudget(undefined, hourly);
 
     expect(omittedUnits).toBeGreaterThan(0);
     expect(Object.keys(units[0] ?? {}).length).toBeLessThan(2501);
@@ -186,6 +186,44 @@ describe('inlineBudget', () => {
     expect(rowBudget + JSON.stringify(units[0]).length).toBeLessThanOrEqual(INLINE_CHARS);
     // What survived is a prefix of what came in, not a resampling.
     expect(Object.keys(units[0] ?? {})[0]).toBe('time');
+  });
+
+  it('charges a fixed payload in full before anything else is divided (#42)', () => {
+    // The `current` block has no preview to bound and no canvas to spill to, so its
+    // whole serialized size comes off the ceiling before rows are measured.
+    const current = { time: '2026-05-30T14:15', interval: 900, temperature_2m: 16.3 };
+    const { rowBudget } = inlineBudget(current);
+
+    expect(rowBudget).toBe(BARE_BUDGET - JSON.stringify(current).length);
+    expect(inlineBudget(undefined).rowBudget).toBe(BARE_BUDGET);
+  });
+
+  it('charges the fixed payload alongside the unit maps', () => {
+    const hourly = unitsWith(200);
+    const current = { time: '2026-05-30T14:15', interval: 900, temperature_2m: 16.3 };
+
+    expect(inlineBudget(current, hourly).rowBudget).toBe(
+      BARE_BUDGET - JSON.stringify(hourly).length - JSON.stringify(current).length,
+    );
+  });
+
+  it('takes the fixed payload out of the units cap, so rows keep their floor', () => {
+    // A payload big enough to matter alongside maps already over the cap: the extra
+    // characters come out of what the maps may keep, never out of the row floor.
+    const hourly = unitsWith(2500);
+    const wideCurrent: Record<string, number | string> = {
+      time: '2026-05-30T14:15',
+      interval: 900,
+    };
+    for (let i = 0; i < 50; i++) wideCurrent[`current_variable_number_${i}`] = 100.5 + i;
+
+    const bare = inlineBudget(undefined, hourly);
+    const withFixed = inlineBudget(wideCurrent, hourly);
+
+    expect(withFixed.omittedUnits).toBeGreaterThan(bare.omittedUnits);
+    expect(withFixed.rowBudget).toBe(bare.rowBudget);
+    const carried = JSON.stringify(withFixed.units[0]).length + JSON.stringify(wideCurrent).length;
+    expect(withFixed.rowBudget + carried).toBeLessThanOrEqual(INLINE_CHARS);
   });
 
   it('reports the trim in a notice that names the levers, and stays silent otherwise', () => {

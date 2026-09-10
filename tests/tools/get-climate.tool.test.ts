@@ -1184,3 +1184,24 @@ describe('openmeteoGetClimateTool unserved-variable notice', () => {
     expect(notice).toContain('openmeteo_dataframe_describe');
   });
 });
+
+describe('openmeteoGetClimateTool historical cross-reference (#37)', () => {
+  /** Every string on this tool that points a caller at openmeteo_get_historical. */
+  const CROSS_REFERENCES: [string, () => string][] = [
+    ['description', () => openmeteoGetClimateTool.description],
+    [
+      'date_out_of_range recovery',
+      () =>
+        openmeteoGetClimateTool.errors?.find((e) => e.reason === 'date_out_of_range')?.recovery ??
+        '',
+    ],
+  ];
+
+  it.each(CROSS_REFERENCES)('the %s never labels the archive ERA5', (_surface, read) => {
+    const text = read();
+    // Omitting models on openmeteo_get_historical reads Best Match, not pure ERA5, so a
+    // pointer at that tool must not name ERA5 as what it returns.
+    expect(text).toContain('openmeteo_get_historical');
+    expect(text).not.toMatch(/ERA5/);
+  });
+});

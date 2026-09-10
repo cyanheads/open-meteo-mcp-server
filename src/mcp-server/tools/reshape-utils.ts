@@ -55,3 +55,20 @@ export function formatRecord(rec: Record<string, unknown>): string {
     .join(' | ');
   return `**${time}** — ${vals}`;
 }
+
+/**
+ * Format the `current` block for `format()` output.
+ * e.g. `**2026-05-30T14:15** (interval: 900s) — temperature_2m: 16.3 | precipitation: 0`
+ *
+ * Not {@link formatRecord}: the block carries `interval`, the model's update cadence in
+ * seconds, which that function's per-key loop would render as a requested variable
+ * alongside the real ones. Rendered here as metadata beside the timestamp, so the
+ * variable list holds only what the caller asked for.
+ */
+export function formatCurrent(current: Record<string, unknown>): string {
+  const { time, interval, ...vars } = current;
+  const vals = Object.entries(vars)
+    .map(([k, v]) => `${k}: ${v ?? 'null'}`)
+    .join(' | ');
+  return `**${time}** (interval: ${interval}s) — ${vals}`;
+}

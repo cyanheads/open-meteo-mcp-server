@@ -351,7 +351,8 @@ describe('openmeteoGetHistoricalTool', () => {
     });
     await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
-      message: expect.stringMatching(/^Unknown variable name: bogus_historical_var\./),
+      // The tool now takes models too, so the framing covers both kinds of name (#37).
+      message: expect.stringMatching(/^Unknown variable or model name: bogus_historical_var\./),
       data: {
         reason: 'invalid_variable',
         recovery: { hint: expect.stringContaining('Open-Meteo docs') },
@@ -684,7 +685,8 @@ describe('openmeteoGetHistoricalTool', () => {
       canvas_id: undefined,
       truncated: false,
     });
-    expect(firstText(blocks)).toContain('ERA5');
+    // The omitted-models default is Open-Meteo's Best Match blend, not pure ERA5 (#37).
+    expect(firstText(blocks)).toContain('Best Match');
     expect(firstText(blocks)).toContain('Open-Meteo.com');
   });
 
@@ -1197,5 +1199,172 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(firstText(openmeteoGetHistoricalTool.format!(result))).toContain(
       'CANVAS_PROVIDER_TYPE=none',
     );
+  });
+});
+
+describe('openmeteoGetHistoricalTool archive model selection (#37)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+  });
+
+  const call = async (extra: Record<string, unknown> = {}) => {
+    mockGetHistorical.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      daily_variables: ['temperature_2m_max'],
+      ...extra,
+    });
+    const result = await openmeteoGetHistoricalTool.handler(input, ctx);
+    return { result, params: mockGetHistorical.mock.calls[0]?.[2] as { models?: string[] } };
+  };
+
+  it('omits models upstream and reports no model selection when none was requested', async () => {
+    const { result, params } = await call();
+    expect(params.models).toBeUndefined();
+    expect(result.models).toBeUndefined();
+    expect(() => openmeteoGetHistoricalTool.output.parse(result)).not.toThrow();
+  });
+
+  it('forwards a requested model and echoes it on structuredContent', async () => {
+    const { result, params } = await call({ models: ['era5'] });
+    expect(params.models).toEqual(['era5']);
+    expect(result.models).toEqual(['era5']);
+  });
+
+  it('forwards several models and echoes the full selection', async () => {
+    const { result, params } = await call({ models: ['era5', 'era5_land'] });
+    expect(params.models).toEqual(['era5', 'era5_land']);
+    expect(result.models).toEqual(['era5', 'era5_land']);
+  });
+
+  it('treats an empty models array as no selection', async () => {
+    const { result } = await call({ models: [] });
+    expect(result.models).toBeUndefined();
+  });
+
+  it('sends an unadvertised model upstream rather than rejecting it locally', async () => {
+    // Same posture as the ensemble and climate tools: Open-Meteo stays the authority.
+    const { params } = await call({ models: ['a_model_open_meteo_added_later'] });
+    expect(params.models).toEqual(['a_model_open_meteo_added_later']);
+  });
+
+  it('caps the models array at the eight documented archive models', () => {
+    expect(() =>
+      openmeteoGetHistoricalTool.input.parse({
+        latitude: 47.6,
+        longitude: -122.3,
+        start_date: '2024-07-01',
+        end_date: '2024-07-02',
+        daily_variables: ['temperature_2m_max'],
+        models: Array.from({ length: 9 }, (_, i) => `m${i}`),
+      }),
+    ).toThrow();
+  });
+
+  it('frames an upstream model rejection as a variable-or-model error', async () => {
+    mockGetHistorical.mockResolvedValue({
+      error: true,
+      reason: 'Cannot initialize Era5Variable from invalid String value bogus_model',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      daily_variables: ['temperature_2m_max'],
+      models: ['bogus_model'],
+    });
+    const error = (await Promise.resolve()
+      .then(() => openmeteoGetHistoricalTool.handler(input, ctx))
+      .catch((e: unknown) => e)) as { code: number; message: string; data: { reason: string } };
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data.reason).toBe('invalid_variable');
+    expect(error.message).toContain('bogus_model');
+    expect(error.message).toMatch(/model/i);
+  });
+
+  it('renders the selected models on the content[] surface', async () => {
+    const { result } = await call({ models: ['era5', 'cerra'] });
+    const text = firstText(openmeteoGetHistoricalTool.format!(result));
+    expect(text).toContain('era5');
+    expect(text).toContain('cerra');
+  });
+
+  it('names the Best Match blend on content[] when no model was selected', async () => {
+    const { result } = await call();
+    const text = firstText(openmeteoGetHistoricalTool.format!(result));
+    expect(text).toMatch(/Best Match/i);
+    expect(text).toMatch(/IFS HRES/);
+    expect(text).toMatch(/ERA5-Land/);
+  });
+});
+
+describe('openmeteoGetHistoricalTool provenance wording (#37)', () => {
+  /** Every caller-facing string that used to call the omitted-models default ERA5. */
+  const SURFACES: [string, () => string][] = [
+    ['description', () => openmeteoGetHistoricalTool.description],
+    ['start_date', () => openmeteoGetHistoricalTool.input.shape.start_date.description ?? ''],
+    ['end_date', () => openmeteoGetHistoricalTool.input.shape.end_date.description ?? ''],
+    [
+      'date_out_of_range when',
+      () =>
+        openmeteoGetHistoricalTool.errors?.find((e) => e.reason === 'date_out_of_range')?.when ??
+        '',
+    ],
+    [
+      'date_out_of_range recovery',
+      () =>
+        openmeteoGetHistoricalTool.errors?.find((e) => e.reason === 'date_out_of_range')
+          ?.recovery ?? '',
+    ],
+  ];
+
+  it.each(SURFACES)('the %s never applies ERA5’s lag to the default response', (_surface, read) => {
+    const text = read();
+    // "ERA5 has a ~5-day lag" is true of the ERA5 component, not of the Best Match
+    // blend an omitted models parameter selects — IFS HRES carries no delay at all.
+    expect(text).not.toMatch(/ERA5 (has|covers|archive has) a/i);
+    expect(text).not.toMatch(/ERA5 lag/i);
+  });
+
+  it('the description names the Best Match blend as the omitted-models default', () => {
+    const text = openmeteoGetHistoricalTool.description;
+    expect(text).toMatch(/Best Match/i);
+    expect(text).toMatch(/IFS HRES/);
+    expect(text).toMatch(/ERA5-Land/);
+  });
+
+  it('the models field description advertises the documented archive models', () => {
+    const text = openmeteoGetHistoricalTool.input.shape.models.description ?? '';
+    for (const model of ['era5', 'era5_land', 'ecmwf_ifs', 'cerra']) {
+      expect(text).toContain(model);
+    }
+    // cerra is Europe-only — a caller needs that before requesting it elsewhere.
+    expect(text).toMatch(/Europe/i);
+  });
+
+  it('the models output field explains what an absent value means', () => {
+    const text = openmeteoGetHistoricalTool.output.shape.models.description ?? '';
+    expect(text).toMatch(/Best Match/i);
+  });
+
+  it('keeps the 1940 coverage floor and the date contract intact', async () => {
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      start_date: '1939-12-31',
+      end_date: '1940-01-02',
+      daily_variables: ['temperature_2m_max'],
+    });
+    await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'date_out_of_range' },
+    });
   });
 });

@@ -39,15 +39,19 @@ import type { TimeRecord, UnitsMap } from '@/services/open-meteo/types.js';
 export const INLINE_CHARS = 80_000;
 
 /**
- * Characters reserved for everything in a response that is neither a preview row nor
- * a unit map: the scalar fields (coordinates, elevation, timezone, `record_count`,
- * `model`/`models`, `member_count`, `date_range`, `canvas_id`, `table_name`,
- * `truncated`), the composed `notice`, and `format()`'s own header lines, spill or
- * no-canvas notice, section headings, and attribution footer.
+ * Characters reserved for everything in a response that is neither a preview row, a unit
+ * map, nor a caller-sized fixed payload: the scalar fields (coordinates, elevation,
+ * timezone, `record_count`, `model`/`models`, `member_count`, `date_range`, `canvas_id`,
+ * `table_name`, `truncated`), the composed `notice`, and `format()`'s own header lines,
+ * spill or no-canvas notice, section headings, and attribution footer.
  *
  * Sized against the widest of those: a climate response echoing seven model names,
  * plus a notice carrying the unit warning, a coverage gap, and the canvas pointer
  * together, plus the longest of the two spill notices ({@link noCanvasNotice}).
+ *
+ * It covers only what the caller cannot make bigger. A `current` block scales with
+ * `current_variables` — 65 of them measured 3,927 characters, more than this whole
+ * reserve — so it is charged separately, as {@link inlineBudget}'s `fixed` argument.
  */
 const RESPONSE_SCAFFOLD_CHARS = 3_500;
 
@@ -116,7 +120,8 @@ const unitsCost = (units: UnitsMap | undefined): number =>
   units ? JSON.stringify(units).length : 0;
 
 /**
- * Divide {@link INLINE_CHARS} between a response's unit maps and its preview rows.
+ * Divide {@link INLINE_CHARS} between a response's fixed payload, its unit maps, and its
+ * preview rows.
  *
  * Call it once per handler with every unit map the response will carry, and use the
  * maps it hands back rather than the ones passed in — they are the same objects
@@ -131,16 +136,25 @@ const unitsCost = (units: UnitsMap | undefined): number =>
  * upstream envelope and are never written into the canvas schema. Only when they
  * would leave rows less than {@link MIN_ROW_CHARS} are entries dropped, and
  * {@link unitsTrimmedNotice} states the count and the levers that recover them.
+ *
+ * @param fixed - A payload the response carries whole, charged in full before anything
+ * is divided: the `current` block on the forecast and air-quality tools, which is one
+ * record wide enough to matter and has neither a preview to bound nor a canvas to spill
+ * to. It comes out of the units cap as well as the row budget, so the rows keep their
+ * {@link MIN_ROW_CHARS} floor. `undefined` on a response that carries none.
  */
 export function inlineBudget<T extends readonly (UnitsMap | undefined)[]>(
+  fixed: Record<string, unknown> | undefined,
   ...unitMaps: T
 ): InlineBudget<{ [K in keyof T]: UnitsMap | undefined }> {
+  const fixedCost = fixed ? JSON.stringify(fixed).length : 0;
+  const unitsCap = UNITS_CHARS - fixedCost;
   const total = unitMaps.reduce<number>((chars, units) => chars + unitsCost(units), 0);
-  if (total <= UNITS_CHARS) {
+  if (total <= unitsCap) {
     return {
       units: unitMaps as unknown as { [K in keyof T]: UnitsMap | undefined },
       omittedUnits: 0,
-      rowBudget: INLINE_CHARS - RESPONSE_SCAFFOLD_CHARS - total,
+      rowBudget: INLINE_CHARS - RESPONSE_SCAFFOLD_CHARS - fixedCost - total,
     };
   }
 
@@ -157,7 +171,7 @@ export function inlineBudget<T extends readonly (UnitsMap | undefined)[]>(
     const kept: UnitsMap = {};
     for (const [name, unit] of Object.entries(units)) {
       const entry = name.length + unit.length + 6;
-      if (spent + entry > UNITS_CHARS) {
+      if (spent + entry > unitsCap) {
         omitted += 1;
         continue;
       }

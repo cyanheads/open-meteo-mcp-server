@@ -49,8 +49,8 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
   description:
     'Long-range climate projections from bias-corrected daily CMIP6 models, covering ' +
     '1950-01-01 to 2050-12-31 at any coordinate. Answers "what will conditions look like ' +
-    'through 2050?" — the future-projection counterpart to openmeteo_get_historical (ERA5, ' +
-    `what happened). Daily resolution only. Available models: ${CLIMATE_MODEL_LIST}. ` +
+    'through 2050?" — the future-projection counterpart to openmeteo_get_historical (the ' +
+    `observed archive, what happened). Daily resolution only. Available models: ${CLIMATE_MODEL_LIST}. ` +
     'A model name outside that list is sent upstream rather than rejected here, so a model ' +
     'Open-Meteo adds later still works; if upstream rejects the request, the error names the ' +
     'offending model on its own rather than the whole requested list. ' +
@@ -69,7 +69,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'start_date predates 1950-01-01 or end_date is after 2050-12-31',
       recovery:
-        'Use dates between 1950-01-01 and 2050-12-31 — the CMIP6 projection coverage. For observed history before 1950 limits, use openmeteo_get_historical (ERA5, from 1940).',
+        'Use dates between 1950-01-01 and 2050-12-31 — the CMIP6 projection coverage. For observed history before 1950 limits, use openmeteo_get_historical (the archive, from 1940).',
       retryable: false,
     },
     {
@@ -348,7 +348,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       units: [dailyUnits],
       omittedUnits,
       rowBudget,
-    } = inlineBudget(rawDailyUnits);
+    } = inlineBudget(undefined, rawDailyUnits);
 
     // One notice, composed — ctx.enrich.notice is last-write-wins on a single key.
     const notice = composeNotice(ctx);

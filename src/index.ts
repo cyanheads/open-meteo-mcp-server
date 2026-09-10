@@ -48,13 +48,13 @@ await createApp({
     'Weather data by Open-Meteo.com (CC BY 4.0).\n\n' +
     'Workflow:\n' +
     '1. openmeteo_search_locations — resolve a place name to coordinates (required first step for name-based queries)\n' +
-    '2. openmeteo_get_forecast — up to 16 days ahead + 92 days past_days; hourly and/or daily variables. A wide window spills like the historical tool\n' +
-    '3. openmeteo_get_historical — ERA5 archive from 1940; use start_date/end_date\n' +
+    '2. openmeteo_get_forecast — up to 16 days ahead + 92 days past_days; current_variables for conditions right now, and/or hourly and daily variables. A wide window spills like the historical tool\n' +
+    '3. openmeteo_get_historical — archive from 1940; use start_date/end_date. Omitting models reads Open-Meteo Best Match (IFS HRES + ERA5 + ERA5-Land); set models to pin one source\n' +
     '4. openmeteo_get_marine — wave/swell for coastal and ocean points; up to 8 forecast days, past_days, or a start_date+end_date archive range back to at least 2022\n' +
-    '5. openmeteo_get_air_quality — CAMS modeled PM2.5, PM10, ozone, AQI; up to 7 forecast days, past_days, or a start_date+end_date archive range; the CAMS global archive begins in August 2022\n' +
+    '5. openmeteo_get_air_quality — CAMS modeled PM2.5, PM10, ozone, AQI; current_variables for values right now, up to 7 forecast days, past_days, or a start_date+end_date archive range; the CAMS global archive begins in August 2022\n' +
     '6. openmeteo_get_elevation — Copernicus DEM terrain elevation for up to 100 coordinate pairs\n' +
     '7. openmeteo_get_ensemble — probabilistic ensemble forecast (up to 64 members, 16 days); use for exceedance probabilities and uncertainty quantification. A regional model queried outside its coverage area fails as an input error naming the gap — switch to a global model, do not retry\n' +
-    '8. openmeteo_get_flood — GloFAS river discharge forecast (up to 210 days) OR reanalysis (from 1984, start_date+end_date together); the two modes are mutually exclusive. Coordinate-based, snaps to nearest river\n' +
+    '8. openmeteo_get_flood — GloFAS river discharge forecast (up to 210 days) OR reanalysis (from 1984, start_date+end_date together); the two modes are mutually exclusive. Coordinate-based — discharge comes from the largest modeled river within 5 km of the point, not necessarily the closest; vary the coordinate by ~0.1° and compare when a result looks unrepresentative\n' +
     '9. openmeteo_get_climate — bias-corrected daily CMIP6 climate projections (1950–2050, up to 7 models); use for multi-decade "what will conditions look like" questions\n\n' +
     'DataCanvas workflow (requires CANVAS_PROVIDER_TYPE=duckdb):\n' +
     '- openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate with a large query returns canvas_id + truncated: true\n' +
@@ -62,10 +62,11 @@ await createApp({
     '- openmeteo_dataframe_query — run SQL SELECT against staged tables\n\n' +
     'Notes:\n' +
     '- All weather tools take latitude/longitude — use openmeteo_search_locations first for place names\n' +
-    '- ERA5 has a variable lag (~1–5 days). For recent history, use openmeteo_get_forecast with past_days\n' +
+    '- The archive default is the Best Match blend, so its provenance varies by date; its ERA5 components lag ~1–5 days while IFS HRES does not. For recent history, use openmeteo_get_forecast with past_days, or request models: ["ecmwf_ifs"] on openmeteo_get_historical\n' +
+    '- current_variables on openmeteo_get_forecast and openmeteo_get_air_quality answers "right now" — a current object plus current_units, and no hourly series needed. The block\'s interval field reports the update cadence in seconds: 900 on the forecast endpoint, 3600 on air quality\n' +
     '- All responses use timezone=auto by default (localizes to the location)\n' +
     '- Variable names are exact API names: temperature_2m, pm2_5, wave_height, river_discharge, etc.\n' +
     '- hourly_variables and daily_variables take separate variable sets — cloud_cover is hourly, temperature_2m_max is daily. A variable passed in the wrong field is rejected before the request, naming the value and the field it belongs in\n' +
     '- Large forecast/historical/marine/air-quality/ensemble/flood/climate queries spill to DataCanvas when CANVAS_PROVIDER_TYPE=duckdb; with it unset they return a bounded preview and truncated: true, so narrow the request or enable canvas to reach the rest. A two-cadence preview carries both hourly and daily rows in either configuration — neither is dropped for the other, and the two share one inline budget\n' +
-    '- The models value on openmeteo_get_ensemble and openmeteo_get_climate is not validated locally: a name the tool does not advertise still goes upstream, so a model Open-Meteo adds later works without a server update. When upstream rejects a multi-model climate request it names only the offending model — correct that one and leave the rest',
+    '- The models value on openmeteo_get_ensemble, openmeteo_get_climate, and openmeteo_get_historical is not validated locally: a name the tool does not advertise still goes upstream, so a model Open-Meteo adds later works without a server update. When upstream rejects a multi-model climate request it names only the offending model — correct that one and leave the rest',
 });
