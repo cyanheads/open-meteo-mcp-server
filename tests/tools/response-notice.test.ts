@@ -305,4 +305,71 @@ describe('describeCoverageGaps', () => {
     expect(describeCoverageGaps([])).toBeUndefined();
     expect(describeCoverageGaps([], [])).toBeUndefined();
   });
+
+  // --- negligible partial gaps (#52) -----------------------------------------
+
+  const partial = (over: Partial<CoverageGap> = {}): CoverageGap => ({
+    cadence: 'daily',
+    kind: 'partial',
+    first: '1950-01-01',
+    last: '2050-12-30',
+    nullRows: 1,
+    totalRows: 36_890,
+    variables: ['temperature_2m_max'],
+    ...over,
+  });
+
+  it.each([
+    ['leading', { first: '1950-01-02', last: '2050-12-31' }],
+    ['interior', { first: '1950-01-01', last: '2050-12-31' }],
+    ['trailing', { first: '1950-01-01', last: '2050-12-30' }],
+  ])('says nothing about a single %s null in an otherwise full series (#52)', (_where, edges) => {
+    // Live: a climate pull returns one null row of 36,890 and used to get the same
+    // sentence a model-horizon gap gets, so a caller skimming the notice could not
+    // tell a stray null from a real gap.
+    expect(describeCoverageGaps([partial(edges)])).toBeUndefined();
+  });
+
+  it('suppresses the row under the floor and reports the row at it (#52)', () => {
+    expect(describeCoverageGaps([partial({ nullRows: 5, totalRows: 16 })])).toBeUndefined();
+    expect(describeCoverageGaps([partial({ nullRows: 6, totalRows: 16 })])).toContain(
+      '6 of 16 rows are null',
+    );
+  });
+
+  it('reports a large gap and drops a negligible one in the same response (#52)', () => {
+    const text = describeCoverageGaps([
+      partial({ variables: ['precipitation_sum'], nullRows: 2 }),
+      partial({ variables: ['temperature_2m_max'], nullRows: 65, totalRows: 72 }),
+    ]);
+
+    expect(text).toContain('temperature_2m_max');
+    expect(text).not.toContain('precipitation_sum');
+  });
+
+  it('never suppresses an all-null gap, however few rows it has (#52)', () => {
+    // Absent data is not a small gap: one null row out of one is the whole answer.
+    const text = describeCoverageGaps([
+      gap({ kind: 'all-null', nullRows: 1, totalRows: 1, variables: ['river_discharge'] }),
+    ]);
+
+    expect(text).toContain('No hourly data for river_discharge');
+  });
+
+  it('leaves the gap analysis itself intact for a negligible gap (#52)', () => {
+    // The floor governs prominence in the message, not detection or grouping —
+    // findCoverageGaps still merges and reports the gap it found.
+    const time = hourlyTimes(48);
+    const block: ColumnarBlock = {
+      time,
+      pm2_5: time.map((_, row) => (row === 20 ? null : 4.1)),
+      pm10: time.map((_, row) => (row === 20 ? null : 8.2)),
+    };
+
+    const gaps = findCoverageGaps('hourly', block, { pm2_5: 'μg/m³', pm10: 'μg/m³' });
+
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toMatchObject({ kind: 'partial', nullRows: 1, variables: ['pm2_5', 'pm10'] });
+    expect(describeCoverageGaps(gaps)).toBeUndefined();
+  });
 });

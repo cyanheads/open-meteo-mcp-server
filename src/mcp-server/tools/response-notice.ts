@@ -160,6 +160,30 @@ export function findCoverageGaps(
   }));
 }
 
+/**
+ * Null rows a `partial` gap needs before it earns a sentence.
+ *
+ * Every sentence in the composed notice reads with the same weight, so a single stray
+ * null — a climate pull whose final projected day is empty, 1 row of 36,890 — arrived
+ * looking exactly as consequential as a model running out of forecast horizon. Six is
+ * the smallest gap observed live that a caller can act on: `ncep_gefs025` over a
+ * sixteen-day window serves ten days and returns six null daily rows, and narrowing
+ * `forecast_days` or switching models is a real response to that. Anything shorter is
+ * noise in the data, not a coverage boundary.
+ *
+ * Applied to the message only — {@link findCoverageGaps} still detects, merges, and
+ * returns the gap, so the analysis stays complete for any other reader.
+ */
+const MIN_REPORTED_NULL_ROWS = 6;
+
+/**
+ * True when a gap is too small to be worth a sentence. `all-null` never qualifies,
+ * whatever its row count: absent data is the answer to the request, not a gap in it.
+ */
+function isNegligible(gap: CoverageGap): boolean {
+  return gap.kind === 'partial' && gap.nullRows < MIN_REPORTED_NULL_ROWS;
+}
+
 /** `a, b, c, and 5 more`, capped at {@link MAX_NAMED} names. */
 function nameList(variables: readonly string[]): string {
   if (variables.length <= MAX_NAMED) return variables.join(', ');
@@ -167,8 +191,10 @@ function nameList(variables: readonly string[]): string {
 }
 
 /**
- * The surfaced message: one sentence per gap, naming the affected variables and either
- * that the whole window is empty or where the data actually starts and stops.
+ * The surfaced message: one sentence per gap worth reporting, naming the affected
+ * variables and either that the whole window is empty or where the data actually starts
+ * and stops. A partial gap under {@link MIN_REPORTED_NULL_ROWS} is left out, so a stray
+ * null does not read like a coverage boundary.
  *
  * `record_count` is deliberately untouched by any of this — it reports rows, and the
  * rows are real. What the caller cannot see without this sentence is that the values
@@ -180,6 +206,7 @@ function nameList(variables: readonly string[]): string {
 export function describeCoverageGaps(...gaps: readonly CoverageGap[][]): string | undefined {
   const sentences = gaps
     .flat()
+    .filter((gap) => !isNegligible(gap))
     .map((gap) =>
       gap.kind === 'all-null'
         ? `No ${gap.cadence} data for ${nameList(gap.variables)} anywhere in the requested window — ` +
