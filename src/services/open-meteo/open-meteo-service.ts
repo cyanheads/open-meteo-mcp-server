@@ -130,14 +130,57 @@ function coverageGapError(origin: RequestOrigin, url: string, fromNanBody: boole
   );
 }
 
+/**
+ * Named separately from the reason-bearing wording below because it is the half a
+ * caller needs when upstream sends no envelope: the free tier enforces per-minute,
+ * per-hour, and per-day limits, and which one was hit decides the wait.
+ */
+const RATE_LIMIT_WINDOWS =
+  'Open-Meteo enforces separate per-minute, per-hour, and per-day free-tier limits, so how ' +
+  'long the wait is depends on which one was reached.';
+
+/** True of every rate-limit rejection: the window reopens on a clock, not on a retry. */
+const RATE_LIMIT_RETRY = 'Retrying immediately returns the same response.';
+
+/**
+ * The rejection for HTTP 429, built from the body when it carries an envelope.
+ *
+ * A 429 names its own window — `Daily API request limit exceeded. Please try again
+ * tomorrow.` is a maintainer-quoted example — so relaying that sentence is both more
+ * accurate and more actionable than any fixed wording this module could assert. The
+ * generic branch names all three windows rather than promising one, which is what the
+ * hardcoded "Retry in a minute" it replaces got wrong on a daily quota.
+ */
+function rateLimitError(text: string, url: string): McpError {
+  let reason: string | undefined;
+  try {
+    const reported = (JSON.parse(text) as Record<string, unknown> | null)?.reason;
+    if (typeof reported === 'string' && reported.trim() !== '') reason = reported.trim();
+  } catch {
+    /* An edge 429 answers with plain text or an HTML page — the status still classifies it. */
+  }
+
+  return rateLimited(
+    reason
+      ? `Open-Meteo rate limit reached: ${reason} ${RATE_LIMIT_RETRY}`
+      : `Open-Meteo rate limit reached (HTTP 429). ${RATE_LIMIT_WINDOWS} ${RATE_LIMIT_RETRY}`,
+    { url },
+  );
+}
+
+/**
+ * Which failures the retry loop is allowed to spend attempts on.
+ *
+ * `RateLimited` is deliberately absent. A rate-limit window reopens on a fixed
+ * schedule — a minute, an hour, or a day — and the whole retry budget is 1.5s of
+ * backoff across three attempts, so retrying one can only ever fail three times and
+ * report the outcome as an outage: this predicate replaces the framework's default
+ * entirely, so an error it admits is one `withRetry` will retry.
+ */
 function isRetryable(error: unknown): boolean {
   if (error instanceof TypeError) return true;
   if (error instanceof McpError) {
-    return [
-      JsonRpcErrorCode.ServiceUnavailable,
-      JsonRpcErrorCode.Timeout,
-      JsonRpcErrorCode.RateLimited,
-    ].includes(error.code);
+    return [JsonRpcErrorCode.ServiceUnavailable, JsonRpcErrorCode.Timeout].includes(error.code);
   }
   return false;
 }
@@ -162,6 +205,12 @@ async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigi
   }
 
   const text = await response.text();
+
+  // Rate limit — classified by status ahead of every body-shape check, since an edge
+  // 429 can answer with an HTML page the transient guard below would otherwise retry.
+  if (response.status === 429) {
+    throw rateLimitError(text, url);
+  }
 
   // CDN error page — treat as transient
   if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
@@ -203,9 +252,6 @@ async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigi
   }
 
   if (!response.ok) {
-    if (response.status === 429) {
-      throw rateLimited('Open-Meteo rate limit reached. Retry in a minute.', { url });
-    }
     if (response.status >= 500) {
       throw serviceUnavailable(`Open-Meteo API returned ${response.status}.`, { url });
     }

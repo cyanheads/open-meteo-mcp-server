@@ -92,6 +92,69 @@ describe('OpenMeteoService upstream classification', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it('surfaces a 429 as a rate limit carrying the upstream reason, with no retry burn (#49)', async () => {
+    /*
+     * A free-tier quota rejection clears on a fixed schedule, not on retry, so the
+     * three attempts the transient classification spent on it could never succeed —
+     * and the trailing rewrap reported the result as a generic outage under
+     * ServiceUnavailable, discarding both the code and upstream's own explanation.
+     */
+    respondWith(
+      '{"error":true,"reason":"Daily API request limit exceeded. Please try again tomorrow."}',
+      429,
+    );
+    const ctx = createMockContext();
+
+    const error = await getOpenMeteoService()
+      .getHistorical(
+        47.6,
+        -122.3,
+        { start_date: '2024-07-01', end_date: '2024-07-02', hourly: ['temperature_2m'] },
+        ctx,
+      )
+      .catch((e: Error) => e);
+
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.RateLimited });
+    if (!(error instanceof Error)) throw new Error('Expected getHistorical to reject');
+    expect(error.message).toContain('Daily API request limit exceeded');
+    expect(error.message).not.toContain('unavailable after');
+    // The old wording named a reset window upstream's own limits contradict.
+    expect(error.message).not.toMatch(/retry in a minute/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to generic rate-limit wording when a 429 carries no envelope (#49)', async () => {
+    // An edge 429 answers with plain text rather than the JSON envelope: the status
+    // is what classifies it, so the body shape cannot turn it back into a retry.
+    respondWith('Too Many Requests', 429);
+    const ctx = createMockContext();
+
+    const error = await getOpenMeteoService()
+      .getForecast(47.6, -122.3, { hourly: ['temperature_2m'] }, ctx)
+      .catch((e: Error) => e);
+
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.RateLimited });
+    if (!(error instanceof Error)) throw new Error('Expected getForecast to reject');
+    expect(error.message).toContain('rate limit');
+    expect(error.message).toMatch(/per-minute, per-hour, and per-day/);
+    expect(error.message).not.toMatch(/retry in a minute/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies a 429 by status even when the body is a CDN HTML page (#49)', async () => {
+    // The HTML guard reports a transient outage, which is right for a 502 page and
+    // wrong for a rate limit — the status decides first.
+    respondWith('<!DOCTYPE html><html><body>429 Too Many Requests</body></html>', 429);
+    const ctx = createMockContext();
+
+    const error = await getOpenMeteoService()
+      .getForecast(47.6, -122.3, { hourly: ['temperature_2m'] }, ctx)
+      .catch((e: Error) => e);
+
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.RateLimited });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('still retries an unparseable body that is not the nan shape (#33)', async () => {
     // The narrow match is deliberate: a truncated or garbled body carries no evidence
     // that the request itself is wrong, so it keeps its retries.
