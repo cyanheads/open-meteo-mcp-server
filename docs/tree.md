@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-09-09 22:39:30
+Generated on: 2026-09-10 01:12:03
 
 ```text
 open-meteo-mcp-server/
@@ -156,6 +156,7 @@ open-meteo-mcp-server/
 │   │       │   └── search-locations.tool.ts
 │   │       ├── model-catalog.ts
 │   │       ├── reshape-utils.ts
+│   │       ├── response-notice.ts
 │   │       ├── spill-utils.ts
 │   │       ├── timezone-input.ts
 │   │       ├── upstream-error.ts
@@ -170,7 +171,8 @@ open-meteo-mcp-server/
 │   ├── fuzz/
 │   │   └── search-locations.tool.fuzz.test.ts
 │   ├── helpers/
-│   │   └── content.ts
+│   │   ├── content.ts
+│   │   └── inline-surface.ts
 │   ├── integration/
 │   │   └── search-locations-contract.int.test.ts
 │   ├── prompts/
@@ -193,6 +195,7 @@ open-meteo-mcp-server/
 │       ├── get-historical.tool.test.ts
 │       ├── get-marine.tool.test.ts
 │       ├── model-catalog.test.ts
+│       ├── response-notice.test.ts
 │       ├── search-locations.tool.test.ts
 │       ├── spill-utils.test.ts
 │       ├── tool-surface.test.ts

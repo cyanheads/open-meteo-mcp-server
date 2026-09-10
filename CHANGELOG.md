@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.7](changelog/0.3.x/0.3.7.md) — 2026-09-09
+
+Bounds the whole inline response — not just preview rows — against the size ceiling, adds temporal coverage-gap notices, and names both dataframe tools on every canvas pointer.
+
 ## [0.3.6](changelog/0.3.x/0.3.6.md) — 2026-09-09
 
 Declares invalid_timezone and date_order_invalid error reasons, splits coverage-gap recovery by whether the endpoint exposes models, extends search_locations recovery to short native-script names, documents stateless as the default MCP_SESSION_MODE, and bumps mcp-ts-core to 0.12.8.
