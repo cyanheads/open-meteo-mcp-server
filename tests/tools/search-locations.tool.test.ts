@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoSearchLocationsTool } from '@/mcp-server/tools/definitions/search-locations.tool.js';
 import { firstText } from '../helpers/content.js';
@@ -363,5 +363,171 @@ describe('openmeteoSearchLocationsTool', () => {
     expect(text).not.toContain('null');
     expect(text).not.toContain('undefined');
     expect(text).not.toContain('()');
+  });
+});
+
+describe('openmeteoSearchLocationsTool low-confidence notice (#48)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /** Live top result for name="Calcutta" — a South African village, not Kolkata. */
+  const CALCUTTA_ZA = {
+    id: 1004357,
+    name: 'Calcutta',
+    latitude: -24.7,
+    longitude: 30.9,
+    elevation: 800.0,
+    feature_code: 'PPL',
+    country_code: 'ZA',
+    country: 'South Africa',
+    admin1: 'Mpumalanga',
+    admin2: null,
+    timezone: 'Africa/Johannesburg',
+    population: 35864,
+  };
+
+  /** Live top (and only) result for name="Bangalore" — a Karachi neighbourhood. */
+  const BANGALORE_TOWN_PK = {
+    id: 1184180,
+    name: 'Bangalore Town',
+    latitude: 24.8717,
+    longitude: 67.0839,
+    elevation: 12.0,
+    feature_code: 'PPLX',
+    country_code: 'PK',
+    country: 'Pakistan',
+    admin1: 'Sindh',
+    admin2: null,
+    timezone: 'Asia/Karachi',
+    population: null,
+  };
+
+  const noticeFor = async (results: unknown[], name: string) => {
+    mockGetGeocode.mockResolvedValue({ results });
+    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
+    const input = openmeteoSearchLocationsTool.input.parse({ name });
+    const result = await openmeteoSearchLocationsTool.handler(input, ctx);
+    return { notice: getEnrichment(ctx).notice as string | undefined, result };
+  };
+
+  it('declares an enrichment notice field, like the seven weather tools', () => {
+    expect(openmeteoSearchLocationsTool.enrichment?.notice).toBeDefined();
+    expect(openmeteoSearchLocationsTool.enrichment?.notice?.description ?? '').toMatch(
+      /population/i,
+    );
+  });
+
+  it('flags a null-population top result, naming place, country, and feature_code', async () => {
+    const { notice } = await noticeFor([BANGALORE_TOWN_PK], 'Bangalore');
+    expect(notice).toContain('Bangalore Town');
+    expect(notice).toContain('Pakistan');
+    expect(notice).toContain('PPLX');
+    expect(notice).toMatch(/no recorded population/i);
+    // The caller's own knowledge supplies the modern name — the server holds no table.
+    expect(notice).toMatch(/official name/i);
+    expect(notice).toMatch(/verify/i);
+  });
+
+  it('flags a small-population top result', async () => {
+    const { notice } = await noticeFor([CALCUTTA_ZA], 'Calcutta');
+    expect(notice).toContain('Calcutta');
+    expect(notice).toContain('South Africa');
+    expect(notice).toContain('PPL');
+    expect(notice).toContain('35,864');
+  });
+
+  it('leaves a well-populated top result unflagged', async () => {
+    const { notice } = await noticeFor([SEATTLE_RESULT], 'Seattle');
+    expect(notice).toBeUndefined();
+  });
+
+  it.each([
+    ['Bengaluru', 8495492],
+    ['Mumbai', 12691836],
+    ['Chennai', 4681087],
+    ['Kolkata', 4631392],
+    ['Beijing', 18960744],
+    ['Ho Chi Minh City', 14002598],
+    ['Paris', 2138551],
+    ['Baoding', 1132000],
+    ['Springfield', 166810],
+    ['Seattle', 780995],
+  ])('%s resolves unflagged at population %d', async (name, population) => {
+    const { notice } = await noticeFor([{ ...SEATTLE_RESULT, name, population }], name);
+    expect(notice).toBeUndefined();
+  });
+
+  it('flags every reproduced exonym miss', async () => {
+    for (const [name, population] of [
+      ['Bangalore Town', null],
+      ['Bombay', null],
+      ['Madras', 6662],
+      ['Calcutta', 35864],
+      ['Peking', null],
+      ['Saigon', null],
+    ] as [string, number | null][]) {
+      const { notice } = await noticeFor([{ ...CALCUTTA_ZA, name, population }], name);
+      expect(notice, name).toBeDefined();
+    }
+  });
+
+  it('does not flag at the threshold, and flags one below it', async () => {
+    expect(
+      (await noticeFor([{ ...SEATTLE_RESULT, population: 100_000 }], 'X')).notice,
+    ).toBeUndefined();
+    expect(
+      (await noticeFor([{ ...SEATTLE_RESULT, population: 99_999 }], 'X')).notice,
+    ).toBeDefined();
+  });
+
+  it('reads the top result only — a low-population lead flags despite a large runner-up', async () => {
+    const { notice, result } = await noticeFor([CALCUTTA_ZA, SEATTLE_RESULT], 'Calcutta');
+    expect(notice).toContain('Calcutta');
+    expect(result.count).toBe(2);
+  });
+
+  it('is advisory — results and count are untouched, and no_results never fires', async () => {
+    const { notice, result } = await noticeFor([BANGALORE_TOWN_PK], 'Bangalore');
+    expect(notice).toBeDefined();
+    expect(result.count).toBe(1);
+    expect(result.results[0]?.name).toBe('Bangalore Town');
+    expect(result.results[0]?.latitude).toBe(24.8717);
+    expect(() => openmeteoSearchLocationsTool.output.parse(result)).not.toThrow();
+  });
+
+  it('names a countryless feature without rendering a null', async () => {
+    const { notice } = await noticeFor([ANTARCTICA_CONT_RESULT], 'Antarctica');
+    expect(notice).toContain('Antarctica');
+    expect(notice).toContain('CONT');
+    expect(notice).not.toContain('null');
+    expect(notice).not.toContain('undefined');
+  });
+
+  it('still throws no_results when nothing matched at all', async () => {
+    mockGetGeocode.mockResolvedValue({ generationtime_ms: 0.1 });
+    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
+    const input = openmeteoSearchLocationsTool.input.parse({ name: 'zzzznotaplace' });
+    await expect(openmeteoSearchLocationsTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_results' },
+    });
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('flags a result reached through the script-inferred retry the same way', async () => {
+    mockGetGeocode
+      .mockResolvedValueOnce({ generationtime_ms: 0.1 })
+      .mockResolvedValueOnce({ results: [{ ...SHANGHAI_ZH_RESULT, population: 900 }] });
+    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
+    const input = openmeteoSearchLocationsTool.input.parse({ name: '上海' });
+    await openmeteoSearchLocationsTool.handler(input, ctx);
+    expect(getEnrichment(ctx).notice).toContain('上海');
+  });
+
+  it('format() output is unchanged by the notice — it rides the enrichment trailer', async () => {
+    const { result } = await noticeFor([BANGALORE_TOWN_PK], 'Bangalore');
+    const text = firstText(openmeteoSearchLocationsTool.format!(result));
+    expect(text).toContain('Bangalore Town');
+    expect(text).not.toMatch(/official name/i);
   });
 });

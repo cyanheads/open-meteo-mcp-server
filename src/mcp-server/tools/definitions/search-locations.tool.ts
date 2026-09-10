@@ -31,6 +31,26 @@ function inferLanguageFromScript(name: string): string | undefined {
   return SCRIPT_LANGUAGES.find(([pattern]) => pattern.test(name))?.[1];
 }
 
+/**
+ * Population at or above which the top match is treated as a confident city hit.
+ *
+ * The upstream index owns matching, and it answers a historic or colonial exonym with a
+ * non-empty result set that does not contain the modern city at all — "Bangalore" returns
+ * a Karachi neighbourhood, "Calcutta" a South African village of 35,864, "Madras" a town
+ * in Oregon. Nothing about those responses is an error, so `no_results` never fires and
+ * re-ranking cannot help: the intended city is absent from the candidates, not outranked
+ * within them. Population is the one signal that separates them — every reproduced miss
+ * came back null or under 36,000, while every correctly-resolving query checked, down to
+ * the smallest, came back at 780,995 or above.
+ *
+ * 100,000 sits with room on both sides of that gap — roughly three times the largest
+ * observed miss and an eighth of the smallest observed correct match — and reads as a
+ * plain rule rather than a number fitted to the sample. A genuine small-town query
+ * (Leavenworth, Washington) trips it too; that costs the caller one advisory sentence and
+ * nothing else, since the notice never alters `results` or `count`.
+ */
+const CONFIDENT_MATCH_POPULATION = 100_000;
+
 /** Normalize raw API results — coalesce fields the API omits on sparse features. */
 function normalizeResults(results: GeocodingResult[] | undefined) {
   return (results ?? []).map((r) => ({
@@ -152,6 +172,15 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
     count: z.number().describe('Number of results returned'),
   }),
 
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Advisory on the confidence of the top match, present only when its population is null or under 100,000 — the shape a historic or colonial exonym returns, where the upstream index answers with an unrelated small feature and never surfaces the modern city. Names the returned place, country, and feature_code, and asks the caller to verify the coordinates or retry with the place’s current official name. Never changes results or count.',
+      ),
+  },
+
   async handler(input, ctx) {
     const service = getOpenMeteoService();
     const country = input.country?.toUpperCase();
@@ -184,6 +213,28 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
         'no_results',
         `No places found matching "${input.name}".`,
         ctx.recoveryFor('no_results'),
+      );
+    }
+
+    /*
+     * Confidence advisory on the top match — see CONFIDENT_MATCH_POPULATION. Raised
+     * after the no_results throw so there is always a result to name; an empty set is
+     * the error path's business, not this one's. Advisory only: results and count are
+     * returned exactly as upstream ranked them.
+     */
+    const top = results[0];
+    if (top && (top.population ?? 0) < CONFIDENT_MATCH_POPULATION) {
+      const where = top.country ? `${top.country}, ` : '';
+      const size =
+        top.population == null
+          ? 'no recorded population'
+          : `a population of ${top.population.toLocaleString('en-US')}`;
+      ctx.enrich.notice(
+        `Low-confidence match: the top result "${top.name}" (${where}feature_code ${top.feature_code}) has ` +
+          `${size}, below the ${CONFIDENT_MATCH_POPULATION.toLocaleString('en-US')} this tool reads as a ` +
+          'confident city match. Verify the coordinates before passing them to a weather tool. If the query ' +
+          'was a historic or colonial exonym, the index may hold no entry for it at all and has returned an ' +
+          'unrelated feature — retry with the place’s current official name.',
       );
     }
 
