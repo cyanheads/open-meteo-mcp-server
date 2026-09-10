@@ -44,7 +44,7 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="open-meteo-mcp-server"
-LABEL org.opencontainers.image.description="Geocode places, fetch global weather forecasts, ERA5 historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP."
+LABEL org.opencontainers.image.description="Geocode places, fetch global weather forecasts, historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/open-meteo-mcp-server"
