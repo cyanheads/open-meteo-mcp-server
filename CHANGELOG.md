@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.9](changelog/0.3.x/0.3.9.md) — 2026-09-09
+
+Adds current-conditions data to forecast and air quality, a models selector to historical (default relabeled from ERA5 to Best Match), corrected flood river-selection wording, and a low-confidence notice on geocoding.
+
 ## [0.3.8](changelog/0.3.x/0.3.8.md) — 2026-09-09
 
 Stops retrying HTTP 429, tells 'too much data' apart from a misspelled variable, and fixes two disclosure gaps in the truncation path.
