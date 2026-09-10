@@ -395,6 +395,43 @@ describe('openmeteoGetFloodTool', () => {
     });
   });
 
+  it('classifies the upstream too-much-data rejection as request_too_large (#50)', async () => {
+    // A multi-decade reanalysis pull across every percentile: the names are valid and
+    // the dates are in range, so neither the unknown-name nor the date branch fits.
+    mockGetFlood.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason:
+        'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const input = openmeteoGetFloodTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: ['river_discharge', 'river_discharge_p25', 'river_discharge_p75'],
+      start_date: '1984-01-01',
+      end_date: '2023-12-31',
+    });
+
+    const error = await Promise.resolve(openmeteoGetFloodTool.handler(input, ctx)).catch(
+      (e: Error) => e,
+    );
+
+    if (!(error instanceof Error)) throw new Error('Expected the flood handler to reject');
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'request_too_large',
+        recovery: { hint: expect.stringContaining('Narrow the request') },
+      },
+    });
+    expect(error.message).toContain('too much data at once');
+    expect(error.message).toContain('fewer daily_variables');
+    expect(error.message).not.toMatch(/exact Open-Meteo API name/);
+    // The date branch must not claim it: the reason carries neither "date" nor "range".
+    expect(error.message).not.toMatch(/GloFAS range/);
+  });
+
   it('returns empty daily array when API returns no daily block', async () => {
     mockGetFlood.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -655,6 +692,35 @@ describe('openmeteoGetFloodTool', () => {
     expect(JSON.stringify(result.daily).length).toBeLessThanOrEqual(rowBudgetFor(result));
     // record_count stays the full upstream total, not the preview length.
     expect(result.record_count).toBe(time.length);
+  });
+
+  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
+    // The disclosure reached content[] through format() alone, so a structuredContent-only
+    // client saw truncated: true with no canvas_id and nothing explaining either.
+    const time = dailyDates(15_000);
+    mockGetFlood.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      daily: { time, river_discharge: time.map((_, i) => 100 + (i % 40) + 0.5) },
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const result = await openmeteoGetFloodTool.handler(
+      openmeteoGetFloodTool.input.parse({
+        latitude: 47.6,
+        longitude: -122.3,
+        daily_variables: ['river_discharge'],
+        start_date: '1984-01-01',
+        end_date: '2026-07-15',
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
+    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(notice).toContain('fewer daily_variables');
+    expect(firstText(openmeteoGetFloodTool.format!(result))).toContain('CANVAS_PROVIDER_TYPE=none');
   });
 
   it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {

@@ -212,6 +212,40 @@ describe('openmeteoGetAirQualityTool', () => {
     });
   });
 
+  it('classifies the upstream too-much-data rejection as request_too_large (#50)', async () => {
+    // A window wide enough to trip the volume limit: the names are all valid, so the
+    // unknown-name framing pointed the caller at spelling rather than at narrowing.
+    mockGetAirQuality.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason:
+        'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const input = openmeteoGetAirQualityTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['pm2_5', 'european_aqi'],
+      past_days: 92,
+    });
+
+    const error = await Promise.resolve(openmeteoGetAirQualityTool.handler(input, ctx)).catch(
+      (e: Error) => e,
+    );
+
+    if (!(error instanceof Error)) throw new Error('Expected the air-quality handler to reject');
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'request_too_large',
+        recovery: { hint: expect.stringContaining('Narrow the request') },
+      },
+    });
+    expect(error.message).toContain('too much data at once');
+    expect(error.message).toContain('fewer hourly_variables');
+    expect(error.message).not.toMatch(/exact Open-Meteo API name/);
+  });
+
   it('notices an all-null column upstream reported with unit "undefined"', async () => {
     // The endpoint shares the forecast API's hourly variable parser, so a weather
     // variable it does not serve comes back HTTP 200 with an all-null column rather
@@ -828,6 +862,40 @@ describe('openmeteoGetAirQualityTool', () => {
     expect(JSON.stringify(result.hourly).length).toBeLessThanOrEqual(rowBudgetFor(result));
     // record_count stays the full upstream total, not the preview length.
     expect(result.record_count).toBe(time.length);
+  });
+
+  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
+    // The disclosure reached content[] through format() alone, so a structuredContent-only
+    // client saw truncated: true with no canvas_id and nothing explaining either.
+    const time = hourlyTimes(2232);
+    mockGetAirQuality.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: {
+        time,
+        pm2_5: time.map((_, i) => 3 + (i % 40) / 10),
+        european_aqi: time.map((_, i) => 10 + (i % 30)),
+      },
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const result = await openmeteoGetAirQualityTool.handler(
+      openmeteoGetAirQualityTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        hourly_variables: ['pm2_5', 'european_aqi'],
+        past_days: 92,
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
+    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(notice).toContain('fewer hourly_variables');
+    expect(firstText(openmeteoGetAirQualityTool.format!(result))).toContain(
+      'CANVAS_PROVIDER_TYPE=none',
+    );
   });
 
   // --- format() --------------------------------------------------------------

@@ -304,6 +304,40 @@ describe('openmeteoGetMarineTool', () => {
     });
   });
 
+  it('classifies the upstream too-much-data rejection as request_too_large (#50)', async () => {
+    // A window wide enough to trip the volume limit: the names are all valid, so the
+    // unknown-name framing pointed the caller at spelling rather than at narrowing.
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason:
+        'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const input = openmeteoGetMarineTool.input.parse({
+      latitude: 47.8,
+      longitude: -122.5,
+      hourly_variables: ['wave_height', 'wave_period'],
+      past_days: 92,
+    });
+
+    const error = await Promise.resolve(openmeteoGetMarineTool.handler(input, ctx)).catch(
+      (e: Error) => e,
+    );
+
+    if (!(error instanceof Error)) throw new Error('Expected the marine handler to reject');
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'request_too_large',
+        recovery: { hint: expect.stringContaining('Narrow the request') },
+      },
+    });
+    expect(error.message).toContain('too much data at once');
+    expect(error.message).toContain('fewer hourly_variables');
+    expect(error.message).not.toMatch(/exact Open-Meteo API name/);
+  });
+
   it('reshapes daily marine variables when daily_variables provided', async () => {
     mockGetMarine.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -1093,5 +1127,121 @@ describe('openmeteoGetMarineTool', () => {
     expect(notice).toContain('No hourly data for ocean_current_velocity');
     expect(notice).not.toContain('wave_height');
     expect(result.record_count).toBe(48);
+  });
+
+  // --- no-canvas disclosure (#51), unrequested cadence (#53) -----------------
+
+  const stageOnCanvas = (rowCount: number) => {
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount, tableName: 'spilled_ma53' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-ma-53' }) };
+  };
+
+  it.each([
+    ['canvas enabled', true],
+    ['canvas disabled', false],
+  ])('omits daily on a truncated hourly-only request — %s (#53)', async (_label, canvasEnabled) => {
+    const { hourly, hourlyUnits } = wideWindow();
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: hourlyUnits,
+      hourly,
+      daily_units: undefined,
+      daily: undefined,
+    });
+    if (canvasEnabled) stageOnCanvas(2400);
+    else mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const result = await openmeteoGetMarineTool.handler(
+      openmeteoGetMarineTool.input.parse({
+        latitude: 47.8,
+        longitude: -122.5,
+        hourly_variables: ['wave_height', 'wave_period'],
+        past_days: 92,
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.daily).toBeUndefined();
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    expect(firstText(openmeteoGetMarineTool.format!(result))).not.toContain(
+      '### Daily marine summary',
+    );
+  });
+
+  it.each([
+    ['canvas enabled', true],
+    ['canvas disabled', false],
+  ])('omits hourly on a truncated daily-only request — %s (#53)', async (_label, canvasEnabled) => {
+    // An archive range back to 2022 across the daily wave summary: ~1,460 rows.
+    const time = Array.from({ length: 1460 }, (_, i) => {
+      const d = new Date('2022-01-01T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() + i);
+      return d.toISOString().slice(0, 10);
+    });
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: undefined,
+      hourly: undefined,
+      daily_units: {
+        time: 'iso8601',
+        wave_height_max: 'm',
+        wave_direction_dominant: '°',
+        wave_period_max: 's',
+      },
+      daily: {
+        time,
+        wave_height_max: time.map((_, i) => 2 + (i % 15) / 10),
+        wave_direction_dominant: time.map((_, i) => 90 + (i % 40)),
+        wave_period_max: time.map((_, i) => 9 + (i % 6)),
+      },
+    });
+    if (canvasEnabled) stageOnCanvas(time.length);
+    else mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const result = await openmeteoGetMarineTool.handler(
+      openmeteoGetMarineTool.input.parse({
+        latitude: 36.8,
+        longitude: -75.0,
+        daily_variables: ['wave_height_max', 'wave_direction_dominant', 'wave_period_max'],
+        start_date: '2022-01-01',
+        end_date: '2025-12-31',
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.hourly).toBeUndefined();
+    expect(result.daily?.length ?? 0).toBeGreaterThan(0);
+    expect(firstText(openmeteoGetMarineTool.format!(result))).not.toContain('### Hourly marine');
+  });
+
+  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
+    const { hourly, hourlyUnits, daily, dailyUnits } = wideWindow();
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: hourlyUnits,
+      daily_units: dailyUnits,
+      hourly,
+      daily,
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const result = await openmeteoGetMarineTool.handler(wideInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
+    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(notice).toContain('fewer past_days / forecast_days');
+    expect(firstText(openmeteoGetMarineTool.format!(result))).toContain(
+      'CANVAS_PROVIDER_TYPE=none',
+    );
   });
 });

@@ -359,6 +359,41 @@ describe('openmeteoGetHistoricalTool', () => {
     });
   });
 
+  it('classifies the upstream too-much-data rejection as request_too_large (#50)', async () => {
+    // Confirmed against the archive endpoint for a 1940–2026 hourly range across 30
+    // variables: every name is valid, and only the request's volume is refused.
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason:
+        'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const input = openmeteoGetHistoricalTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      start_date: '1940-01-01',
+      end_date: '2026-01-01',
+      hourly_variables: ['temperature_2m', 'precipitation'],
+    });
+
+    const error = await Promise.resolve(openmeteoGetHistoricalTool.handler(input, ctx)).catch(
+      (e: Error) => e,
+    );
+
+    if (!(error instanceof Error)) throw new Error('Expected the historical handler to reject');
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'request_too_large',
+        recovery: { hint: expect.stringContaining('Narrow the request') },
+      },
+    });
+    expect(error.message).toContain('too much data at once');
+    expect(error.message).toContain('shorter start_date–end_date range');
+    expect(error.message).not.toMatch(/exact Open-Meteo API name/);
+  });
+
   it('throws date_out_of_range when API error reason contains "range"', async () => {
     // Verifies the "range" keyword path is also classified correctly.
     mockGetHistorical.mockResolvedValue({
@@ -1041,5 +1076,126 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(notice).toContain('No hourly data for snow_depth');
     expect(notice).not.toContain('temperature_2m');
     expect(result.record_count).toBe(48);
+  });
+
+  // --- no-canvas disclosure (#51), unrequested cadence (#53) -----------------
+
+  const stageOnCanvas = (rowCount: number) => {
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount, tableName: 'spilled_hi53' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-hi-53' }) };
+  };
+
+  it.each([
+    ['canvas enabled', true],
+    ['canvas disabled', false],
+  ])('omits daily on a truncated hourly-only request — %s (#53)', async (_label, canvasEnabled) => {
+    const { hourly, hourlyUnits } = wideArchive();
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: hourlyUnits,
+      hourly,
+      daily_units: undefined,
+      daily: undefined,
+    });
+    if (canvasEnabled) stageOnCanvas(8760);
+    else mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const result = await openmeteoGetHistoricalTool.handler(
+      openmeteoGetHistoricalTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        start_date: '2023-01-01',
+        end_date: '2023-12-31',
+        hourly_variables: ['temperature_2m', 'precipitation'],
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.daily).toBeUndefined();
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    expect(firstText(openmeteoGetHistoricalTool.format!(result))).not.toContain('### Daily');
+  });
+
+  it.each([
+    ['canvas enabled', true],
+    ['canvas disabled', false],
+  ])('omits hourly on a truncated daily-only request — %s (#53)', async (_label, canvasEnabled) => {
+    // The live symmetric repro: 12,784 daily records over 1990–2024, no hourly_variables.
+    const time = dailyDates(12_784, '1990-01-01');
+    const daily: Record<string, (number | null)[] | string[]> = { time };
+    const dailyUnits: Record<string, string> = { time: 'iso8601' };
+    for (const variable of [
+      'temperature_2m_max',
+      'temperature_2m_min',
+      'precipitation_sum',
+      'wind_speed_10m_max',
+      'sunrise',
+      'sunset',
+    ]) {
+      daily[variable] = time.map((_, row) => 10.5 + (row % 20));
+      dailyUnits[variable] = '°C';
+    }
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: undefined,
+      hourly: undefined,
+      daily_units: dailyUnits,
+      daily,
+    });
+    if (canvasEnabled) stageOnCanvas(time.length);
+    else mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const result = await openmeteoGetHistoricalTool.handler(
+      openmeteoGetHistoricalTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        start_date: '1990-01-01',
+        end_date: '2024-12-31',
+        daily_variables: [
+          'temperature_2m_max',
+          'temperature_2m_min',
+          'precipitation_sum',
+          'wind_speed_10m_max',
+          'sunrise',
+          'sunset',
+        ],
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.hourly).toBeUndefined();
+    expect(result.daily?.length ?? 0).toBeGreaterThan(0);
+    expect(firstText(openmeteoGetHistoricalTool.format!(result))).not.toContain('### Hourly');
+  });
+
+  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
+    const { hourly, hourlyUnits, daily, dailyUnits } = wideArchive();
+    mockGetHistorical.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: hourlyUnits,
+      daily_units: dailyUnits,
+      hourly,
+      daily,
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const result = await openmeteoGetHistoricalTool.handler(wideInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
+    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(notice).toContain('a shorter start_date–end_date range');
+    expect(firstText(openmeteoGetHistoricalTool.format!(result))).toContain(
+      'CANVAS_PROVIDER_TYPE=none',
+    );
   });
 });

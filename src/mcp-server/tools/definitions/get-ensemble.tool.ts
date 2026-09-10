@@ -34,13 +34,26 @@ import {
   frameInvalidTimezoneMessage,
   isInvalidTimezoneReason,
 } from '../timezone-input.js';
-import { frameInvalidVariableMessage } from '../upstream-error.js';
+import {
+  frameInvalidVariableMessage,
+  frameRequestTooLargeMessage,
+  isRequestTooLargeReason,
+} from '../upstream-error.js';
 import {
   describeCadenceMismatches,
   ENSEMBLE_CADENCE,
   findCadenceMismatches,
   undefinedUnitColumns,
 } from '../variable-cadence.js';
+
+/**
+ * The inputs that shrink this tool's payload, named wherever a response has to tell the
+ * caller how to ask for less: the upstream too-much-data rejection, and the no-canvas
+ * preview notice on both response surfaces. `models` takes one model, so the lever is a
+ * lighter model rather than a shorter list.
+ */
+const PAYLOAD_NARROWING =
+  'fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or a models value with fewer members (gem_global_ensemble has 21, ecmwf_ifs025_ensemble 51)';
 
 /**
  * Variable names behind the columns upstream reported with unit `"undefined"`, with the
@@ -117,6 +130,13 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       when: 'timezone was blank, or upstream did not recognize the requested time zone',
       recovery:
         'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
+      retryable: false,
+    },
+    {
+      reason: 'request_too_large',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Open-Meteo refused the request as asking for too much data in one call',
+      recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name and the model are valid — the size of the request is what was rejected.`,
       retryable: false,
     },
   ],
@@ -260,7 +280,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: variables the endpoint returned with the unit "undefined" across every member (a name the selected model does not carry); recognized variables whose requested window runs past the model\'s horizon, with the timestamps that do carry values; and, when the result spilled, the canvas and table holding the full row set plus the two dataframe tools that read it.',
+        'Everything this response needs to say beyond the data, composed into one advisory: variables the endpoint returned with the unit "undefined" across every member (a name the selected model does not carry); recognized variables whose requested window runs past the model\'s horizon, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
 
@@ -332,6 +352,18 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
           'invalid_timezone',
           frameInvalidTimezoneMessage(data.reason),
           ctx.recoveryFor('invalid_timezone'),
+        );
+      }
+      /*
+       * Volume, not vocabulary: upstream refuses an over-wide request through the same
+       * envelope an unknown name arrives in, and the unknown-name framing would send
+       * the caller to check spelling that is already correct.
+       */
+      if (isRequestTooLargeReason(data.reason)) {
+        throw ctx.fail(
+          'request_too_large',
+          frameRequestTooLargeMessage(data.reason, PAYLOAD_NARROWING),
+          ctx.recoveryFor('request_too_large'),
         );
       }
       throw ctx.fail(
@@ -426,7 +458,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
          * placeholder rows the models don't hindcast, so a raw chronological head can be
          * entirely null. The canvas holds every row in chronological order regardless.
          */
-        const preview = boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [], rowBudget);
+        const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
 
         return {
           latitude: data.latitude,
@@ -451,8 +483,13 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
        * Falling through to the full inline return would report truncated: false on a
        * multi-megabyte member fan-out. Same per-cadence preview selection the canvas
        * branch uses, so both paths return the same rows for the same records.
+       *
+       * The disclosure is composed into `notice` as well as rendered by format(), for
+       * the reason the canvas pointer is: a structuredContent-only client reads one
+       * surface, and on this branch the omitted rows are behind no canvas at all.
        */
-      const preview = boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [], rowBudget);
+      notice.add(noCanvasNotice(PAYLOAD_NARROWING));
+      const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
       return {
         latitude: data.latitude,
         longitude: data.longitude,
@@ -507,9 +544,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         `_Preview favors rows with data: any leading all-null rows (e.g. past_days placeholders the models don't hindcast) are omitted here but staged in full chronological order on the canvas._`,
       );
     } else if (result.truncated) {
-      lines.push(
-        `\n${noCanvasNotice('fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or a models value with fewer members (gem_global_ensemble has 21, ecmwf_ifs025_ensemble 51)')}`,
-      );
+      lines.push(`\n${noCanvasNotice(PAYLOAD_NARROWING)}`);
     }
 
     if (result.hourly_units) lines.push(`\n**Hourly units:** ${formatUnits(result.hourly_units)}`);

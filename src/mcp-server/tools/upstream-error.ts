@@ -1,6 +1,11 @@
 /**
- * @fileoverview Frames Open-Meteo upstream error `reason` strings for unknown-variable
- * rejections. The forecast/archive-family endpoints reject unknown variable names with
+ * @fileoverview Frames Open-Meteo upstream error `reason` strings for the two rejections
+ * every time-series tool has to tell apart: an unknown variable or model name, and a
+ * request whose sheer volume upstream refuses. Both arrive in the same
+ * `{"error":true,"reason":…}` envelope with no machine-readable code, so the reason
+ * string is all there is to classify on.
+ *
+ * The forecast/archive-family endpoints reject unknown variable names with
  * an internal Swift type-init message ("Data corrupted at path ''. Cannot initialize
  * <Type> from invalid String value <value>.") that neither leads with the fix nor cleanly
  * names the problem. This helper leads with actionable guidance, names the offending
@@ -65,5 +70,40 @@ export function frameInvalidVariableMessage(
   }
 
   const guidance = `The API rejected a requested ${label} name. Check that every name is an exact Open-Meteo API name and retry.`;
+  return raw ? `${guidance} (Upstream: ${raw})` : guidance;
+}
+
+/**
+ * Upstream's volume rejection — HTTP 400 with `{"error":true,"reason":"Your API call
+ * requests too much data. Please reduce the number of variables, locations and/or
+ * weather models."}`, verified against both `/v1/climate` and `/v1/archive`. Anchored at
+ * the head so it cannot claim an envelope that merely mentions the phrase, and so an
+ * unknown-name rejection — which carries none of this wording — still classifies as one.
+ */
+const TOO_MUCH_DATA_REASON = /^your api call requests too much data/i;
+
+export function isRequestTooLargeReason(upstreamReason: string | undefined): boolean {
+  return TOO_MUCH_DATA_REASON.test((upstreamReason ?? '').trim());
+}
+
+/**
+ * Builds the surfaced message for the volume rejection. Every name in the request is
+ * valid — saying so is what keeps the caller off the spelling check
+ * {@link frameInvalidVariableMessage} would otherwise send them on.
+ *
+ * @param upstreamReason - Raw `reason` from the Open-Meteo error envelope.
+ * @param narrowing - The requesting tool's own inputs that shrink the payload, e.g.
+ *   `'fewer daily_variables, fewer models, or a shorter start_date–end_date range'`.
+ *   Named per tool because the levers differ: only some take `models`, and only some
+ *   take a date range.
+ */
+export function frameRequestTooLargeMessage(
+  upstreamReason: string | undefined,
+  narrowing: string,
+): string {
+  const raw = (upstreamReason ?? '').trim();
+  const guidance =
+    'Open-Meteo rejected this request as asking for too much data at once. Every requested ' +
+    `name is valid — narrow the request and retry: ${narrowing}.`;
   return raw ? `${guidance} (Upstream: ${raw})` : guidance;
 }

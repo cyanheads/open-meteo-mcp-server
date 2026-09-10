@@ -486,8 +486,8 @@ describe('boundedPreviewByCadence', () => {
     const preview = boundedPreviewByCadence(hourly, daily, BARE_BUDGET);
 
     expect(preview.daily).toHaveLength(100);
-    expect(preview.hourly.length).toBeGreaterThan(0);
-    expect(preview.hourly.length).toBeLessThan(hourly.length);
+    expect(preview.hourly!.length).toBeGreaterThan(0);
+    expect(preview.hourly!.length).toBeLessThan(hourly.length);
     // The concatenated approach this replaces, for contrast: rows, all of them hourly.
     const concatenated = boundedPreview([...hourly, ...daily], BARE_BUDGET);
     expect(concatenated.length).toBeGreaterThan(0);
@@ -500,10 +500,10 @@ describe('boundedPreviewByCadence', () => {
 
     const preview = boundedPreviewByCadence(hourly, daily, BARE_BUDGET);
 
-    expect(cost(preview.hourly) + cost(preview.daily)).toBeLessThanOrEqual(BARE_BUDGET);
+    expect(cost(preview.hourly!) + cost(preview.daily!)).toBeLessThanOrEqual(BARE_BUDGET);
     // Neither cadence is starved: each clears its guaranteed half.
-    expect(cost(preview.hourly)).toBeGreaterThan(BARE_BUDGET / 2 - 1000);
-    expect(cost(preview.daily)).toBeGreaterThan(BARE_BUDGET / 2 - 1000);
+    expect(cost(preview.hourly!)).toBeGreaterThan(BARE_BUDGET / 2 - 1000);
+    expect(cost(preview.daily!)).toBeGreaterThan(BARE_BUDGET / 2 - 1000);
   });
 
   it('gives a single-cadence response the whole budget, not half of it', () => {
@@ -519,10 +519,10 @@ describe('boundedPreviewByCadence', () => {
 
     expect(dailyOnly).toEqual(boundedPreview(daily, BARE_BUDGET));
     expect(hourlyOnly).toEqual(boundedPreview(hourly, BARE_BUDGET));
-    expect(dailyOnly.length).toBeGreaterThan(0);
-    expect(hourlyOnly.length).toBeGreaterThan(0);
-    expect(size(dailyOnly)).toBeGreaterThan(BARE_BUDGET / 2);
-    expect(size(hourlyOnly)).toBeGreaterThan(BARE_BUDGET / 2);
+    expect(dailyOnly!.length).toBeGreaterThan(0);
+    expect(hourlyOnly!.length).toBeGreaterThan(0);
+    expect(size(dailyOnly!)).toBeGreaterThan(BARE_BUDGET / 2);
+    expect(size(hourlyOnly!)).toBeGreaterThan(BARE_BUDGET / 2);
   });
 
   it('skips a leading all-null run in each cadence independently', () => {
@@ -545,8 +545,8 @@ describe('boundedPreviewByCadence', () => {
 
     const preview = boundedPreviewByCadence(hourly, daily, BARE_BUDGET);
 
-    expect(preview.hourly[0]).toEqual(hourly[500]);
-    expect(preview.daily[0]).toEqual(daily[40]);
+    expect(preview.hourly![0]).toEqual(hourly[500]);
+    expect(preview.daily![0]).toEqual(daily[40]);
   });
 
   it('keeps daily whole when one hourly row alone blows the whole budget', () => {
@@ -573,8 +573,52 @@ describe('boundedPreviewByCadence', () => {
     const roomy = boundedPreviewByCadence(hourly, daily, BARE_BUDGET);
     const cramped = boundedPreviewByCadence(hourly, daily, BARE_BUDGET / 4);
 
-    expect(cramped.hourly.length).toBeLessThan(roomy.hourly.length);
-    expect(size(cramped.hourly) + size(cramped.daily)).toBeLessThanOrEqual(BARE_BUDGET / 4);
+    expect(cramped.hourly!.length).toBeLessThan(roomy.hourly!.length);
+    expect(size(cramped.hourly!) + size(cramped.daily!)).toBeLessThanOrEqual(BARE_BUDGET / 4);
+  });
+
+  // --- cadence that was never requested (#53) --------------------------------
+
+  it('returns undefined for a cadence that was never requested (#53)', () => {
+    // `undefined` going in means the caller asked for one cadence only. Converting it
+    // to [] before the bound erases that, and the tools then publish `daily: []` where
+    // their schema promises the key is absent.
+    const hourly = Array.from({ length: 2400 }, (_, i) => hourlyRow(i));
+    const daily = Array.from({ length: 100 }, (_, i) => dailyRow(i));
+
+    const hourlyOnly = boundedPreviewByCadence(hourly, undefined, BARE_BUDGET);
+    expect(hourlyOnly.daily).toBeUndefined();
+    expect(hourlyOnly.hourly!.length).toBeGreaterThan(0);
+
+    const dailyOnly = boundedPreviewByCadence(undefined, daily, BARE_BUDGET);
+    expect(dailyOnly.hourly).toBeUndefined();
+    expect(dailyOnly.daily).toHaveLength(100);
+
+    expect(boundedPreviewByCadence(undefined, undefined, BARE_BUDGET)).toEqual({
+      hourly: undefined,
+      daily: undefined,
+    });
+  });
+
+  it('keeps an empty array distinct from an unrequested cadence (#53)', () => {
+    // A requested cadence upstream served no rows for is still requested: it stays an
+    // empty array, which is a different statement from the key being absent.
+    const daily = Array.from({ length: 100 }, (_, i) => dailyRow(i));
+
+    const preview = boundedPreviewByCadence([], daily, BARE_BUDGET);
+
+    expect(preview.hourly).toEqual([]);
+    expect(preview.daily).toHaveLength(100);
+  });
+
+  it('gives an unrequested cadence no share of the budget (#53)', () => {
+    // The rows a one-cadence response carries must not change with how the absent
+    // cadence is spelled.
+    const hourly = Array.from({ length: 5000 }, (_, i) => hourlyRow(i));
+
+    expect(boundedPreviewByCadence(hourly, undefined, BARE_BUDGET).hourly).toEqual(
+      boundedPreviewByCadence(hourly, [], BARE_BUDGET).hourly,
+    );
   });
 });
 

@@ -357,16 +357,24 @@ export function boundedPreview<T extends Record<string, unknown>>(
  * The pair overshoots by at most one row per cadence, exactly as a single
  * {@link boundedPreview} does: each cadence keeps its first row even when that row alone
  * crosses the budget, so `daily` is non-empty whenever daily records exist.
+ *
+ * A cadence passed as `undefined` was never requested, and comes back `undefined` rather
+ * than as an empty array: the two say different things, and the tools' output schemas
+ * promise the key is absent when its `_variables` field was not supplied. An empty array
+ * still means requested-but-served-nothing, and is preserved as one.
  */
 export function boundedPreviewByCadence<T extends Record<string, unknown>>(
-  hourly: readonly T[],
-  daily: readonly T[],
+  hourly: readonly T[] | undefined,
+  daily: readonly T[] | undefined,
   budget: number,
-): { daily: T[]; hourly: T[] } {
-  const dailyFloor = totalCost(boundedPreview(daily, budget / 2));
-  const hourlyRows = boundedPreview(hourly, budget - dailyFloor);
+): { daily: T[] | undefined; hourly: T[] | undefined } {
+  const dailyFloor = totalCost(boundedPreview(daily ?? [], budget / 2));
+  const hourlyRows = boundedPreview(hourly ?? [], budget - dailyFloor);
   const dailyBudget = Math.max(dailyFloor, budget - totalCost(hourlyRows));
-  return { hourly: hourlyRows, daily: boundedPreview(daily, dailyBudget) };
+  return {
+    hourly: hourly === undefined ? undefined : hourlyRows,
+    daily: daily === undefined ? undefined : boundedPreview(daily, dailyBudget),
+  };
 }
 
 /**

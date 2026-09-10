@@ -465,6 +465,42 @@ describe('openmeteoGetEnsembleTool', () => {
     });
   });
 
+  it('classifies the upstream too-much-data rejection as request_too_large (#50)', async () => {
+    // A member fan-out wide enough to trip the volume limit: the names and the model
+    // are valid, so the unknown-name framing pointed the caller at spelling instead.
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason:
+        'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m', 'precipitation', 'wind_speed_10m'],
+      models: 'ecmwf_ifs025_ensemble',
+      forecast_days: 16,
+      past_days: 92,
+    });
+
+    const error = await Promise.resolve(openmeteoGetEnsembleTool.handler(input, ctx)).catch(
+      (e: Error) => e,
+    );
+
+    if (!(error instanceof Error)) throw new Error('Expected the ensemble handler to reject');
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'request_too_large',
+        recovery: { hint: expect.stringContaining('Narrow the request') },
+      },
+    });
+    expect(error.message).toContain('too much data at once');
+    expect(error.message).toContain('a models value with fewer members');
+    expect(error.message).not.toMatch(/exact Open-Meteo API name/);
+  });
+
   it('frames an unsupported-model rejection the same way', async () => {
     // Real upstream reason shape when models=<bogus> is rejected
     mockGetEnsemble.mockResolvedValue({
@@ -1200,5 +1236,105 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(notice).toContain('6 of 16 rows are null');
     // record_count still reports rows, not non-null values.
     expect(result.record_count).toBe(400);
+  });
+
+  // --- no-canvas disclosure (#51), unrequested cadence (#53) -----------------
+
+  it.each([
+    ['canvas enabled', true],
+    ['canvas disabled', false],
+  ])('omits daily on a truncated hourly-only request — %s (#53)', async (_label, canvasEnabled) => {
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: memberUnits(CASE_A_HOURLY, '°C'),
+      hourly: memberColumns(hourlyTimes(384), CASE_A_HOURLY, (row, m) => 12 + m / 10 + (row % 7)),
+      daily_units: undefined,
+      daily: undefined,
+    });
+    if (canvasEnabled) stageOnCanvas('spilled_ens53', 'canvas-ens-53', 384);
+    else mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const result = await openmeteoGetEnsembleTool.handler(
+      openmeteoGetEnsembleTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        hourly_variables: CASE_A_HOURLY,
+        models: 'ncep_gefs025',
+        forecast_days: 16,
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.daily).toBeUndefined();
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    expect(firstText(openmeteoGetEnsembleTool.format!(result))).not.toContain(
+      '### Daily ensemble summary',
+    );
+  });
+
+  it.each([
+    ['canvas enabled', true],
+    ['canvas disabled', false],
+  ])('omits hourly on a truncated daily-only request — %s (#53)', async (_label, canvasEnabled) => {
+    const dailyTime = dailyDates(108);
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: undefined,
+      hourly: undefined,
+      daily_units: memberUnits(CASE_A_DAILY, '°C'),
+      daily: memberColumns(dailyTime, CASE_A_DAILY, (row, m) => 20 + m / 10 + (row % 5)),
+    });
+    if (canvasEnabled) stageOnCanvas('spilled_ens53d', 'canvas-ens-53d', dailyTime.length);
+    else mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const result = await openmeteoGetEnsembleTool.handler(
+      openmeteoGetEnsembleTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        daily_variables: CASE_A_DAILY,
+        models: 'ncep_gefs025',
+        forecast_days: 16,
+        past_days: 92,
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.hourly).toBeUndefined();
+    expect(result.daily?.length ?? 0).toBeGreaterThan(0);
+    expect(firstText(openmeteoGetEnsembleTool.format!(result))).not.toContain(
+      '### Hourly ensemble',
+    );
+  });
+
+  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
+    mockGetEnsemble.mockResolvedValue(caseAResponse());
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const result = await openmeteoGetEnsembleTool.handler(caseAInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
+    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(notice).toContain('a models value with fewer members');
+    expect(firstText(openmeteoGetEnsembleTool.format!(result))).toContain(
+      'CANVAS_PROVIDER_TYPE=none',
+    );
+  });
+
+  it('says nothing about a disabled canvas when the spill actually staged (#51)', async () => {
+    mockGetEnsemble.mockResolvedValue(caseAResponse());
+    stageOnCanvas('spilled_ens51', 'canvas-ens-51', 400);
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    await openmeteoGetEnsembleTool.handler(caseAInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('spilled_ens51');
+    expect(notice).not.toContain('DataCanvas is disabled');
   });
 });

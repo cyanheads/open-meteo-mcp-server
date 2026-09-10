@@ -33,13 +33,25 @@ import {
   frameInvalidTimezoneMessage,
   isInvalidTimezoneReason,
 } from '../timezone-input.js';
-import { frameInvalidVariableMessage } from '../upstream-error.js';
+import {
+  frameInvalidVariableMessage,
+  frameRequestTooLargeMessage,
+  isRequestTooLargeReason,
+} from '../upstream-error.js';
 import {
   describeCadenceMismatches,
   findCadenceMismatches,
   MARINE_CADENCE,
   undefinedUnitColumns,
 } from '../variable-cadence.js';
+
+/**
+ * The inputs that shrink this tool's payload, named wherever a response has to tell the
+ * caller how to ask for less: the upstream too-much-data rejection, and the no-canvas
+ * preview notice on both response surfaces.
+ */
+const PAYLOAD_NARROWING =
+  'fewer past_days / forecast_days or a shorter start_date–end_date range, or fewer hourly_variables / daily_variables';
 
 export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
   description:
@@ -115,6 +127,13 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       when: 'timezone was blank, or upstream did not recognize the requested time zone',
       recovery:
         'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
+      retryable: false,
+    },
+    {
+      reason: 'request_too_large',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Open-Meteo refused the request as asking for too much data in one call',
+      recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid — the size of the request is what was rejected, so re-checking spelling will not help.`,
       retryable: false,
     },
   ],
@@ -202,7 +221,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .array(z.record(z.string(), z.unknown()))
       .optional()
       .describe(
-        'Per-day summary records with "time" (YYYY-MM-DD) + variable keys (e.g., wave_height_max in meters, wave_direction_dominant in degrees, wave_period_max in seconds). When truncated, contains only a preview — query canvas_id for the full dataset when one is present.',
+        'Per-day summary records with "time" (YYYY-MM-DD) + variable keys (e.g., wave_height_max in meters, wave_direction_dominant in degrees, wave_period_max in seconds). Absent when only hourly_variables were requested. When truncated, contains only a preview — query canvas_id for the full dataset when one is present.',
       ),
     hourly_units: z
       .record(z.string(), z.string())
@@ -240,7 +259,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); recognized variables whose requested window falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, the canvas and table holding the full row set plus the two dataframe tools that read it.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); recognized variables whose requested window falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
 
@@ -355,6 +374,18 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
           ctx.recoveryFor('invalid_timezone'),
         );
       }
+      /*
+       * Volume, not vocabulary: upstream refuses an over-wide request through the same
+       * envelope an unknown name arrives in, and the unknown-name framing would send
+       * the caller to check spelling that is already correct.
+       */
+      if (isRequestTooLargeReason(data.reason)) {
+        throw ctx.fail(
+          'request_too_large',
+          frameRequestTooLargeMessage(data.reason, PAYLOAD_NARROWING),
+          ctx.recoveryFor('request_too_large'),
+        );
+      }
       throw ctx.fail(
         'invalid_variable',
         frameInvalidVariableMessage(data.reason),
@@ -427,7 +458,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
          * daily summary comes back empty. The staged table is unaffected — it holds
          * every row of both cadences, in chronological order.
          */
-        const preview = boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [], rowBudget);
+        const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
 
         return {
           latitude: data.latitude,
@@ -449,8 +480,13 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
        * Falling through to the full inline return would report truncated: false on a
        * 92-day hourly window. Same per-cadence selection the canvas branch uses, so
        * both paths return the same rows for the same records.
+       *
+       * The disclosure is composed into `notice` as well as rendered by format(), for
+       * the reason the canvas pointer is: a structuredContent-only client reads one
+       * surface, and on this branch the omitted rows are behind no canvas at all.
        */
-      const preview = boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [], rowBudget);
+      notice.add(noCanvasNotice(PAYLOAD_NARROWING));
+      const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
       return {
         latitude: data.latitude,
         longitude: data.longitude,
@@ -492,12 +528,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     if (result.truncated && result.canvas_id) {
       lines.push(canvasPointerLine(result.canvas_id, result.table_name ?? ''), '');
     } else if (result.truncated) {
-      lines.push(
-        noCanvasNotice(
-          'fewer past_days / forecast_days or a shorter start_date–end_date range, or fewer hourly_variables / daily_variables',
-        ),
-        '',
-      );
+      lines.push(noCanvasNotice(PAYLOAD_NARROWING), '');
     }
 
     if (result.hourly_units) lines.push(`**Hourly units:** ${formatUnits(result.hourly_units)}`);

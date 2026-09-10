@@ -70,6 +70,10 @@ const wideHourlyBlock = (
   return block;
 };
 
+/** Verbatim upstream reason for a request wider than the endpoint serves in one call. */
+const TOO_MUCH_DATA_REASON =
+  'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.';
+
 const MOCK_RESPONSE = {
   latitude: 47.595562,
   longitude: -122.32443,
@@ -300,6 +304,40 @@ describe('openmeteoGetForecastTool', () => {
     await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
       message: expect.stringContaining(`(Upstream: ${upstreamReason})`),
     });
+  });
+
+  it('classifies the upstream too-much-data rejection as request_too_large (#50)', async () => {
+    // Every requested name is valid here — the volume is what upstream refused, so the
+    // unknown-name framing sent the caller to check spelling instead of narrowing.
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason: TOO_MUCH_DATA_REASON,
+    });
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const input = openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      forecast_days: 16,
+      past_days: 92,
+      hourly_variables: ['temperature_2m', 'precipitation'],
+    });
+
+    const error = await Promise.resolve(openmeteoGetForecastTool.handler(input, ctx)).catch(
+      (e: Error) => e,
+    );
+
+    if (!(error instanceof Error)) throw new Error('Expected the forecast handler to reject');
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'request_too_large',
+        recovery: { hint: expect.stringContaining('Narrow the request') },
+      },
+    });
+    expect(error.message).toContain('too much data at once');
+    expect(error.message).toContain('fewer past_days / forecast_days');
+    expect(error.message).not.toMatch(/exact Open-Meteo API name/);
   });
 
   it('names cloud_cover and its field when it is passed alongside valid daily siblings (#26)', async () => {
@@ -943,6 +981,168 @@ describe('openmeteoGetForecastTool', () => {
     const notice = String(getEnrichment(ctx).notice);
     expect(notice).toContain('soil_moisture_0_to_1cm returned no data');
     expect(notice).toContain('openmeteo_dataframe_describe');
+  });
+
+  // --- no-canvas disclosure (#51), unrequested cadence (#53) -----------------
+
+  /** A daily-only block wide enough to truncate: 108 days across 40 daily variables. */
+  const wideDailyBlock = (time: string[]): Record<string, (number | null)[] | string[]> => {
+    const block: Record<string, (number | null)[] | string[]> = { time };
+    for (let v = 0; v < 40; v++) {
+      block[`daily_variable_number_${v}`] = time.map((_, row) => 10.5 + ((row + v) % 13));
+    }
+    return block;
+  };
+
+  /** `count` consecutive ISO dates from `from`. */
+  const dailyDates = (count: number, from = '2026-01-01'): string[] =>
+    Array.from({ length: count }, (_, i) => {
+      const d = new Date(`${from}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + i);
+      return d.toISOString().slice(0, 10);
+    });
+
+  const stageOnCanvas = (rowCount: number) => {
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount, tableName: 'spilled_fc53' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-fc-53' }) };
+  };
+
+  it.each([
+    ['canvas enabled', true],
+    ['canvas disabled', false],
+  ])('omits daily on a truncated hourly-only request — %s (#53)', async (_label, canvasEnabled) => {
+    // boundedPreviewByCadence used to receive `dailyRecords ?? []` and hand back a
+    // plain array, so the truncated response published `daily: []` where the schema
+    // promises the key is absent when no daily_variables were requested.
+    const time = hourlyTimes(2592);
+    mockGetForecast.mockResolvedValue({ ...MOCK_RESPONSE, hourly: wideHourlyBlock(time) });
+    if (canvasEnabled) stageOnCanvas(time.length);
+    else mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const result = await openmeteoGetForecastTool.handler(
+      openmeteoGetForecastTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        forecast_days: 16,
+        past_days: 92,
+        hourly_variables: ['temperature_2m', 'precipitation'],
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.daily).toBeUndefined();
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    // format() renders no daily section for an absent cadence.
+    expect(firstText(openmeteoGetForecastTool.format!(result))).not.toContain('### Daily');
+  });
+
+  it.each([
+    ['canvas enabled', true],
+    ['canvas disabled', false],
+  ])('omits hourly on a truncated daily-only request — %s (#53)', async (_label, canvasEnabled) => {
+    const time = dailyDates(108);
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: undefined,
+      hourly: undefined,
+      daily_units: { time: 'iso8601' },
+      daily: wideDailyBlock(time),
+    });
+    if (canvasEnabled) stageOnCanvas(time.length);
+    else mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const result = await openmeteoGetForecastTool.handler(
+      openmeteoGetForecastTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        forecast_days: 16,
+        past_days: 92,
+        daily_variables: Array.from({ length: 40 }, (_, v) => `daily_variable_number_${v}`),
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.hourly).toBeUndefined();
+    expect(result.daily?.length ?? 0).toBeGreaterThan(0);
+    expect(firstText(openmeteoGetForecastTool.format!(result))).not.toContain('### Hourly');
+  });
+
+  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
+    // The disclosure reached content[] through format() alone, so a structuredContent-only
+    // client saw truncated: true with no canvas_id and nothing explaining either.
+    const time = hourlyTimes(2592);
+    mockGetForecast.mockResolvedValue({ ...MOCK_RESPONSE, hourly: wideHourlyBlock(time) });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const result = await openmeteoGetForecastTool.handler(
+      openmeteoGetForecastTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        forecast_days: 16,
+        past_days: 92,
+        hourly_variables: ['temperature_2m', 'precipitation'],
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
+    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(notice).toContain('fewer past_days / forecast_days');
+    // content[] still carries the same text — both surfaces, one wording.
+    expect(firstText(openmeteoGetForecastTool.format!(result))).toContain(
+      'CANVAS_PROVIDER_TYPE=none',
+    );
+  });
+
+  it('keeps the coverage-gap sentence alongside the no-canvas disclosure (#51)', async () => {
+    // Both notice sources fire on one response, and the composer rewrites the whole
+    // string each time — neither may silently drop the other.
+    const time = hourlyTimes(2592);
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: CASE_B_UNITS,
+      hourly: caseBBlock(time, (row) => (row < 733 ? null : 100.5 + (row % 17))),
+    });
+    mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    await openmeteoGetForecastTool.handler(caseBInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('Partial hourly coverage for temperature_2m');
+    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
+  });
+
+  it('says nothing about a disabled canvas when the spill actually staged (#51)', async () => {
+    const time = hourlyTimes(2592);
+    mockGetForecast.mockResolvedValue({ ...MOCK_RESPONSE, hourly: wideHourlyBlock(time) });
+    stageOnCanvas(time.length);
+
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    await openmeteoGetForecastTool.handler(
+      openmeteoGetForecastTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        forecast_days: 16,
+        past_days: 92,
+        hourly_variables: ['temperature_2m', 'precipitation'],
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('spilled_fc53');
+    expect(notice).not.toContain('DataCanvas is disabled');
   });
 
   it('reports the leading-null head a past_days window longer than the API serves returns (#40)', async () => {

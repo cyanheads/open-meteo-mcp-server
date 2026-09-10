@@ -406,6 +406,44 @@ describe('openmeteoGetClimateTool', () => {
     });
   });
 
+  it('classifies the upstream too-much-data rejection as request_too_large (#50)', async () => {
+    // Live shape for 1950–2050 across three variables and all seven models: every name
+    // is valid and the dates are in range, so neither existing branch fits.
+    mockGetClimate.mockResolvedValue({
+      ...MOCK_MULTI_MODEL_RESPONSE,
+      error: true,
+      reason:
+        'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
+    });
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      start_date: '1950-01-01',
+      end_date: '2050-12-31',
+      daily_variables: ['temperature_2m_max', 'temperature_2m_min', 'precipitation_sum'],
+      models: ALL_MODELS,
+    });
+
+    const error = await Promise.resolve(openmeteoGetClimateTool.handler(input, ctx)).catch(
+      (e: Error) => e,
+    );
+
+    if (!(error instanceof Error)) throw new Error('Expected the climate handler to reject');
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'request_too_large',
+        recovery: { hint: expect.stringContaining('Narrow the request') },
+      },
+    });
+    expect(error.message).toContain('too much data at once');
+    expect(error.message).toContain('fewer models');
+    expect(error.message).not.toMatch(/exact Open-Meteo API name/);
+    // The date branch must not claim it: the reason carries neither "date" nor "range".
+    expect(error.message).not.toMatch(/CMIP6 projection range/);
+  });
+
   it('names only the offending model out of a rejected multi-model request (#34)', async () => {
     /*
      * Live shape once the models list goes out with a literal comma: upstream parses
@@ -886,6 +924,38 @@ describe('openmeteoGetClimateTool', () => {
     expect(JSON.stringify(result.daily).length).toBeLessThanOrEqual(rowBudgetFor(result));
     // record_count stays the full upstream total, not the preview length.
     expect(result.record_count).toBe(time.length);
+  });
+
+  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
+    // The disclosure reached content[] through format() alone, so a structuredContent-only
+    // client saw truncated: true with no canvas_id and nothing explaining either.
+    const time = dailyDates(7670);
+    mockGetClimate.mockResolvedValue({
+      ...MOCK_MULTI_MODEL_RESPONSE,
+      daily: modelBlock(time, (row, m) => 20 + m + (row % 10) / 10),
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
+    const result = await openmeteoGetClimateTool.handler(
+      openmeteoGetClimateTool.input.parse({
+        latitude: 47.6,
+        longitude: -122.3,
+        start_date: '2030-01-01',
+        end_date: '2050-12-31',
+        daily_variables: ['temperature_2m_max'],
+        models: ALL_MODELS,
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
+    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    expect(notice).toContain('fewer models');
+    expect(firstText(openmeteoGetClimateTool.format!(result))).toContain(
+      'CANVAS_PROVIDER_TYPE=none',
+    );
   });
 
   it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {

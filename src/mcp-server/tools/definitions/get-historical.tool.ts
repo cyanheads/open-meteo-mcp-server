@@ -28,13 +28,25 @@ import {
   frameInvalidTimezoneMessage,
   isInvalidTimezoneReason,
 } from '../timezone-input.js';
-import { frameInvalidVariableMessage } from '../upstream-error.js';
+import {
+  frameInvalidVariableMessage,
+  frameRequestTooLargeMessage,
+  isRequestTooLargeReason,
+} from '../upstream-error.js';
 import {
   describeCadenceMismatches,
   findCadenceMismatches,
   HISTORICAL_CADENCE,
   undefinedUnitColumns,
 } from '../variable-cadence.js';
+
+/**
+ * The inputs that shrink this tool's payload, named wherever a response has to tell the
+ * caller how to ask for less: the upstream too-much-data rejection, and the no-canvas
+ * preview notice on both response surfaces.
+ */
+const PAYLOAD_NARROWING =
+  'a shorter start_date–end_date range, or fewer hourly_variables / daily_variables';
 
 export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
   description:
@@ -94,6 +106,13 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       when: 'timezone was blank, or upstream did not recognize the requested time zone',
       recovery:
         'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
+      retryable: false,
+    },
+    {
+      reason: 'request_too_large',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Open-Meteo refused the request as asking for too much data in one call',
+      recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid and the dates are in range — the size of the request is what was rejected.`,
       retryable: false,
     },
   ],
@@ -218,7 +237,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the archive returned with the unit "undefined" (a name it parsed but does not serve in the requested cadence); recognized variables whose requested window falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, the canvas and table holding the full row set plus the two dataframe tools that read it.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the archive returned with the unit "undefined" (a name it parsed but does not serve in the requested cadence); recognized variables whose requested window falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
 
@@ -308,6 +327,19 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
           ctx.recoveryFor('invalid_timezone'),
         );
       }
+      /*
+       * Volume, not vocabulary: upstream refuses an over-wide request through the same
+       * envelope an unknown name arrives in, and the unknown-name framing would send
+       * the caller to check spelling that is already correct. Checked ahead of the date
+       * branch so a future rewording that happens to mention a date cannot claim it.
+       */
+      if (isRequestTooLargeReason(reason)) {
+        throw ctx.fail(
+          'request_too_large',
+          frameRequestTooLargeMessage(reason, PAYLOAD_NARROWING),
+          ctx.recoveryFor('request_too_large'),
+        );
+      }
       if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
         throw ctx.fail(
           'date_out_of_range',
@@ -390,7 +422,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
          * daily summary comes back empty. The staged table is unaffected — it holds
          * every row of both cadences, in chronological order.
          */
-        const preview = boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [], rowBudget);
+        const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
 
         return {
           latitude: data.latitude,
@@ -414,8 +446,13 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
        * Falling through to the full inline return would report truncated: false on a
        * multi-megabyte payload. Same per-cadence selection the canvas branch uses, so
        * both paths return the same rows for the same records.
+       *
+       * The disclosure is composed into `notice` as well as rendered by format(), for
+       * the reason the canvas pointer is: a structuredContent-only client reads one
+       * surface, and on this branch the omitted rows are behind no canvas at all.
        */
-      const preview = boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [], rowBudget);
+      notice.add(noCanvasNotice(PAYLOAD_NARROWING));
+      const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
       return {
         latitude: data.latitude,
         longitude: data.longitude,
@@ -460,9 +497,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     if (result.truncated && result.canvas_id) {
       lines.push(`\n${canvasPointerLine(result.canvas_id, result.table_name ?? '')}`);
     } else if (result.truncated) {
-      lines.push(
-        `\n${noCanvasNotice('a shorter start_date–end_date range, or fewer hourly_variables / daily_variables')}`,
-      );
+      lines.push(`\n${noCanvasNotice(PAYLOAD_NARROWING)}`);
     }
 
     if (result.hourly_units) lines.push(`\n**Hourly units:** ${formatUnits(result.hourly_units)}`);
