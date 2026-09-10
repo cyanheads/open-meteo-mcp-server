@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.8](changelog/0.3.x/0.3.8.md) — 2026-09-09
+
+Stops retrying HTTP 429, tells 'too much data' apart from a misspelled variable, and fixes two disclosure gaps in the truncation path.
+
 ## [0.3.7](changelog/0.3.x/0.3.7.md) — 2026-09-09
 
 Bounds the whole inline response — not just preview rows — against the size ceiling, adds temporal coverage-gap notices, and names both dataframe tools on every canvas pointer.
