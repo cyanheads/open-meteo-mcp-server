@@ -51,14 +51,14 @@ await createApp({
     '2. openmeteo_get_forecast — up to 16 days ahead + 92 days past_days; hourly and/or daily variables. A wide window spills like the historical tool\n' +
     '3. openmeteo_get_historical — ERA5 archive from 1940; use start_date/end_date\n' +
     '4. openmeteo_get_marine — wave/swell for coastal and ocean points; up to 8 forecast days, past_days, or a start_date+end_date archive range back to at least 2022\n' +
-    '5. openmeteo_get_air_quality — CAMS modeled PM2.5, PM10, ozone, AQI; up to 7 forecast days, past_days, or a start_date+end_date archive range back to at least 2022-10-01\n' +
+    '5. openmeteo_get_air_quality — CAMS modeled PM2.5, PM10, ozone, AQI; up to 7 forecast days, past_days, or a start_date+end_date archive range; the CAMS global archive begins in August 2022\n' +
     '6. openmeteo_get_elevation — Copernicus DEM terrain elevation for up to 100 coordinate pairs\n' +
     '7. openmeteo_get_ensemble — probabilistic ensemble forecast (up to 64 members, 16 days); use for exceedance probabilities and uncertainty quantification. A regional model queried outside its coverage area fails as an input error naming the gap — switch to a global model, do not retry\n' +
     '8. openmeteo_get_flood — GloFAS river discharge forecast (up to 210 days) OR reanalysis (from 1984, start_date+end_date together); the two modes are mutually exclusive. Coordinate-based, snaps to nearest river\n' +
     '9. openmeteo_get_climate — bias-corrected daily CMIP6 climate projections (1950–2050, up to 7 models); use for multi-decade "what will conditions look like" questions\n\n' +
     'DataCanvas workflow (requires CANVAS_PROVIDER_TYPE=duckdb):\n' +
     '- openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate with a large query returns canvas_id + truncated: true\n' +
-    '- openmeteo_dataframe_describe — list tables and columns on the canvas\n' +
+    '- openmeteo_dataframe_describe — list tables and columns on the canvas. Call it first: the staged table name is generated and its columns vary per request (per-member and per-model suffixes), so there is no valid SQL to write until the schema is read\n' +
     '- openmeteo_dataframe_query — run SQL SELECT against staged tables\n\n' +
     'Notes:\n' +
     '- All weather tools take latitude/longitude — use openmeteo_search_locations first for place names\n' +

@@ -7,8 +7,9 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetFloodTool } from '@/mcp-server/tools/definitions/get-flood.tool.js';
-import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
+import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
 
 const mockGetFlood = vi.fn();
 const mockSpillover = vi.fn();
@@ -457,7 +458,48 @@ describe('openmeteoGetFloodTool', () => {
     expect(result.canvas_id).toBe('canvas-flood-123');
     expect(result.table_name).toBe('spilled_flood01');
     expect(result.record_count).toBe(days); // full staged total, not the preview length
-    expect(result.daily).toEqual(previewRows);
+    // The preview is selected here, against this server's inline ceiling, rather than
+    // read off spillover()'s own buffer — the two measure rows in different currencies.
+    expect(result.daily.length).toBeGreaterThan(0);
+    expect(result.daily.length).toBeLessThan(days);
+    expect(result.daily).not.toEqual(previewRows);
+  });
+
+  it('starts the canvas-path preview at the first row carrying data', async () => {
+    // The canvas branch used to echo spillover()'s chronological head, so a reanalysis
+    // range opening before the coordinate's record began previewed nothing but nulls.
+    // It now takes the same boundedPreview() selection the canvas-less branch does;
+    // the staged table still holds every row in chronological order.
+    const days = 15_000;
+    const nullRun = 4_749; // 1984 → the coordinate's first reading, measured live
+    const time = dailyDates(days);
+    mockGetFlood.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      daily: {
+        time,
+        river_discharge: time.map((_, i) => (i < nullRun ? null : 100 + (i % 40) + 0.5)),
+      },
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: days, tableName: 'spilled_flood03' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-flood-3' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const input = openmeteoGetFloodTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: ['river_discharge'],
+      start_date: '1984-01-01',
+      end_date: '2026-07-15',
+    });
+    const result = await openmeteoGetFloodTool.handler(input, ctx);
+
+    expect(result.daily[0]?.time).toBe(time[nullRun]);
+    expect(result.daily.every((r) => r.river_discharge !== null)).toBe(true);
+    expect(result.record_count).toBe(days); // skipped rows are still counted
   });
 
   it('passes the caller canvas_id through to acquire', async () => {
@@ -524,17 +566,23 @@ describe('openmeteoGetFloodTool', () => {
     expect(spilledSchemaType('river_discharge_p25')).toBe('VARCHAR');
   });
 
-  it('returns no canvas handles when spillover declines to stage a table', async () => {
-    // The handler must never surface a canvas_id pointing at an empty canvas —
-    // spilled.handle only exists on the spilled branch of the union.
+  it('stages on its own budget decision rather than re-asking spillover (#41)', async () => {
+    // spillover() measures rows by JSON length alone, where this server's ceiling also
+    // charges the row separators and the wider markdown rendering. Handing it the same
+    // budget would let it decline a set the ceiling already rejected and return the
+    // whole thing inline under truncated: false — the overshoot the ceiling exists to
+    // prevent. It is told to stage instead, and truncated follows the decision made here.
     const time = dailyDates(15_000);
-    const records = time.map((t, i) => ({ time: t, river_discharge: 100 + (i % 40) + 0.5 }));
     mockGetFlood.mockResolvedValue({
       ...MOCK_RESPONSE,
       daily: { time, river_discharge: time.map((_, i) => 100 + (i % 40) + 0.5) },
     });
-    mockSpillover.mockResolvedValue({ spilled: false, previewRows: records });
-    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-unused' }) };
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: time.length, tableName: 'spilled_flood02' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-flood-2' }) };
 
     const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
@@ -546,9 +594,11 @@ describe('openmeteoGetFloodTool', () => {
     });
     const result = await openmeteoGetFloodTool.handler(input, ctx);
 
-    expect(result.truncated).toBe(false);
-    expect(result.canvas_id).toBeUndefined();
-    expect(result.table_name).toBeUndefined();
+    const [opts] = mockSpillover.mock.calls[0] as [{ previewChars: number }];
+    expect(opts.previewChars).toBe(1);
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-flood-2');
+    expect(result.table_name).toBe('spilled_flood02');
     expect(result.record_count).toBe(time.length);
   });
 
@@ -602,7 +652,7 @@ describe('openmeteoGetFloodTool', () => {
     expect(mockSpillover).not.toHaveBeenCalled();
     // Bounded by the same budget the canvas path measures against.
     expect(result.daily.length).toBeLessThan(time.length);
-    expect(JSON.stringify(result.daily).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    expect(JSON.stringify(result.daily).length).toBeLessThanOrEqual(rowBudgetFor(result));
     // record_count stays the full upstream total, not the preview length.
     expect(result.record_count).toBe(time.length);
   });
@@ -754,5 +804,163 @@ describe('openmeteoGetFloodTool unserved-variable notice', () => {
     await openmeteoGetFloodTool.handler(input, ctx);
 
     expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  // --- inline size ceiling (#41), canvas pointer (#44), coverage gaps (#40) ---
+
+  const DISCHARGE_VARIABLES = [
+    'river_discharge',
+    'river_discharge_mean',
+    'river_discharge_min',
+    'river_discharge_max',
+    'river_discharge_median',
+    'river_discharge_p25',
+    'river_discharge_p75',
+  ];
+
+  /** A multi-decade reanalysis pull across every discharge percentile. */
+  const wideReanalysis = () => {
+    const time = dailyDates(14_610);
+    const daily: Record<string, (number | null)[] | string[]> = { time };
+    const dailyUnits: Record<string, string> = { time: 'iso8601' };
+    for (const variable of DISCHARGE_VARIABLES) {
+      daily[variable] = time.map((_, row) => 100.25 + (row % 60));
+      dailyUnits[variable] = 'm³/s';
+    }
+    return { time, daily, dailyUnits };
+  };
+
+  const wideInput = () =>
+    openmeteoGetFloodTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: DISCHARGE_VARIABLES,
+      start_date: '1984-01-01',
+      end_date: '2023-12-31',
+    });
+
+  it('keeps both inline surfaces inside the ceiling when the spill stages (#41)', async () => {
+    const { daily, dailyUnits } = wideReanalysis();
+    mockGetFlood.mockResolvedValue({ ...MOCK_RESPONSE, daily_units: dailyUnits, daily });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 14_610, tableName: 'spilled_fl41' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-fl-41' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const result = await openmeteoGetFloodTool.handler(wideInput(), ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetFloodTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+  });
+
+  it('keeps both inline surfaces inside the ceiling with canvas disabled (#41)', async () => {
+    const { daily, dailyUnits } = wideReanalysis();
+    mockGetFlood.mockResolvedValue({ ...MOCK_RESPONSE, daily_units: dailyUnits, daily });
+    mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const result = await openmeteoGetFloodTool.handler(wideInput(), ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetFloodTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+  });
+
+  it('names openmeteo_dataframe_describe before openmeteo_dataframe_query on both surfaces (#44)', async () => {
+    const { daily, dailyUnits } = wideReanalysis();
+    mockGetFlood.mockResolvedValue({ ...MOCK_RESPONSE, daily_units: dailyUnits, daily });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 14_610, tableName: 'spilled_fl44' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-fl-44' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const result = await openmeteoGetFloodTool.handler(wideInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('spilled_fl44');
+    expect(notice.indexOf('openmeteo_dataframe_describe')).toBeGreaterThanOrEqual(0);
+    expect(notice.indexOf('openmeteo_dataframe_describe')).toBeLessThan(
+      notice.indexOf('openmeteo_dataframe_query'),
+    );
+
+    const text = firstText(openmeteoGetFloodTool.format!(result));
+    expect(text.indexOf('openmeteo_dataframe_describe')).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf('openmeteo_dataframe_describe')).toBeLessThan(
+      text.indexOf('openmeteo_dataframe_query'),
+    );
+  });
+
+  it('keeps the unserved-column warning when the canvas pointer fires in the same call (#44)', async () => {
+    const { time, daily, dailyUnits } = wideReanalysis();
+    mockGetFlood.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      daily_units: { ...dailyUnits, precipitation_sum: 'undefined' },
+      daily: { ...daily, precipitation_sum: time.map(() => null) },
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 14_610, tableName: 'spilled_fl44b' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-fl-44b' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    await openmeteoGetFloodTool.handler(
+      openmeteoGetFloodTool.input.parse({
+        latitude: 47.6,
+        longitude: -122.3,
+        daily_variables: [...DISCHARGE_VARIABLES, 'precipitation_sum'],
+        start_date: '1984-01-01',
+        end_date: '2023-12-31',
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('precipitation_sum returned no data');
+    expect(notice).toContain('openmeteo_dataframe_describe');
+  });
+
+  it('reports a reanalysis range that opens before the coordinate has a record (#40)', async () => {
+    // A GloFAS range starting before the nearest river's record begins comes back
+    // null until it does, with the real m³/s unit throughout.
+    const time = dailyDates(30);
+    mockGetFlood.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      daily_units: { time: 'iso8601', river_discharge: 'm³/s' },
+      daily: {
+        time,
+        river_discharge: time.map((_, row) => (row < 12 ? null : 120 + row)),
+      },
+    });
+
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const result = await openmeteoGetFloodTool.handler(
+      openmeteoGetFloodTool.input.parse({
+        latitude: 47.6,
+        longitude: -122.3,
+        daily_variables: ['river_discharge'],
+        start_date: '1984-01-01',
+        end_date: '1984-01-30',
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('Partial daily coverage for river_discharge');
+    expect(notice).toContain(`data runs ${time[12]} to ${time[29]}`);
+    expect(notice).toContain('12 of 30 rows are null');
+    expect(result.record_count).toBe(30);
   });
 });

@@ -7,8 +7,9 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetForecastTool } from '@/mcp-server/tools/definitions/get-forecast.tool.js';
-import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
+import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
 
 const mockGetForecast = vi.fn();
 const mockSpillover = vi.fn();
@@ -562,7 +563,7 @@ describe('openmeteoGetForecastTool', () => {
     // previewRows — the canvas holds every row, the inline preview is chosen separately.
     expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
     expect(result.hourly?.length ?? 0).toBeLessThan(time.length);
-    expect(JSON.stringify(result.hourly ?? []).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    expect(JSON.stringify(result.hourly ?? []).length).toBeLessThanOrEqual(rowBudgetFor(result));
   });
 
   it('bounds the preview and sets truncated=true when the window is wide and canvas is disabled', async () => {
@@ -587,7 +588,7 @@ describe('openmeteoGetForecastTool', () => {
     expect(result.table_name).toBeUndefined();
     expect(mockSpillover).not.toHaveBeenCalled();
     expect(result.hourly?.length ?? 0).toBeLessThan(time.length);
-    expect(JSON.stringify(result.hourly ?? []).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    expect(JSON.stringify(result.hourly ?? []).length).toBeLessThanOrEqual(rowBudgetFor(result));
     // record_count stays the full upstream total, not the preview length.
     expect(result.record_count).toBe(time.length);
   });
@@ -631,7 +632,7 @@ describe('openmeteoGetForecastTool', () => {
     // Both previews together stay inside the one budget, and record_count is the total.
     expect(
       JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
-    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    ).toBeLessThanOrEqual(rowBudgetFor(result));
     expect(result.record_count).toBe(time.length + dailyTime.length);
   });
 
@@ -740,7 +741,7 @@ describe('openmeteoGetForecastTool', () => {
     // One shared budget across both, same as the canvas-less branch.
     expect(
       JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
-    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    ).toBeLessThanOrEqual(rowBudgetFor(result));
     // record_count stays the staged total, not the preview length.
     expect(result.record_count).toBe(hourlyTime.length + dailyTime.length);
 
@@ -794,5 +795,187 @@ describe('openmeteoGetForecastTool', () => {
     // Heading reports the upstream total and does not claim a canvas holds it.
     expect(text).toContain('1 shown of 2592 total rows)');
     expect(text).not.toContain('total rows on canvas');
+  });
+
+  // --- inline size ceiling (#41), canvas pointer (#44), coverage gaps (#40) ---
+
+  /** The six-variable block from #41 Case B. */
+  const caseBBlock = (
+    time: string[],
+    valueAt: (row: number, variable: number) => number | null = (row) => 100.5 + (row % 17),
+  ): Record<string, (number | null)[] | string[]> => {
+    const block: Record<string, (number | null)[] | string[]> = { time };
+    [
+      'temperature_2m',
+      'precipitation',
+      'wind_speed_10m',
+      'relative_humidity_2m',
+      'cloud_cover',
+      'uv_index',
+    ].forEach((variable, index) => {
+      block[variable] = time.map((_, row) => valueAt(row, index));
+    });
+    return block;
+  };
+
+  const CASE_B_UNITS = {
+    time: 'iso8601',
+    temperature_2m: '°C',
+    precipitation: 'mm',
+    wind_speed_10m: 'km/h',
+    relative_humidity_2m: '%',
+    cloud_cover: '%',
+    uv_index: '',
+  };
+
+  const caseBInput = () =>
+    openmeteoGetForecastTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: [
+        'temperature_2m',
+        'precipitation',
+        'wind_speed_10m',
+        'relative_humidity_2m',
+        'cloud_cover',
+        'uv_index',
+      ],
+      forecast_days: 16,
+      past_days: 92,
+    });
+
+  it('keeps both inline surfaces inside the ceiling with canvas disabled (#41)', async () => {
+    // Case B, as reported: 108 days of six hourly variables, 2,592 rows, no canvas.
+    // The preview selector summed each row's own serialized length and never counted
+    // the comma joining it to the next, so a several-hundred-row preview overshot on
+    // both surfaces.
+    const time = hourlyTimes(2592);
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: CASE_B_UNITS,
+      hourly: caseBBlock(time),
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const result = await openmeteoGetForecastTool.handler(caseBInput(), ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(result.record_count).toBe(2592);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetForecastTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+  });
+
+  it('keeps both inline surfaces inside the ceiling when the spill stages (#41)', async () => {
+    const time = hourlyTimes(2592);
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: CASE_B_UNITS,
+      hourly: caseBBlock(time),
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 2592, tableName: 'spilled_fc41' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-fc-41' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const result = await openmeteoGetForecastTool.handler(caseBInput(), ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetForecastTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+  });
+
+  it('names openmeteo_dataframe_describe before openmeteo_dataframe_query on both surfaces (#44)', async () => {
+    const time = hourlyTimes(2592);
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: CASE_B_UNITS,
+      hourly: caseBBlock(time),
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 2592, tableName: 'spilled_fc44' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-fc-44' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const result = await openmeteoGetForecastTool.handler(caseBInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('spilled_fc44');
+    expect(notice.indexOf('openmeteo_dataframe_describe')).toBeGreaterThanOrEqual(0);
+    expect(notice.indexOf('openmeteo_dataframe_describe')).toBeLessThan(
+      notice.indexOf('openmeteo_dataframe_query'),
+    );
+
+    const text = firstText(openmeteoGetForecastTool.format!(result));
+    expect(text.indexOf('openmeteo_dataframe_describe')).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf('openmeteo_dataframe_describe')).toBeLessThan(
+      text.indexOf('openmeteo_dataframe_query'),
+    );
+  });
+
+  it('keeps the unserved-column warning when the canvas pointer fires in the same call (#44)', async () => {
+    const time = hourlyTimes(2592);
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { ...CASE_B_UNITS, soil_moisture_0_to_1cm: 'undefined' },
+      hourly: { ...caseBBlock(time), soil_moisture_0_to_1cm: time.map(() => null) },
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 2592, tableName: 'spilled_fc44b' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-fc-44b' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    await openmeteoGetForecastTool.handler(caseBInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('soil_moisture_0_to_1cm returned no data');
+    expect(notice).toContain('openmeteo_dataframe_describe');
+  });
+
+  it('reports the leading-null head a past_days window longer than the API serves returns (#40)', async () => {
+    // The forecast API serves fewer past days than past_days: 92 allows, so the
+    // unserved head comes back null with real units — a coverage gap, not an
+    // unserved name.
+    const time = hourlyTimes(240);
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', temperature_2m: '°C' },
+      hourly: {
+        time,
+        temperature_2m: time.map((_, row) => (row < 48 ? null : 10 + (row % 9))),
+      },
+    });
+
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const result = await openmeteoGetForecastTool.handler(
+      openmeteoGetForecastTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        hourly_variables: ['temperature_2m'],
+        past_days: 92,
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('Partial hourly coverage for temperature_2m');
+    expect(notice).toContain(`data runs ${time[48]} to ${time[239]}`);
+    expect(notice).toContain('48 of 240 rows are null');
+    // The response is small enough to return whole — the gap is reported anyway.
+    expect(result.truncated).toBe(false);
+    expect(result.record_count).toBe(240);
   });
 });

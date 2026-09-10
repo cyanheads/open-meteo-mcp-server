@@ -7,8 +7,9 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetAirQualityTool } from '@/mcp-server/tools/definitions/get-air-quality.tool.js';
-import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
+import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
 
 const mockGetAirQuality = vi.fn();
 const mockSpillover = vi.fn();
@@ -459,6 +460,213 @@ describe('openmeteoGetAirQualityTool', () => {
     const result = await openmeteoGetAirQualityTool.handler(input, ctx);
     expect(result.hourly![0]?.pm2_5).toBeNull();
     expect(result.record_count).toBe(2);
+    // #40: real unit, no values — the response has to say so, or a 2-record success
+    // is indistinguishable from a populated one.
+    expect(getEnrichment(ctx).notice).toContain('No hourly data for pm2_5');
+  });
+
+  // --- coverage gaps (#40) ---------------------------------------------------
+
+  it('names the all-null variable and the partial one separately in the same response (#40)', async () => {
+    // Live at 47.6062,-122.3321 for 2022-08-01…03: pm2_5 is null until
+    // 2022-08-03T17:00 and carries values from there, while us_aqi has none in the
+    // window at all. Both report the real units μg/m³ and USAQI.
+    const time = hourlyTimes(72, '2022-08-01T00:00');
+    mockGetAirQuality.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', pm2_5: 'μg/m³', us_aqi: 'USAQI' },
+      hourly: {
+        time,
+        pm2_5: time.map((_, row) => (row < 65 ? null : 4.1 + row / 100)),
+        us_aqi: time.map(() => null),
+      },
+    });
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const result = await openmeteoGetAirQualityTool.handler(
+      openmeteoGetAirQualityTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        hourly_variables: ['pm2_5', 'us_aqi'],
+        start_date: '2022-08-01',
+        end_date: '2022-08-03',
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('Partial hourly coverage for pm2_5');
+    expect(notice).toContain(`data runs ${time[65]} to ${time[71]}`);
+    expect(notice).toContain('65 of 72 rows are null');
+    expect(notice).toContain('No hourly data for us_aqi');
+    expect(notice).toContain('units are real');
+    // record_count reports rows, not non-null values.
+    expect(result.record_count).toBe(72);
+  });
+
+  it('stays quiet about coverage when every requested variable carries data (#40)', async () => {
+    mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    await openmeteoGetAirQualityTool.handler(
+      openmeteoGetAirQualityTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        hourly_variables: ['pm2_5', 'european_aqi'],
+      }),
+      ctx,
+    );
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('leaves an unserved name to its own notice rather than reporting it twice (#40)', async () => {
+    // A column upstream marked with the unit "undefined" is all-null by construction.
+    // The unserved-name notice already names it; the coverage classifier skips it.
+    mockGetAirQuality.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', pm2_5: 'μg/m³', temperature_2m_max: 'undefined' },
+      hourly: {
+        time: ['2026-05-30T00:00', '2026-05-30T01:00'],
+        pm2_5: [3.2, 3.5],
+        temperature_2m_max: [null, null],
+      },
+    });
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    await openmeteoGetAirQualityTool.handler(
+      openmeteoGetAirQualityTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        hourly_variables: ['pm2_5', 'temperature_2m_max'],
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('temperature_2m_max returned no data');
+    expect(notice).not.toContain('No hourly data for temperature_2m_max');
+  });
+
+  // --- inline size ceiling (#41) and canvas pointer (#44) --------------------
+
+  const wideArchive = () => {
+    const time = hourlyTimes(2232);
+    const block: Record<string, (number | null)[] | string[]> = { time };
+    const units: Record<string, string> = { time: 'iso8601' };
+    for (const variable of [
+      'pm2_5',
+      'pm10',
+      'ozone',
+      'nitrogen_dioxide',
+      'sulphur_dioxide',
+      'carbon_monoxide',
+      'dust',
+      'european_aqi',
+      'us_aqi',
+    ]) {
+      block[variable] = time.map((_, row) => 10.25 + (row % 40));
+      units[variable] = 'μg/m³';
+    }
+    return { time, block, units };
+  };
+
+  const wideInput = () =>
+    openmeteoGetAirQualityTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: [
+        'pm2_5',
+        'pm10',
+        'ozone',
+        'nitrogen_dioxide',
+        'sulphur_dioxide',
+        'carbon_monoxide',
+        'dust',
+        'european_aqi',
+        'us_aqi',
+      ],
+      past_days: 92,
+    });
+
+  it('keeps both inline surfaces inside the ceiling when the spill stages (#41)', async () => {
+    const { block, units } = wideArchive();
+    mockGetAirQuality.mockResolvedValue({ ...MOCK_RESPONSE, hourly_units: units, hourly: block });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 2232, tableName: 'spilled_aq41' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-aq-41' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const result = await openmeteoGetAirQualityTool.handler(wideInput(), ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetAirQualityTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+  });
+
+  it('keeps both inline surfaces inside the ceiling with canvas disabled (#41)', async () => {
+    const { block, units } = wideArchive();
+    mockGetAirQuality.mockResolvedValue({ ...MOCK_RESPONSE, hourly_units: units, hourly: block });
+    mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const result = await openmeteoGetAirQualityTool.handler(wideInput(), ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetAirQualityTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+  });
+
+  it('names openmeteo_dataframe_describe before openmeteo_dataframe_query on both surfaces (#44)', async () => {
+    const { block, units } = wideArchive();
+    mockGetAirQuality.mockResolvedValue({ ...MOCK_RESPONSE, hourly_units: units, hourly: block });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 2232, tableName: 'spilled_aq44' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-aq-44' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const result = await openmeteoGetAirQualityTool.handler(wideInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('spilled_aq44');
+    expect(notice.indexOf('openmeteo_dataframe_describe')).toBeGreaterThanOrEqual(0);
+    expect(notice.indexOf('openmeteo_dataframe_describe')).toBeLessThan(
+      notice.indexOf('openmeteo_dataframe_query'),
+    );
+
+    const text = firstText(openmeteoGetAirQualityTool.format!(result));
+    expect(text.indexOf('openmeteo_dataframe_describe')).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf('openmeteo_dataframe_describe')).toBeLessThan(
+      text.indexOf('openmeteo_dataframe_query'),
+    );
+  });
+
+  it('keeps the unserved-column warning when the canvas pointer fires in the same call (#44)', async () => {
+    const { time, block, units } = wideArchive();
+    mockGetAirQuality.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { ...units, temperature_2m_max: 'undefined' },
+      hourly: { ...block, temperature_2m_max: time.map(() => null) },
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 2232, tableName: 'spilled_aq44b' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-aq-44b' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    await openmeteoGetAirQualityTool.handler(wideInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('temperature_2m_max returned no data');
+    expect(notice).toContain('openmeteo_dataframe_describe');
   });
 
   // --- DataCanvas spillover --------------------------------------------------
@@ -499,7 +707,12 @@ describe('openmeteoGetAirQualityTool', () => {
     expect(result.canvas_id).toBe('canvas-aq-123');
     expect(result.table_name).toBe('spilled_aq01');
     expect(result.record_count).toBe(rows); // full staged total, not the preview length
-    expect(result.hourly).toEqual(previewRows);
+    // The preview is selected here, against this server's inline ceiling, rather than
+    // read off spillover()'s own buffer — the two measure rows in different currencies.
+    expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
+    expect(result.hourly?.length ?? 0).toBeLessThan(rows);
+    expect(result.hourly?.[0]).toMatchObject({ time: time[0] });
+    expect(result.hourly).not.toEqual(previewRows);
     expect(result.data_source).toBe('CAMS');
   });
 
@@ -529,16 +742,23 @@ describe('openmeteoGetAirQualityTool', () => {
     expect(acquire).toHaveBeenCalledWith('existingcv1', ctx);
   });
 
-  it('returns no canvas handles when spillover declines to stage a table', async () => {
-    // The handler must never surface a canvas_id pointing at an empty canvas —
-    // spilled.handle only exists on the spilled branch of the union.
+  it('stages on its own budget decision rather than re-asking spillover (#41)', async () => {
+    // spillover() measures rows by JSON length alone, where this server's ceiling also
+    // charges the row separators and the wider markdown rendering. Handing it the same
+    // budget would let it decline a set the ceiling already rejected and return the
+    // whole thing inline under truncated: false — the overshoot the ceiling exists to
+    // prevent. It is told to stage instead, and truncated follows the decision made here.
     const time = hourlyTimes(2232);
     mockGetAirQuality.mockResolvedValue({
       ...MOCK_RESPONSE,
       hourly: { time, pm2_5: time.map((_, i) => 3 + (i % 40) / 10) },
     });
-    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
-    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-unused' }) };
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: time.length, tableName: 'spilled_aq02' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-aq-2' }) };
 
     const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
@@ -549,9 +769,11 @@ describe('openmeteoGetAirQualityTool', () => {
     });
     const result = await openmeteoGetAirQualityTool.handler(input, ctx);
 
-    expect(result.truncated).toBe(false);
-    expect(result.canvas_id).toBeUndefined();
-    expect(result.table_name).toBeUndefined();
+    const [opts] = mockSpillover.mock.calls[0] as [{ previewChars: number }];
+    expect(opts.previewChars).toBe(1);
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-aq-2');
+    expect(result.table_name).toBe('spilled_aq02');
     expect(result.record_count).toBe(time.length);
   });
 
@@ -603,7 +825,7 @@ describe('openmeteoGetAirQualityTool', () => {
     expect(result.table_name).toBeUndefined();
     expect(mockSpillover).not.toHaveBeenCalled();
     expect(result.hourly!.length).toBeLessThan(time.length);
-    expect(JSON.stringify(result.hourly).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    expect(JSON.stringify(result.hourly).length).toBeLessThanOrEqual(rowBudgetFor(result));
     // record_count stays the full upstream total, not the preview length.
     expect(result.record_count).toBe(time.length);
   });

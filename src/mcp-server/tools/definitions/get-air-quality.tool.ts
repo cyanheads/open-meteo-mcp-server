@@ -9,7 +9,6 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import {
@@ -18,12 +17,16 @@ import {
 } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
 import {
   boundedPreview,
-  deriveSpillSchema,
+  canvasPointerLine,
+  canvasPointerNotice,
   exceedsInlineBudget,
+  inlineBudget,
   noCanvasNotice,
-  PREVIEW_CHARS,
+  stageSpill,
+  unitsTrimmedNotice,
 } from '../spill-utils.js';
 import {
   BLANK_TIMEZONE_MESSAGE,
@@ -39,16 +42,18 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     'nitrogen dioxide, sulphur dioxide, ozone, carbon monoxide, dust, pollen, and European/US AQI ' +
     'indices. This is modeled grid data, not measured station readings — for measured data, use ' +
     'openaq-mcp-server. Forecast horizon up to 7 days, with optional past_days (up to 92) for ' +
-    'recent history — or start_date and end_date together for an archive range, which returns real ' +
-    'CAMS values back to at least 2022-10-01. One window per call: a date range is mutually ' +
-    'exclusive with forecast_days and past_days, and needs both ends — a lone start_date or ' +
-    'end_date is rejected. ' +
+    'recent history — or start_date and end_date together for an archive range; the CAMS global ' +
+    'archive begins in August 2022, and earlier dates return rows of nulls. One window per call: ' +
+    'a date range is mutually exclusive with forecast_days and past_days, and needs both ends — ' +
+    'a lone start_date or end_date is rejected. ' +
     'Common variables: pm2_5, pm10, carbon_monoxide, nitrogen_dioxide, sulphur_dioxide, ozone, ' +
     'dust, european_aqi, us_aqi, alder_pollen, birch_pollen, grass_pollen, mugwort_pollen, ' +
     'olive_pollen, ragweed_pollen. ' +
     'A wide window — a large past_days or date range plus many variables — produces thousands of ' +
-    'records; these spill to DataCanvas for SQL querying when canvas is enabled, and return a ' +
-    'bounded preview with truncated: true when it is not.',
+    'records; these spill to a DataCanvas when canvas is enabled, returning canvas_id and ' +
+    'table_name with truncated: true — inspect the staged columns with ' +
+    'openmeteo_dataframe_describe, then query the full set with openmeteo_dataframe_query. ' +
+    'With canvas disabled they return a bounded preview instead.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -139,7 +144,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       .regex(/^\d{4}-\d{2}-\d{2}$/)
       .optional()
       .describe(
-        'Start date for the archive range (YYYY-MM-DD, e.g., "2024-07-01"). Real CAMS values go back to at least 2022-10-01; earlier dates return rows of nulls. Requires end_date — the pair must be sent together, and neither combines with forecast_days or past_days.',
+        'Start date for the archive range (YYYY-MM-DD, e.g., "2024-07-01"). The CAMS global archive begins in August 2022; earlier dates return rows of nulls, and us_aqi starts a day later than the pollutant series (european_aqi starts with it). Requires end_date — the pair must be sent together, and neither combines with forecast_days or past_days.',
       ),
     end_date: z
       .string()
@@ -153,7 +158,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token for wide past_days, archive-range, or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas for SQL querying. Omit to create a fresh canvas.',
+        'DataCanvas token for wide past_days, archive-range, or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
       ),
   }),
 
@@ -187,13 +192,13 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token for the staged full dataset. Present only when truncated is true AND DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) — absent otherwise, in which case the preview is all this response carries. Query with SQL using this token.',
+        'DataCanvas token for the staged full dataset. Present only when truncated is true AND DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) — absent otherwise, in which case the preview is all this response carries. Pass to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it.',
       ),
     table_name: z
       .string()
       .optional()
       .describe(
-        'DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only alongside canvas_id.',
+        'DuckDB table name for the staged data — use as the FROM target in openmeteo_dataframe_query SQL; openmeteo_dataframe_describe lists its columns. Present only alongside canvas_id.',
       ),
     truncated: z
       .boolean()
@@ -207,7 +212,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       .string()
       .optional()
       .describe(
-        'Warning that a requested variable came back with no data — names each column whose unit is "undefined", which is how the endpoint reports a name it parsed but does not serve.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); recognized variables whose requested window falls outside the CAMS archive, with the timestamps that do carry values; and, when the result spilled, the canvas and table holding the full row set plus the two dataframe tools that read it.',
       ),
   },
 
@@ -308,7 +313,22 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       );
     }
 
-    const hourlyUnits = toUnitsMap(data.hourly_units as Record<string, unknown> | undefined);
+    const rawHourlyUnits = toUnitsMap(data.hourly_units as Record<string, unknown> | undefined);
+
+    /*
+     * Split the inline ceiling between the unit map and the preview rows before
+     * anything is measured against it — the map is part of the response, not free.
+     * The raw map stays in scope: it drives the analysis below, so an entry the
+     * payload had to drop is still reported on.
+     */
+    const {
+      units: [hourlyUnits],
+      omittedUnits,
+      rowBudget,
+    } = inlineBudget(rawHourlyUnits);
+
+    // One notice, composed — ctx.enrich.notice is last-write-wins on a single key.
+    const notice = composeNotice(ctx);
 
     /*
      * The endpoint shares the forecast API's hourly variable parser, so it answers a
@@ -316,44 +336,45 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
      * 200 and an all-null column whose unit is the literal string "undefined" rather
      * than an error. Left unsaid that reads as a genuine data gap.
      */
-    const emptyColumns = undefinedUnitColumns(hourlyUnits);
+    const emptyColumns = undefinedUnitColumns(rawHourlyUnits);
     if (emptyColumns.length > 0) {
-      ctx.enrich.notice(
+      notice.add(
         `${emptyColumns.join(', ')} returned no data — Open-Meteo reported the unit as "undefined", which means the air-quality endpoint does not serve that name. Check it against the air-quality variable list (pm2_5, pm10, ozone, nitrogen_dioxide, european_aqi, us_aqi, …); weather variables belong in openmeteo_get_forecast.`,
       );
     }
 
+    /*
+     * Temporal coverage, the case the check above cannot see: an archive range opening
+     * before CAMS begins comes back with real units (μg/m³, USAQI) and null values, so
+     * a 48-record all-null success is otherwise indistinguishable from a populated one.
+     */
+    notice.add(describeCoverageGaps(findCoverageGaps('hourly', data.hourly, rawHourlyUnits)));
+    notice.add(unitsTrimmedNotice(omittedUnits, 'fewer hourly_variables'));
+
     const hourlyRecords = data.hourly ? reshapeColumnar(data.hourly) : undefined;
 
     // DataCanvas spillover for payloads too large to return inline
-    if (hourlyRecords && exceedsInlineBudget(hourlyRecords)) {
+    if (hourlyRecords && exceedsInlineBudget(hourlyRecords, rowBudget)) {
       const canvas = getCanvas();
       if (canvas) {
         const instance = await canvas.acquire(input.canvas_id, ctx);
-        // Explicit schema over every staged row — an archive range that starts before
-        // CAMS coverage is null down its whole column. See deriveSpillSchema.
-        const spilled = await spillover({
-          canvas: instance,
-          source: hourlyRecords,
-          schema: deriveSpillSchema(hourlyRecords),
-          previewChars: PREVIEW_CHARS,
-          signal: ctx.signal,
-        });
+        const handle = await stageSpill(instance, hourlyRecords, ctx.signal);
+        notice.add(canvasPointerNotice(handle.rowCount, handle.tableName, instance.canvasId));
 
         return {
           latitude: data.latitude,
           longitude: data.longitude,
           timezone: data.timezone,
-          record_count: spilled.spilled ? spilled.handle.rowCount : hourlyRecords.length,
-          hourly: spilled.previewRows as Record<string, unknown>[],
+          record_count: handle.rowCount,
+          // Same selection the canvas-less branch makes, so both paths return the same
+          // rows for the same records — and both start at the first row carrying data,
+          // which an archive range opening before CAMS coverage needs.
+          hourly: boundedPreview(hourlyRecords, rowBudget),
           hourly_units: hourlyUnits,
           data_source: 'CAMS' as const,
-          // Only point at the canvas when data actually spilled — spillover()
-          // stages a table only past its byte threshold, so a canvas_id on the
-          // non-spilled path would reference an empty canvas.
-          canvas_id: spilled.spilled ? instance.canvasId : undefined,
-          table_name: spilled.spilled ? spilled.handle.tableName : undefined,
-          truncated: spilled.spilled,
+          canvas_id: instance.canvasId,
+          table_name: handle.tableName,
+          truncated: true,
         };
       }
 
@@ -367,7 +388,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
         longitude: data.longitude,
         timezone: data.timezone,
         record_count: hourlyRecords.length,
-        hourly: boundedPreview(hourlyRecords),
+        hourly: boundedPreview(hourlyRecords, rowBudget),
         hourly_units: hourlyUnits,
         data_source: 'CAMS' as const,
         canvas_id: undefined,
@@ -400,10 +421,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     ];
 
     if (result.truncated && result.canvas_id) {
-      lines.push(
-        `⚠️ Large result — full data staged on canvas \`${result.canvas_id}\`, table \`${result.table_name}\`. Query with SQL via openmeteo_dataframe_query.`,
-        '',
-      );
+      lines.push(canvasPointerLine(result.canvas_id, result.table_name ?? ''), '');
     } else if (result.truncated) {
       lines.push(
         noCanvasNotice(

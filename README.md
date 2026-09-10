@@ -107,7 +107,7 @@ Marine wave and ocean conditions for coastal and open-ocean coordinates.
 Modeled CAMS air quality, forecast and archive.
 
 - Up to 7 forecast days (`forecast_days 1–7`, upstream default 5) with optional `past_days` (0–92)
-- Or an archive range via `start_date` and `end_date` — real CAMS values go back to at least `2022-10-01`; earlier dates return rows of nulls
+- Or an archive range via `start_date` and `end_date` — the CAMS global archive begins in August 2022; earlier dates return rows of nulls, and `us_aqi` starts a day later than the pollutant series (`european_aqi` starts with it)
 - One window per call: a date range is mutually exclusive with `forecast_days`/`past_days`, and needs both ends — a lone `start_date` or `end_date` is rejected
 - Common variables: `pm2_5`, `pm10`, `carbon_monoxide`, `nitrogen_dioxide`, `sulphur_dioxide`, `ozone`, `dust`, `european_aqi`, `us_aqi`, `alder_pollen`, `birch_pollen`, `grass_pollen`, `mugwort_pollen`, `olive_pollen`, `ragweed_pollen`
 - At least one variable from `hourly_variables` is required

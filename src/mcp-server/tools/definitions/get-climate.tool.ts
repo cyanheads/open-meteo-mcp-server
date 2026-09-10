@@ -8,19 +8,22 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { CLIMATE_MODEL_LIST } from '../model-catalog.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
 import {
   boundedPreview,
-  deriveSpillSchema,
+  canvasPointerLine,
+  canvasPointerNotice,
   exceedsInlineBudget,
+  inlineBudget,
   noCanvasNotice,
-  PREVIEW_CHARS,
+  stageSpill,
+  unitsTrimmedNotice,
 } from '../spill-utils.js';
 import {
   BLANK_TIMEZONE_MESSAGE,
@@ -42,9 +45,10 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     'With 2+ models each variable appears once per model with the model name as suffix ' +
     '(e.g. temperature_2m_max_CMCC_CM2_VHR4); a single or omitted model returns plain ' +
     'variable names. Not all models carry all variables — missing combinations return null. ' +
-    'Multi-decade daily pulls across several models produce thousands of records and spill ' +
-    'to DataCanvas for SQL querying when canvas is enabled, returning a bounded preview with ' +
-    'truncated: true when it is not.',
+    'Multi-decade daily pulls across several models produce thousands of records and spill to a ' +
+    'DataCanvas when canvas is enabled, returning canvas_id and table_name with truncated: true ' +
+    '— inspect the staged columns with openmeteo_dataframe_describe, then query the full set ' +
+    'with openmeteo_dataframe_query. With canvas disabled they return a bounded preview instead.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -140,7 +144,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token for multi-decade or multi-model queries. When a result is too large to return inline — driven by total payload size, so a wide multi-model pull can spill at any row count — it spills to this canvas for SQL querying. Omit to create a fresh canvas.',
+        'DataCanvas token for multi-decade or multi-model queries. When a result is too large to return inline — driven by total payload size, so a wide multi-model pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its per-model columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
       ),
   }),
 
@@ -181,13 +185,13 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token for the staged full dataset. Present only when truncated is true AND DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) — absent otherwise, in which case the preview is all this response carries. Query with SQL using this token.',
+        'DataCanvas token for the staged full dataset. Present only when truncated is true AND DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) — absent otherwise, in which case the preview is all this response carries. Pass to openmeteo_dataframe_describe to list the staged table and its per-model columns, then to openmeteo_dataframe_query to run SQL against it.',
       ),
     table_name: z
       .string()
       .optional()
       .describe(
-        'DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only alongside canvas_id.',
+        'DuckDB table name for the staged data — use as the FROM target in openmeteo_dataframe_query SQL; openmeteo_dataframe_describe lists its columns, which is the only way to learn the per-model suffixes this request produced. Present only alongside canvas_id.',
       ),
     truncated: z
       .boolean()
@@ -201,7 +205,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       .string()
       .optional()
       .describe(
-        'Warning that a requested variable came back with no data — names each column whose unit is "undefined", which is how the endpoint reports a name it parsed but does not serve.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); recognized variables a selected model carries no values for, with the dates that do carry values; and, when the result spilled, the canvas and table holding the full row set plus the two dataframe tools that read it.',
       ),
   },
 
@@ -300,7 +304,22 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       );
     }
 
-    const dailyUnits = toUnitsMap(data.daily_units as Record<string, unknown> | undefined);
+    const rawDailyUnits = toUnitsMap(data.daily_units as Record<string, unknown> | undefined);
+
+    /*
+     * Split the inline ceiling between the unit map and the preview rows before
+     * anything is measured against it — with seven models suffixing every variable the
+     * map is a real share of the response. The raw map stays in scope: it drives the
+     * analysis below, so an entry the payload had to drop is still reported on.
+     */
+    const {
+      units: [dailyUnits],
+      omittedUnits,
+      rowBudget,
+    } = inlineBudget(rawDailyUnits);
+
+    // One notice, composed — ctx.enrich.notice is last-write-wins on a single key.
+    const notice = composeNotice(ctx);
 
     /*
      * Backstop for a name the CMIP6 endpoint parses but does not serve: it shares the
@@ -309,12 +328,21 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
      * is the literal string "undefined". Only a name the parser cannot resolve at all
      * draws a 400.
      */
-    const emptyColumns = undefinedUnitColumns(dailyUnits);
+    const emptyColumns = undefinedUnitColumns(rawDailyUnits);
     if (emptyColumns.length > 0) {
-      ctx.enrich.notice(
+      notice.add(
         `${emptyColumns.join(', ')} returned no data — Open-Meteo reported the unit as "undefined", which means the CMIP6 climate endpoint does not serve that name. Check it against the climate variable list (temperature_2m_max, temperature_2m_min, precipitation_sum, wind_speed_10m_max, …).`,
       );
     }
+
+    /*
+     * Temporal coverage, the case the check above cannot see: not all models carry all
+     * variables, and the combination a model does not run comes back null under its
+     * real unit rather than as an unserved name — per-model columns are reported
+     * separately, since the gap belongs to one model and not the variable.
+     */
+    notice.add(describeCoverageGaps(findCoverageGaps('daily', data.daily, rawDailyUnits)));
+    notice.add(unitsTrimmedNotice(omittedUnits, 'fewer daily_variables, or fewer models'));
 
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : [];
     const models = input.models && input.models.length > 0 ? input.models : undefined;
@@ -324,19 +352,12 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     };
 
     // DataCanvas spillover for payloads too large to return inline
-    if (exceedsInlineBudget(dailyRecords)) {
+    if (exceedsInlineBudget(dailyRecords, rowBudget)) {
       const canvas = getCanvas();
       if (canvas) {
         const instance = await canvas.acquire(input.canvas_id, ctx);
-        // Explicit schema over every staged row — a variable a model doesn't carry is
-        // null for that model's whole column. See deriveSpillSchema.
-        const spilled = await spillover({
-          canvas: instance,
-          source: dailyRecords,
-          schema: deriveSpillSchema(dailyRecords),
-          previewChars: PREVIEW_CHARS,
-          signal: ctx.signal,
-        });
+        const handle = await stageSpill(instance, dailyRecords, ctx.signal);
+        notice.add(canvasPointerNotice(handle.rowCount, handle.tableName, instance.canvasId));
 
         return {
           latitude: data.latitude,
@@ -345,15 +366,14 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
           timezone: data.timezone,
           models,
           date_range: dateRange,
-          record_count: spilled.spilled ? spilled.handle.rowCount : dailyRecords.length,
-          daily: spilled.previewRows as Record<string, unknown>[],
+          record_count: handle.rowCount,
+          // Same selection the canvas-less branch makes, so both paths return the same
+          // rows for the same records.
+          daily: boundedPreview(dailyRecords, rowBudget),
           daily_units: dailyUnits,
-          // Only point at the canvas when data actually spilled — spillover()
-          // stages a table only past its byte threshold, so a canvas_id on the
-          // non-spilled path would reference an empty canvas.
-          canvas_id: spilled.spilled ? instance.canvasId : undefined,
-          table_name: spilled.spilled ? spilled.handle.tableName : undefined,
-          truncated: spilled.spilled,
+          canvas_id: instance.canvasId,
+          table_name: handle.tableName,
+          truncated: true,
         };
       }
 
@@ -370,7 +390,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
         models,
         date_range: dateRange,
         record_count: dailyRecords.length,
-        daily: boundedPreview(dailyRecords),
+        daily: boundedPreview(dailyRecords, rowBudget),
         daily_units: dailyUnits,
         canvas_id: undefined,
         table_name: undefined,
@@ -403,9 +423,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     ];
 
     if (result.truncated && result.canvas_id) {
-      lines.push(
-        `\n⚠️ Large result — full data staged on canvas \`${result.canvas_id}\`, table \`${result.table_name}\`. Query with SQL via openmeteo_dataframe_query.`,
-      );
+      lines.push(`\n${canvasPointerLine(result.canvas_id, result.table_name ?? '')}`);
     } else if (result.truncated) {
       lines.push(
         `\n${noCanvasNotice('a shorter start_date–end_date range, fewer daily_variables, or fewer models')}`,

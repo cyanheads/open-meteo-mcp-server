@@ -7,8 +7,9 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetEnsembleTool } from '@/mcp-server/tools/definitions/get-ensemble.tool.js';
-import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
+import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
 
 const mockGetEnsemble = vi.fn();
 const mockSpillover = vi.fn();
@@ -578,20 +579,23 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(result.table_name).toBe('spilled_wide');
   });
 
-  it('returns no canvas handles when spillover declines to stage a table', async () => {
-    // The handler must never surface a canvas_id pointing at an empty canvas —
-    // spilled.handle only exists on the spilled branch of the union.
+  it('stages on its own budget decision rather than re-asking spillover (#41)', async () => {
+    // spillover() measures rows by JSON length alone, where this server's ceiling also
+    // charges the row separators and the wider markdown rendering. Handing it the same
+    // budget would let it decline a set the ceiling already rejected and return the
+    // whole thing inline under truncated: false — the overshoot the ceiling exists to
+    // prevent. It is told to stage instead, and truncated follows the decision made here.
     const time = hourlyTimes(600, '2026-06-01T00:00');
     mockGetEnsemble.mockResolvedValue({
       ...MOCK_RESPONSE,
       hourly: memberBlock(time, () => 15.0),
     });
-
     mockSpillover.mockResolvedValue({
-      spilled: false,
-      previewRows: time.map((t) => ({ time: t, temperature_2m_member01: 15.0 })),
+      spilled: true,
+      handle: { rowCount: time.length, tableName: 'spilled_ens02' },
+      previewRows: [],
     });
-    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-unused-2' }) };
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-ens-2' }) };
 
     const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
@@ -602,9 +606,13 @@ describe('openmeteoGetEnsembleTool', () => {
     });
 
     const result = await openmeteoGetEnsembleTool.handler(input, ctx);
-    expect(result.truncated).toBe(false);
-    expect(result.canvas_id).toBeUndefined();
-    expect(result.table_name).toBeUndefined();
+
+    const [opts] = mockSpillover.mock.calls[0] as [{ previewChars: number }];
+    expect(opts.previewChars).toBe(1);
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-ens-2');
+    expect(result.table_name).toBe('spilled_ens02');
+    expect(result.record_count).toBe(time.length);
   });
 
   it('returns inline without touching a canvas when the payload fits', async () => {
@@ -804,7 +812,7 @@ describe('openmeteoGetEnsembleTool', () => {
     async (_label, canvasEnabled) => {
       /*
        * Both branches used to call the single-collection boundedPreview once per
-       * cadence, each measured against the whole PREVIEW_CHARS, so a two-cadence
+       * cadence, each measured against the whole INLINE_CHARS, so a two-cadence
        * response carried roughly twice the ceiling every other spill-capable tool
        * caps at — on the widest payload the server serves, since a member fan-out
        * suffixes every variable per member.
@@ -856,10 +864,10 @@ describe('openmeteoGetEnsembleTool', () => {
       // …and the pair shares one budget rather than claiming one each.
       const hourlyChars = JSON.stringify(result.hourly ?? []).length;
       const dailyChars = JSON.stringify(result.daily ?? []).length;
-      expect(hourlyChars + dailyChars).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+      expect(hourlyChars + dailyChars).toBeLessThanOrEqual(rowBudgetFor(result));
       // The old shape let either cadence alone approach the whole budget.
-      expect(hourlyChars).toBeLessThan(PREVIEW_CHARS);
-      expect(dailyChars).toBeLessThan(PREVIEW_CHARS);
+      expect(hourlyChars).toBeLessThan(INLINE_CHARS);
+      expect(dailyChars).toBeLessThan(INLINE_CHARS);
       expect(result.record_count).toBe(hourlyTime.length + dailyTime.length);
     },
   );
@@ -933,7 +941,7 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(mockSpillover).not.toHaveBeenCalled();
     // Bounded by the same budget the canvas path measures against.
     expect(result.hourly?.length ?? 0).toBeLessThan(time.length);
-    expect(JSON.stringify(result.hourly ?? []).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    expect(JSON.stringify(result.hourly ?? []).length).toBeLessThanOrEqual(rowBudgetFor(result));
     // record_count stays the full upstream total, not the preview length.
     expect(result.record_count).toBe(time.length);
   });
@@ -993,5 +1001,204 @@ describe('openmeteoGetEnsembleTool', () => {
     // Heading reports the upstream total and does not claim a canvas holds it.
     expect(text).toContain('1 shown of 384 total rows)');
     expect(text).not.toContain('total rows on canvas');
+  });
+
+  // --- inline size ceiling (#41), canvas pointer (#44), coverage gaps (#40) ---
+
+  /** `count` consecutive ISO dates from `from`. */
+  const dailyDates = (count: number, from = '2026-09-09'): string[] =>
+    Array.from({ length: count }, (_, i) => {
+      const d = new Date(`${from}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + i);
+      return d.toISOString().slice(0, 10);
+    });
+
+  /** A 31-member block across several variables — the gefs025 fan-out. */
+  const memberColumns = (
+    time: string[],
+    variables: readonly string[],
+    valueAt: (row: number, member: number) => number | null,
+  ): Record<string, (number | null)[] | string[]> => {
+    const block: Record<string, (number | null)[] | string[]> = { time };
+    for (const variable of variables) {
+      for (let m = 1; m <= 31; m++) {
+        block[`${variable}_member${String(m).padStart(2, '0')}`] = time.map((_, row) =>
+          valueAt(row, m),
+        );
+      }
+    }
+    return block;
+  };
+
+  /** The matching units map — one entry per member column, plus `time`. */
+  const memberUnits = (variables: readonly string[], unit: string): Record<string, string> => {
+    const units: Record<string, string> = { time: 'iso8601' };
+    for (const variable of variables) {
+      for (let m = 1; m <= 31; m++) {
+        units[`${variable}_member${String(m).padStart(2, '0')}`] = unit;
+      }
+    }
+    return units;
+  };
+
+  const CASE_A_HOURLY = ['temperature_2m', 'precipitation', 'wind_speed_10m'];
+  const CASE_A_DAILY = ['temperature_2m_max', 'precipitation_sum'];
+
+  /**
+   * #41 Case A, as reported: ncep_gefs025 over 16 days with 3 hourly and 2 daily
+   * variables. 94 hourly + 63 daily unit entries — the repeated member-suffixed maps
+   * that sit outside a rows-only budget and carried the whole overshoot.
+   */
+  const caseAResponse = () => ({
+    ...MOCK_RESPONSE,
+    hourly_units: memberUnits(CASE_A_HOURLY, '°C'),
+    daily_units: memberUnits(CASE_A_DAILY, '°C'),
+    hourly: memberColumns(hourlyTimes(384), CASE_A_HOURLY, (row, m) => 12 + m / 10 + (row % 7)),
+    daily: memberColumns(dailyDates(16), CASE_A_DAILY, (row, m) => 20 + m / 10 + (row % 5)),
+  });
+
+  const caseAInput = () =>
+    openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: CASE_A_HOURLY,
+      daily_variables: CASE_A_DAILY,
+      models: 'ncep_gefs025',
+      forecast_days: 16,
+      timezone: 'America/Los_Angeles',
+    });
+
+  const stageOnCanvas = (tableName: string, canvasId: string, rowCount: number) => {
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount, tableName },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId }) };
+  };
+
+  it('keeps both inline surfaces inside the ceiling when a wide spill stages (#41)', async () => {
+    // The row arrays alone fit the old budget; the unit maps, the scalar fields and
+    // format()'s own header text were added afterwards and pushed both surfaces past it.
+    mockGetEnsemble.mockResolvedValue(caseAResponse());
+    stageOnCanvas('spilled_abc123', 'VST_9urb2C', 400);
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const result = await openmeteoGetEnsembleTool.handler(caseAInput(), ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetEnsembleTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+  });
+
+  it('keeps both inline surfaces inside the ceiling with canvas disabled (#41)', async () => {
+    mockGetEnsemble.mockResolvedValue(caseAResponse());
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const result = await openmeteoGetEnsembleTool.handler(caseAInput(), ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetEnsembleTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+  });
+
+  it('names openmeteo_dataframe_describe before openmeteo_dataframe_query on both surfaces (#44)', async () => {
+    mockGetEnsemble.mockResolvedValue(caseAResponse());
+    stageOnCanvas('spilled_abc123', 'VST_9urb2C', 400);
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const result = await openmeteoGetEnsembleTool.handler(caseAInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('spilled_abc123');
+    expect(notice.indexOf('openmeteo_dataframe_describe')).toBeGreaterThanOrEqual(0);
+    expect(notice.indexOf('openmeteo_dataframe_describe')).toBeLessThan(
+      notice.indexOf('openmeteo_dataframe_query'),
+    );
+
+    const text = firstText(openmeteoGetEnsembleTool.format!(result));
+    expect(text.indexOf('openmeteo_dataframe_describe')).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf('openmeteo_dataframe_describe')).toBeLessThan(
+      text.indexOf('openmeteo_dataframe_query'),
+    );
+  });
+
+  it('keeps the unserved-variable warning when the canvas pointer fires in the same call (#44)', async () => {
+    // Both notice sources fire together: an unserved name and a spill. ctx.enrich.notice
+    // is last-write-wins on one key, so the second must not silently drop the first.
+    const response = caseAResponse();
+    mockGetEnsemble.mockResolvedValue({
+      ...response,
+      hourly_units: { ...response.hourly_units, snowfall_height_member01: 'undefined' },
+      hourly: {
+        ...response.hourly,
+        snowfall_height_member01: (response.hourly.time as string[]).map(() => null),
+      },
+    });
+    stageOnCanvas('spilled_abc123', 'VST_9urb2C', 400);
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    await openmeteoGetEnsembleTool.handler(
+      openmeteoGetEnsembleTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        hourly_variables: [...CASE_A_HOURLY, 'snowfall_height'],
+        daily_variables: CASE_A_DAILY,
+        models: 'ncep_gefs025',
+        forecast_days: 16,
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('snowfall_height returned no data on any member');
+    expect(notice).toContain('openmeteo_dataframe_describe');
+  });
+
+  it('reports the trailing-null run past the model horizon on both surfaces (#40)', async () => {
+    // Live ncep_gefs025 on 2026-09-09: daily returns 16 rows of which the last 6 are
+    // null and hourly returns 384 of which the last 136 are, matching the model's
+    // ~10-day horizon. Units stay real (°C), so the unserved-name check never fires.
+    const hourlyTime = hourlyTimes(384);
+    const dailyTime = dailyDates(16);
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: memberUnits(['temperature_2m'], '°C'),
+      daily_units: memberUnits(['temperature_2m_max'], '°C'),
+      hourly: memberColumns(hourlyTime, ['temperature_2m'], (row, m) =>
+        row < 248 ? 12 + m / 10 : null,
+      ),
+      daily: memberColumns(dailyTime, ['temperature_2m_max'], (row, m) =>
+        row < 10 ? 20 + m / 10 : null,
+      ),
+    });
+    mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const result = await openmeteoGetEnsembleTool.handler(
+      openmeteoGetEnsembleTool.input.parse({
+        latitude: 47.6062,
+        longitude: -122.3321,
+        hourly_variables: ['temperature_2m'],
+        daily_variables: ['temperature_2m_max'],
+        models: 'ncep_gefs025',
+        forecast_days: 16,
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('Partial hourly coverage for temperature_2m');
+    expect(notice).toContain(`data runs ${hourlyTime[0]} to ${hourlyTime[247]}`);
+    expect(notice).toContain('136 of 384 rows are null');
+    expect(notice).toContain('Partial daily coverage for temperature_2m_max');
+    expect(notice).toContain('6 of 16 rows are null');
+    // record_count still reports rows, not non-null values.
+    expect(result.record_count).toBe(400);
   });
 });

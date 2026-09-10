@@ -7,8 +7,9 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetMarineTool } from '@/mcp-server/tools/definitions/get-marine.tool.js';
-import { PREVIEW_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
+import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
 
 const mockGetMarine = vi.fn();
 const mockSpillover = vi.fn();
@@ -562,7 +563,7 @@ describe('openmeteoGetMarineTool', () => {
     expect(result.daily).toEqual([{ time: '2026-04-30', wave_height_max: 2.4 }]);
     expect(
       JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
-    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    ).toBeLessThanOrEqual(rowBudgetFor(result));
   });
 
   it('carries daily rows in the canvas-branch preview of a wide hourly window (#36)', async () => {
@@ -629,7 +630,7 @@ describe('openmeteoGetMarineTool', () => {
     // One shared budget across both cadences, matching the canvas-less branch.
     expect(
       JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
-    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    ).toBeLessThanOrEqual(rowBudgetFor(result));
     expect(result.record_count).toBe(time.length + dailyTime.length);
 
     const text = firstText(openmeteoGetMarineTool.format!(result));
@@ -663,16 +664,23 @@ describe('openmeteoGetMarineTool', () => {
     expect(acquire).toHaveBeenCalledWith('existingcv1', ctx);
   });
 
-  it('returns no canvas handles when spillover declines to stage a table', async () => {
-    // The handler must never surface a canvas_id pointing at an empty canvas —
-    // spilled.handle only exists on the spilled branch of the union.
+  it('stages on its own budget decision rather than re-asking spillover (#41)', async () => {
+    // spillover() measures rows by JSON length alone, where this server's ceiling also
+    // charges the row separators and the wider markdown rendering. Handing it the same
+    // budget would let it decline a set the ceiling already rejected and return the
+    // whole thing inline under truncated: false — the overshoot the ceiling exists to
+    // prevent. It is told to stage instead, and truncated follows the decision made here.
     const time = hourlyTimes(2232);
     mockGetMarine.mockResolvedValue({
       ...MOCK_RESPONSE,
       hourly: { time, wave_height: time.map((_, i) => 1 + (i % 30) / 10) },
     });
-    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
-    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-unused' }) };
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: time.length, tableName: 'spilled_marine02' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-marine-2' }) };
 
     const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
@@ -683,9 +691,11 @@ describe('openmeteoGetMarineTool', () => {
     });
     const result = await openmeteoGetMarineTool.handler(input, ctx);
 
-    expect(result.truncated).toBe(false);
-    expect(result.canvas_id).toBeUndefined();
-    expect(result.table_name).toBeUndefined();
+    const [opts] = mockSpillover.mock.calls[0] as [{ previewChars: number }];
+    expect(opts.previewChars).toBe(1);
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-marine-2');
+    expect(result.table_name).toBe('spilled_marine02');
     expect(result.record_count).toBe(time.length);
   });
 
@@ -737,7 +747,7 @@ describe('openmeteoGetMarineTool', () => {
     expect(result.table_name).toBeUndefined();
     expect(mockSpillover).not.toHaveBeenCalled();
     expect(result.hourly!.length).toBeLessThan(time.length);
-    expect(JSON.stringify(result.hourly).length).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    expect(JSON.stringify(result.hourly).length).toBeLessThanOrEqual(rowBudgetFor(result));
     // record_count stays the full upstream total, not the preview length.
     expect(result.record_count).toBe(time.length);
   });
@@ -796,7 +806,7 @@ describe('openmeteoGetMarineTool', () => {
     expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
     expect(
       JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
-    ).toBeLessThanOrEqual(PREVIEW_CHARS * 1.1);
+    ).toBeLessThanOrEqual(rowBudgetFor(result));
     expect(result.record_count).toBe(time.length + dailyTime.length);
 
     // format() renders the daily section the empty array used to gate away.
@@ -888,5 +898,200 @@ describe('openmeteoGetMarineTool', () => {
     expect(text).toContain('wave_height: 1000');
     expect(text).toContain('wave_height: 1049'); // last row — not sliced at 48
     expect(text).not.toMatch(/and \d+ more/);
+  });
+
+  // --- inline size ceiling (#41), canvas pointer (#44), coverage gaps (#40) ---
+
+  /** A 92-day past_days window: nine hourly wave variables plus a daily summary. */
+  const wideWindow = () => {
+    const hourlyTime = hourlyTimes(2400);
+    const dailyTime = Array.from({ length: 100 }, (_, i) => {
+      const d = new Date('2026-04-30T00:00:00Z');
+      d.setUTCDate(d.getUTCDate() + i);
+      return d.toISOString().slice(0, 10);
+    });
+    const hourly: Record<string, (number | null)[] | string[]> = { time: hourlyTime };
+    const hourlyUnits: Record<string, string> = { time: 'iso8601' };
+    for (const variable of [
+      'wave_height',
+      'wave_direction',
+      'wave_period',
+      'wind_wave_height',
+      'wind_wave_direction',
+      'wind_wave_period',
+      'swell_wave_height',
+      'swell_wave_direction',
+      'swell_wave_period',
+    ]) {
+      hourly[variable] = hourlyTime.map((_, row) => 1 + (row % 30) / 10);
+      hourlyUnits[variable] = 'm';
+    }
+    const daily: Record<string, (number | null)[] | string[]> = {
+      time: dailyTime,
+      wave_height_max: dailyTime.map((_, row) => 2 + (row % 15) / 10),
+      wave_direction_dominant: dailyTime.map((_, row) => 90 + (row % 40)),
+    };
+    return {
+      hourly,
+      hourlyUnits,
+      daily,
+      dailyUnits: { time: 'iso8601', wave_height_max: 'm', wave_direction_dominant: '°' },
+    };
+  };
+
+  const wideInput = () =>
+    openmeteoGetMarineTool.input.parse({
+      latitude: 47.8,
+      longitude: -122.5,
+      hourly_variables: [
+        'wave_height',
+        'wave_direction',
+        'wave_period',
+        'wind_wave_height',
+        'wind_wave_direction',
+        'wind_wave_period',
+        'swell_wave_height',
+        'swell_wave_direction',
+        'swell_wave_period',
+      ],
+      daily_variables: ['wave_height_max', 'wave_direction_dominant'],
+      past_days: 92,
+    });
+
+  it('keeps both inline surfaces inside the ceiling when the spill stages (#41)', async () => {
+    const { hourly, hourlyUnits, daily, dailyUnits } = wideWindow();
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: hourlyUnits,
+      daily_units: dailyUnits,
+      hourly,
+      daily,
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 2500, tableName: 'spilled_ma41' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-ma-41' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const result = await openmeteoGetMarineTool.handler(wideInput(), ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetMarineTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+  });
+
+  it('keeps both inline surfaces inside the ceiling with canvas disabled (#41)', async () => {
+    const { hourly, hourlyUnits, daily, dailyUnits } = wideWindow();
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: hourlyUnits,
+      daily_units: dailyUnits,
+      hourly,
+      daily,
+    });
+    mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const result = await openmeteoGetMarineTool.handler(wideInput(), ctx);
+
+    expect(result.truncated).toBe(true);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetMarineTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+  });
+
+  it('names openmeteo_dataframe_describe before openmeteo_dataframe_query on both surfaces (#44)', async () => {
+    const { hourly, hourlyUnits, daily, dailyUnits } = wideWindow();
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: hourlyUnits,
+      daily_units: dailyUnits,
+      hourly,
+      daily,
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 2500, tableName: 'spilled_ma44' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-ma-44' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const result = await openmeteoGetMarineTool.handler(wideInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('spilled_ma44');
+    expect(notice.indexOf('openmeteo_dataframe_describe')).toBeGreaterThanOrEqual(0);
+    expect(notice.indexOf('openmeteo_dataframe_describe')).toBeLessThan(
+      notice.indexOf('openmeteo_dataframe_query'),
+    );
+
+    const text = firstText(openmeteoGetMarineTool.format!(result));
+    expect(text.indexOf('openmeteo_dataframe_describe')).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf('openmeteo_dataframe_describe')).toBeLessThan(
+      text.indexOf('openmeteo_dataframe_query'),
+    );
+  });
+
+  it('keeps the unserved-column warning when the canvas pointer fires in the same call (#44)', async () => {
+    const { hourly, hourlyUnits, daily, dailyUnits } = wideWindow();
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { ...hourlyUnits, sea_surface_temperature: 'undefined' },
+      daily_units: dailyUnits,
+      hourly: {
+        ...hourly,
+        sea_surface_temperature: (hourly.time as string[]).map(() => null),
+      },
+      daily,
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: 2500, tableName: 'spilled_ma44b' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-ma-44b' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    await openmeteoGetMarineTool.handler(wideInput(), ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('sea_surface_temperature returned no data');
+    expect(notice).toContain('openmeteo_dataframe_describe');
+  });
+
+  it('reports a variable the coordinate carries no values for (#40)', async () => {
+    // ocean_current_velocity is null for a coordinate that is not open ocean, with a
+    // real unit — a real coverage gap the unserved-name check cannot see.
+    const time = hourlyTimes(48);
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', wave_height: 'm', ocean_current_velocity: 'km/h' },
+      hourly: {
+        time,
+        wave_height: time.map((_, row) => 0.5 + (row % 8) / 10),
+        ocean_current_velocity: time.map(() => null),
+      },
+    });
+
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const result = await openmeteoGetMarineTool.handler(
+      openmeteoGetMarineTool.input.parse({
+        latitude: 47.8,
+        longitude: -122.5,
+        hourly_variables: ['wave_height', 'ocean_current_velocity'],
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('No hourly data for ocean_current_velocity');
+    expect(notice).not.toContain('wave_height');
+    expect(result.record_count).toBe(48);
   });
 });

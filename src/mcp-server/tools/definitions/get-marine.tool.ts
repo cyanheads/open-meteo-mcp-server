@@ -9,7 +9,6 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import {
@@ -18,12 +17,16 @@ import {
 } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
+import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
 import {
   boundedPreviewByCadence,
-  deriveSpillSchema,
+  canvasPointerLine,
+  canvasPointerNotice,
   exceedsInlineBudget,
+  inlineBudget,
   noCanvasNotice,
-  PREVIEW_CHARS,
+  stageSpill,
+  unitsTrimmedNotice,
 } from '../spill-utils.js';
 import {
   BLANK_TIMEZONE_MESSAGE,
@@ -53,8 +56,10 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     'swell_wave_period. Common daily: wave_height_max, wave_direction_dominant, wave_period_max. ' +
     'Note: ocean_current_velocity is null for non-open-ocean coordinates. ' +
     'A wide window — a large past_days or date range plus many variables — produces thousands of ' +
-    'records; these spill to DataCanvas for SQL querying when canvas is enabled, and return a ' +
-    'bounded preview with truncated: true when it is not.',
+    'records; these spill to a DataCanvas when canvas is enabled, returning canvas_id and ' +
+    'table_name with truncated: true — inspect the staged columns with ' +
+    'openmeteo_dataframe_describe, then query the full set with openmeteo_dataframe_query. ' +
+    'With canvas disabled they return a bounded preview instead.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -174,7 +179,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token for wide past_days, archive-range, or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas for SQL querying. Omit to create a fresh canvas.',
+        'DataCanvas token for wide past_days, archive-range, or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
       ),
   }),
 
@@ -215,13 +220,13 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .string()
       .optional()
       .describe(
-        'DataCanvas token for the staged full dataset. Present only when truncated is true AND DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) — absent otherwise, in which case the preview is all this response carries. Query with SQL using this token.',
+        'DataCanvas token for the staged full dataset. Present only when truncated is true AND DataCanvas is enabled (CANVAS_PROVIDER_TYPE=duckdb) — absent otherwise, in which case the preview is all this response carries. Pass to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it.',
       ),
     table_name: z
       .string()
       .optional()
       .describe(
-        'DuckDB table name for the staged data — pass to openmeteo_dataframe_query. Present only alongside canvas_id.',
+        'DuckDB table name for the staged data — use as the FROM target in openmeteo_dataframe_query SQL; openmeteo_dataframe_describe lists its columns. Present only alongside canvas_id.',
       ),
     truncated: z
       .boolean()
@@ -235,7 +240,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .string()
       .optional()
       .describe(
-        'Warning that a requested variable came back with no data — names each column whose unit is "undefined", which is how the endpoint reports a name it parsed but does not serve.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); recognized variables whose requested window falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, the canvas and table holding the full row set plus the two dataframe tools that read it.',
       ),
   },
 
@@ -357,8 +362,23 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       );
     }
 
-    const hourlyUnits = toUnitsMap(data.hourly_units as Record<string, unknown> | undefined);
-    const dailyUnits = toUnitsMap(data.daily_units as Record<string, unknown> | undefined);
+    const rawHourlyUnits = toUnitsMap(data.hourly_units as Record<string, unknown> | undefined);
+    const rawDailyUnits = toUnitsMap(data.daily_units as Record<string, unknown> | undefined);
+
+    /*
+     * Split the inline ceiling between the unit maps and the preview rows before
+     * anything is measured against it — the maps are part of the response, not free.
+     * The raw maps stay in scope: they drive the analysis below, so an entry the
+     * payload had to drop is still reported on.
+     */
+    const {
+      units: [hourlyUnits, dailyUnits],
+      omittedUnits,
+      rowBudget,
+    } = inlineBudget(rawHourlyUnits, rawDailyUnits);
+
+    // One notice, composed — ctx.enrich.notice is last-write-wins on a single key.
+    const notice = composeNotice(ctx);
 
     /*
      * Backstop for a name the catalog does not carry: the marine endpoint shares the
@@ -368,70 +388,69 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
      * that reads as a genuine data gap. Only a name the parser cannot resolve at all is
      * rejected upstream.
      */
-    const emptyColumns = undefinedUnitColumns(hourlyUnits, dailyUnits);
+    const emptyColumns = undefinedUnitColumns(rawHourlyUnits, rawDailyUnits);
     if (emptyColumns.length > 0) {
-      ctx.enrich.notice(
+      notice.add(
         `${emptyColumns.join(', ')} returned no data — Open-Meteo reported the unit as "undefined", which means the marine endpoint does not serve that name. Check it against the marine variable list (wave_height, wave_period, swell_wave_height, sea_surface_temperature, …); weather variables belong in openmeteo_get_forecast.`,
       );
     }
+
+    /*
+     * Temporal coverage, the case the check above cannot see: a served variable the
+     * wave model carries nothing for at this coordinate — ocean_current_velocity away
+     * from open ocean — comes back null with its real unit intact.
+     */
+    notice.add(
+      describeCoverageGaps(
+        findCoverageGaps('hourly', data.hourly, rawHourlyUnits),
+        findCoverageGaps('daily', data.daily, rawDailyUnits),
+      ),
+    );
+    notice.add(unitsTrimmedNotice(omittedUnits, 'fewer hourly_variables / daily_variables'));
 
     const hourlyRecords = data.hourly ? reshapeColumnar(data.hourly) : undefined;
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : undefined;
     const allRecords = [...(hourlyRecords ?? []), ...(dailyRecords ?? [])];
 
     // DataCanvas spillover for payloads too large to return inline
-    if (exceedsInlineBudget(allRecords)) {
+    if (exceedsInlineBudget(allRecords, rowBudget)) {
       const canvas = getCanvas();
       if (canvas) {
         const instance = await canvas.acquire(input.canvas_id, ctx);
-        // Explicit schema over every staged row — hourly records lead, so a sniffed
-        // window would never reach a daily row. See deriveSpillSchema.
-        const spilled = await spillover({
-          canvas: instance,
-          source: allRecords,
-          schema: deriveSpillSchema(allRecords),
-          previewChars: PREVIEW_CHARS,
-          signal: ctx.signal,
-        });
+        const handle = await stageSpill(instance, allRecords, ctx.signal);
+        notice.add(canvasPointerNotice(handle.rowCount, handle.tableName, instance.canvasId));
 
         /*
          * Bound each cadence against its own share of the budget rather than splitting
          * spillover()'s previewRows: those are drained from the head of the concatenated
          * array, so a wide hourly window fills them before a single daily row and the
          * daily summary comes back empty. The staged table is unaffected — it holds
-         * every row of both cadences. When nothing spilled the whole set fit inline, so
-         * return it complete; truncated: false promises exactly that.
+         * every row of both cadences, in chronological order.
          */
-        const preview = spilled.spilled
-          ? boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [])
-          : { hourly: hourlyRecords ?? [], daily: dailyRecords ?? [] };
+        const preview = boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [], rowBudget);
 
         return {
           latitude: data.latitude,
           longitude: data.longitude,
           timezone: data.timezone,
-          record_count: spilled.spilled ? spilled.handle.rowCount : allRecords.length,
+          record_count: handle.rowCount,
           hourly: preview.hourly,
           daily: preview.daily,
           hourly_units: hourlyUnits,
           daily_units: dailyUnits,
-          // Only point at the canvas when data actually spilled — spillover()
-          // stages a table only past its byte threshold, so a canvas_id on the
-          // non-spilled path would reference an empty canvas.
-          canvas_id: spilled.spilled ? instance.canvasId : undefined,
-          table_name: spilled.spilled ? spilled.handle.tableName : undefined,
-          truncated: spilled.spilled,
+          canvas_id: instance.canvasId,
+          table_name: handle.tableName,
+          truncated: true,
         };
       }
 
       /*
        * No canvas (CANVAS_PROVIDER_TYPE=none, the default): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
-       * 92-day hourly window. Bound each cadence against its own share of the budget —
-       * one preview over the concatenated array spends it all on the leading hourly
-       * rows and returns an empty daily summary. See boundedPreviewByCadence.
+       * 92-day hourly window. Same per-cadence selection the canvas branch uses, so
+       * both paths return the same rows for the same records.
        */
-      const preview = boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? []);
+      const preview = boundedPreviewByCadence(hourlyRecords ?? [], dailyRecords ?? [], rowBudget);
       return {
         latitude: data.latitude,
         longitude: data.longitude,
@@ -471,10 +490,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     ];
 
     if (result.truncated && result.canvas_id) {
-      lines.push(
-        `⚠️ Large result — full data staged on canvas \`${result.canvas_id}\`, table \`${result.table_name}\`. Query with SQL via openmeteo_dataframe_query.`,
-        '',
-      );
+      lines.push(canvasPointerLine(result.canvas_id, result.table_name ?? ''), '');
     } else if (result.truncated) {
       lines.push(
         noCanvasNotice(
