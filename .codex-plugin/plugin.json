@@ -4,6 +4,7 @@
   "description": "Geocode places, fetch global weather forecasts, historical climate, marine conditions, air quality, and terrain elevation via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
     "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/open-meteo-mcp-server#readme",
