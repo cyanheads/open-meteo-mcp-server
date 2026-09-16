@@ -24,6 +24,7 @@ import { initOpenMeteoService } from './services/open-meteo/open-meteo-service.j
 await createApp({
   name: 'open-meteo-mcp-server',
   title: 'open-meteo-mcp-server',
+  sessionMode: 'stateless',
   tools: [
     openmeteoSearchLocationsTool,
     openmeteoGetElevationTool,
