@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.10](changelog/0.3.x/0.3.10.md) — 2026-09-16 · 🛡️ Security
+
+Session mode is now declared in src (closes #47) instead of relying on env alone. Adopts mcp-ts-core ^0.13.2: stripSqlComments over openmeteo_dataframe_query's SQL is a linear-time scan, empty or unsubstituted env values read as unset, and the skill tree moves from skills/ to framework-skills/.
+
 ## [0.3.9](changelog/0.3.x/0.3.9.md) — 2026-09-09
 
 Adds current-conditions data to forecast and air quality, a models selector to historical (default relabeled from ERA5 to Best Match), corrected flood river-selection wording, and a low-confidence notice on geocoding.
