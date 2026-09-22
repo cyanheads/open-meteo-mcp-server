@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.3.11](changelog/0.3.x/0.3.11.md) — 2026-09-21
 
-canvas_id inputs are validated against the minted token shape at argument time, tool error text and argument-rejection hints inherit mcp-ts-core 0.13.3-0.13.6, and a DuckDB conversion error reports as a validation error.
+canvas_id inputs are validated against the minted token shape at argument time. From mcp-ts-core 0.13.3–0.13.5: argument rejections carry a reason and recovery hint, tool error text ends with its reason, case-style keys and stringified arrays are repaired before validation, and a DuckDB data error is a validation error.
 
 ## [0.3.10](changelog/0.3.x/0.3.10.md) — 2026-09-16 · 🛡️ Security
 
