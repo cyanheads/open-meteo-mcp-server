@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.11](changelog/0.3.x/0.3.11.md) — 2026-09-21
+
+canvas_id inputs are validated against the minted token shape at argument time, tool error text and argument-rejection hints inherit mcp-ts-core 0.13.3-0.13.6, and a DuckDB conversion error reports as a validation error.
+
 ## [0.3.10](changelog/0.3.x/0.3.10.md) — 2026-09-16 · 🛡️ Security
 
 Session mode is now declared in src (closes #47) instead of relying on env alone. Adopts mcp-ts-core ^0.13.2: stripSqlComments over openmeteo_dataframe_query's SQL is a linear-time scan, empty or unsubstituted env values read as unset, and the skill tree moves from skills/ to framework-skills/.

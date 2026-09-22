@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-09-16 09:12:45
+Generated on: 2026-09-22 05:01:16
 
 ```text
 open-meteo-mcp-server/
@@ -14,6 +14,8 @@ open-meteo-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -184,8 +186,10 @@ open-meteo-mcp-server/
 │   ├── smoke/
 │   │   └── definitions.smoke.test.ts
 │   └── tools/
+│       ├── canvas-id-input.test.ts
 │       ├── dataframe-describe.tool.test.ts
 │       ├── dataframe-query.tool.test.ts
+│       ├── error-contract.test.ts
 │       ├── get-air-quality.tool.test.ts
 │       ├── get-climate.tool.test.ts
 │       ├── get-elevation.tool.test.ts
