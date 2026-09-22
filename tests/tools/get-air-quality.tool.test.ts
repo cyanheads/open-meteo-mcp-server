@@ -761,7 +761,7 @@ describe('openmeteoGetAirQualityTool', () => {
       handle: { rowCount: time.length, tableName: 'spilled_reuse' },
       previewRows: [],
     });
-    const acquire = vi.fn().mockResolvedValue({ canvasId: 'existingcv1' });
+    const acquire = vi.fn().mockResolvedValue({ canvasId: 'existCv001' });
     mockCanvasInstance = { acquire };
 
     const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
@@ -770,10 +770,10 @@ describe('openmeteoGetAirQualityTool', () => {
       longitude: -122.3321,
       hourly_variables: ['pm2_5'],
       past_days: 92,
-      canvas_id: 'existingcv1',
+      canvas_id: 'existCv001',
     });
     await openmeteoGetAirQualityTool.handler(input, ctx);
-    expect(acquire).toHaveBeenCalledWith('existingcv1', ctx);
+    expect(acquire).toHaveBeenCalledWith('existCv001', ctx);
   });
 
   it('stages on its own budget decision rather than re-asking spillover (#41)', async () => {

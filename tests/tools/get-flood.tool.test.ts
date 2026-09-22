@@ -550,7 +550,7 @@ describe('openmeteoGetFloodTool', () => {
       handle: { rowCount: time.length, tableName: 'spilled_reuse' },
       previewRows: [],
     });
-    const acquire = vi.fn().mockResolvedValue({ canvasId: 'existingcv1' });
+    const acquire = vi.fn().mockResolvedValue({ canvasId: 'existCv001' });
     mockCanvasInstance = { acquire };
 
     const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
@@ -560,10 +560,10 @@ describe('openmeteoGetFloodTool', () => {
       daily_variables: ['river_discharge'],
       start_date: '1984-01-01',
       end_date: '2026-07-15',
-      canvas_id: 'existingcv1',
+      canvas_id: 'existCv001',
     });
     await openmeteoGetFloodTool.handler(input, ctx);
-    expect(acquire).toHaveBeenCalledWith('existingcv1', ctx);
+    expect(acquire).toHaveBeenCalledWith('existCv001', ctx);
   });
 
   it('types discharge columns from every staged row, not a leading window', async () => {

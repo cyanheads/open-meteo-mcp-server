@@ -9,6 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import {
@@ -194,12 +195,9 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
         'End date for the archive range (YYYY-MM-DD, inclusive). Must be on or after start_date. Requires start_date — the pair must be sent together, and neither combines with forecast_days or past_days.',
       ),
     timezone: z.string().default('auto').describe('IANA timezone or "auto". Default "auto".'),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        'DataCanvas token for wide past_days, archive-range, or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
-      ),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'DataCanvas token for wide past_days, archive-range, or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
+    ),
   }),
 
   output: z.object({

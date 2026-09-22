@@ -3,6 +3,12 @@
  * @module tests/tools/dataframe-query.tool.test
  */
 
+import {
+  CanvasRegistry,
+  DataCanvas,
+  DEFAULT_CANVAS_REGISTRY_OPTIONS,
+  type IDataCanvasProvider,
+} from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -44,13 +50,13 @@ describe('openmeteoDataframeQueryTool', () => {
     mockCanvasInstance = {
       acquire: vi.fn().mockRejectedValue(
         notFound('Canvas not found or expired. Omit canvas_id to start a new canvas.', {
-          canvasId: 'totallyfakecanvas999',
+          canvasId: 'fakeCanvas',
         }),
       ),
     };
     const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
-      canvas_id: 'totallyfakecanvas999',
+      canvas_id: 'fakeCanvas',
       sql: 'SELECT 1',
     });
     await expect(openmeteoDataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
@@ -67,12 +73,38 @@ describe('openmeteoDataframeQueryTool', () => {
     });
   });
 
+  it('maps the real registry NotFound for a never-minted, well-formed id to canvas_not_found', async () => {
+    // The framework's own registry, not a hand-built NotFound: the lookup misses before
+    // any provider call, so an empty stub provider carries the rest.
+    const provider = { name: 'stub' } as unknown as IDataCanvasProvider;
+    mockCanvasInstance = new DataCanvas(
+      provider,
+      new CanvasRegistry(provider, { ...DEFAULT_CANVAS_REGISTRY_OPTIONS, sweeperIntervalMs: 0 }),
+    );
+    const ctx = createMockContext({
+      tenantId: 'tenant-query',
+      errors: openmeteoDataframeQueryTool.errors,
+    });
+    const input = openmeteoDataframeQueryTool.input.parse({
+      canvas_id: 'neverMint1',
+      sql: 'SELECT 1',
+    });
+    await expect(openmeteoDataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      message: 'Canvas "neverMint1" not found or expired (24 h sliding TTL).',
+      data: {
+        reason: 'canvas_not_found',
+        recovery: { hint: expect.stringContaining('Re-run openmeteo_get_forecast') },
+      },
+    });
+  });
+
   it('rewraps the framework system_catalog_access error with the declared recovery hint', async () => {
     // Real framework throw shape (sqlGate.assertNoSystemCatalogs): a ValidationError
     // with data.reason but NO recovery of its own — the tool's declared recovery is
     // the only possible source of a hint on this path.
     const mockInstance = {
-      canvasId: 'testcanvas01',
+      canvasId: 'testCanv01',
       query: vi
         .fn()
         .mockRejectedValue(
@@ -86,7 +118,7 @@ describe('openmeteoDataframeQueryTool', () => {
 
     const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
-      canvas_id: 'testcanvas01',
+      canvas_id: 'testCanv01',
       sql: 'SELECT * FROM information_schema.tables',
     });
     await expect(openmeteoDataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
@@ -103,7 +135,7 @@ describe('openmeteoDataframeQueryTool', () => {
     // NotFound whose default recovery names registerTable()/describe(). The tool must
     // replace that with caller-facing guidance and preserve the offending table name.
     const mockInstance = {
-      canvasId: 'testcanvas01',
+      canvasId: 'testCanv01',
       query: vi.fn().mockRejectedValue(
         notFound(
           'Canvas table "spillover_0" does not exist. The table may have expired or been dropped — re-stage it or call describe() to inspect the canvas.',
@@ -121,7 +153,7 @@ describe('openmeteoDataframeQueryTool', () => {
 
     const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
-      canvas_id: 'testcanvas01',
+      canvas_id: 'testCanv01',
       sql: 'SELECT COUNT(*) FROM spillover_0',
     });
 
@@ -146,7 +178,7 @@ describe('openmeteoDataframeQueryTool', () => {
     // A ValidationError with a different reason must not be reclassified — consumers
     // key on code + data.reason, and the binder detail must survive.
     const mockInstance = {
-      canvasId: 'testcanvas01',
+      canvasId: 'testCanv01',
       query: vi.fn().mockRejectedValue(
         validationError(
           'Canvas query failed to prepare: Referenced column "tempxyz" not found in FROM clause!',
@@ -162,8 +194,8 @@ describe('openmeteoDataframeQueryTool', () => {
 
     const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
-      canvas_id: 'testcanvas01',
-      sql: 'SELECT tempxyz FROM spilled_testcanvas01',
+      canvas_id: 'testCanv01',
+      sql: 'SELECT tempxyz FROM spilled_testCanv01',
     });
     await expect(openmeteoDataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
@@ -173,24 +205,24 @@ describe('openmeteoDataframeQueryTool', () => {
 
   it('returns rows and row_count from a valid query', async () => {
     const mockInstance = {
-      canvasId: 'testcanvas01',
+      canvasId: 'testCanv01',
       query: vi.fn().mockResolvedValue({ rows: MOCK_ROWS, rowCount: 2 }),
     };
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
 
     const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
-      canvas_id: 'testcanvas01',
-      sql: 'SELECT time, temperature_2m FROM spilled_testcanvas01 LIMIT 2',
+      canvas_id: 'testCanv01',
+      sql: 'SELECT time, temperature_2m FROM spilled_testCanv01 LIMIT 2',
     });
     const result = await openmeteoDataframeQueryTool.handler(input, ctx);
 
-    expect(result.canvas_id).toBe('testcanvas01');
+    expect(result.canvas_id).toBe('testCanv01');
     expect(result.rows).toHaveLength(2);
     expect(result.row_count).toBe(2);
     expect(result.rows[0]).toEqual({ time: '2020-01-01T00:00', temperature_2m: -2.3 });
     expect(mockInstance.query).toHaveBeenCalledWith(
-      'SELECT time, temperature_2m FROM spilled_testcanvas01 LIMIT 2',
+      'SELECT time, temperature_2m FROM spilled_testCanv01 LIMIT 2',
       expect.objectContaining({ signal: expect.anything() }),
     );
   });
@@ -201,15 +233,15 @@ describe('openmeteoDataframeQueryTool', () => {
     // the true total so the agent knows to page the rest with SQL LIMIT / OFFSET.
     const fullRows = Array.from({ length: 250 }, (_, i) => ({ i, v: i * 2 }));
     const mockInstance = {
-      canvasId: 'testcanvas01',
+      canvasId: 'testCanv01',
       query: vi.fn().mockResolvedValue({ rows: fullRows, rowCount: 250 }),
     };
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
 
     const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
-      canvas_id: 'testcanvas01',
-      sql: 'SELECT i, v FROM spilled_testcanvas01',
+      canvas_id: 'testCanv01',
+      sql: 'SELECT i, v FROM spilled_testCanv01',
     });
     const result = await openmeteoDataframeQueryTool.handler(input, ctx);
 
@@ -221,7 +253,7 @@ describe('openmeteoDataframeQueryTool', () => {
 
   it('passes canvas_id to canvas.acquire', async () => {
     const mockInstance = {
-      canvasId: 'mycanvasid1',
+      canvasId: 'myCanvas01',
       query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     };
     const mockAcquire = vi.fn().mockResolvedValue(mockInstance);
@@ -229,27 +261,27 @@ describe('openmeteoDataframeQueryTool', () => {
 
     const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
-      canvas_id: 'mycanvasid1',
-      sql: 'SELECT COUNT(*) AS n FROM spilled_mycanvasid1',
+      canvas_id: 'myCanvas01',
+      sql: 'SELECT COUNT(*) AS n FROM spilled_myCanvas01',
     });
     await openmeteoDataframeQueryTool.handler(input, ctx);
 
-    expect(mockAcquire).toHaveBeenCalledWith('mycanvasid1', ctx);
+    expect(mockAcquire).toHaveBeenCalledWith('myCanvas01', ctx);
   });
 
   it('formats empty result correctly', () => {
     const blocks = openmeteoDataframeQueryTool.format!({
-      canvas_id: 'testcanvas01',
+      canvas_id: 'testCanv01',
       rows: [],
       row_count: 0,
     });
-    expect(firstText(blocks)).toContain('testcanvas01');
+    expect(firstText(blocks)).toContain('testCanv01');
     expect(firstText(blocks)).toContain('No rows returned');
   });
 
   it('formats result rows as a markdown table', () => {
     const blocks = openmeteoDataframeQueryTool.format!({
-      canvas_id: 'testcanvas01',
+      canvas_id: 'testCanv01',
       rows: [
         { time: '2020-01', avg_temp: -1.5 },
         { time: '2020-02', avg_temp: 2.1 },
@@ -257,7 +289,7 @@ describe('openmeteoDataframeQueryTool', () => {
       row_count: 2,
     });
     const text = firstText(blocks) ?? '';
-    expect(text).toContain('testcanvas01');
+    expect(text).toContain('testCanv01');
     expect(text).toContain('time');
     expect(text).toContain('avg_temp');
     expect(text).toContain('-1.5');
@@ -271,7 +303,7 @@ describe('openmeteoDataframeQueryTool', () => {
     // carry the same values structuredContent.rows does.
     const text = firstText(
       openmeteoDataframeQueryTool.format!({
-        canvas_id: 'testcanvas01',
+        canvas_id: 'testCanv01',
         rows: [
           { nested: { temp: 3.6, rain: 0 }, values: [3.6, 0] },
           { nested: { temp: 3.2, rain: 0 }, values: [3.2, 0] },
@@ -290,7 +322,7 @@ describe('openmeteoDataframeQueryTool', () => {
     // string cells carry the same hazard.
     const text = firstText(
       openmeteoDataframeQueryTool.format!({
-        canvas_id: 'testcanvas01',
+        canvas_id: 'testCanv01',
         rows: [{ nested: { note: 'pipe|test' }, plain: 'a|b' }],
         row_count: 1,
       }),
@@ -306,7 +338,7 @@ describe('openmeteoDataframeQueryTool', () => {
     // bare — not JSON-quoted — and a null cell stays empty.
     const text = firstText(
       openmeteoDataframeQueryTool.format!({
-        canvas_id: 'testcanvas01',
+        canvas_id: 'testCanv01',
         rows: [
           {
             big: '123456789012345',
@@ -331,7 +363,7 @@ describe('openmeteoDataframeQueryTool', () => {
       v: i,
     }));
     const blocks = openmeteoDataframeQueryTool.format!({
-      canvas_id: 'testcanvas01',
+      canvas_id: 'testCanv01',
       rows,
       row_count: 150,
     });

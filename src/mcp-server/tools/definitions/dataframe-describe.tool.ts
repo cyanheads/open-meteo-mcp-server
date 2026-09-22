@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
@@ -33,11 +34,9 @@ export const openmeteoDataframeDescribeTool = tool('openmeteo_dataframe_describe
   ],
 
   input: z.object({
-    canvas_id: z
-      .string()
-      .describe(
-        'Canvas ID returned by openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate when truncated: true.',
-      ),
+    canvas_id: CanvasIdSchema.describe(
+      'Canvas ID returned by openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate when truncated: true.',
+    ),
   }),
 
   output: z.object({

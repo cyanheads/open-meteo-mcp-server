@@ -683,7 +683,7 @@ describe('openmeteoGetMarineTool', () => {
       handle: { rowCount: time.length, tableName: 'spilled_reuse' },
       previewRows: [],
     });
-    const acquire = vi.fn().mockResolvedValue({ canvasId: 'existingcv1' });
+    const acquire = vi.fn().mockResolvedValue({ canvasId: 'existCv001' });
     mockCanvasInstance = { acquire };
 
     const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
@@ -692,10 +692,10 @@ describe('openmeteoGetMarineTool', () => {
       longitude: -122.5,
       hourly_variables: ['wave_height'],
       past_days: 92,
-      canvas_id: 'existingcv1',
+      canvas_id: 'existCv001',
     });
     await openmeteoGetMarineTool.handler(input, ctx);
-    expect(acquire).toHaveBeenCalledWith('existingcv1', ctx);
+    expect(acquire).toHaveBeenCalledWith('existCv001', ctx);
   });
 
   it('stages on its own budget decision rather than re-asking spillover (#41)', async () => {

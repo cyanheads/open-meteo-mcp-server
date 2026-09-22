@@ -9,6 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
@@ -186,12 +187,9 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
       .describe(
         'IANA timezone (e.g., "America/Los_Angeles") or "auto" to use the location\'s local timezone. Default "auto". The timezone from openmeteo_search_locations is ideal to pass here.',
       ),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        'DataCanvas token for wide past_days or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
-      ),
+    canvas_id: CanvasIdSchema.optional().describe(
+      'DataCanvas token for wide past_days or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
+    ),
   }),
 
   output: z.object({
