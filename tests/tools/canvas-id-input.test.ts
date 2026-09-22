@@ -114,7 +114,7 @@ describe('canvas_id input declaration', () => {
 
   it.each(CASES)('$tool.name output canvas_id stays a plain string', ({ tool }) => {
     const schema = z.toJSONSchema(tool.output, { io: 'output' }) as JsonSchemaObject;
-    expect(schema.properties.canvas_id).toBeDefined();
+    expect(schema.properties.canvas_id).toMatchObject({ type: 'string' });
     expect(schema.properties.canvas_id?.pattern).toBeUndefined();
   });
 
