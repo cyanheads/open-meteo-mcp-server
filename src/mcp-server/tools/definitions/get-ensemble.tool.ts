@@ -106,21 +106,21 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Neither hourly_variables nor daily_variables was provided',
+      when: 'Neither hourly_variables nor daily_variables was provided.',
       recovery: 'Provide at least one of hourly_variables or daily_variables.',
       retryable: false,
     },
     {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An unknown variable name or unsupported model was requested',
+      when: 'An unknown variable name or unsupported model was requested.',
       recovery: `Check the variable name against Open-Meteo ensemble docs. Common hourly: temperature_2m, precipitation, wind_speed_10m. Common daily: temperature_2m_max, temperature_2m_min, precipitation_sum. Documented models: ${ENSEMBLE_MODEL_NAMES}.`,
       retryable: false,
     },
     {
       reason: 'variable_wrong_cadence',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A variable the ensemble API documents under one cadence was passed in the other cadence field — for example precipitation_sum in hourly_variables, or precipitation in daily_variables',
+      when: 'A variable sat in the cadence field the ensemble API does not document it under — for example precipitation_sum in hourly_variables, or precipitation in daily_variables — caught before the request is sent.',
       recovery:
         'Move each variable the message names to the field the message names, or drop it — hourly_variables and daily_variables take separate ensemble variable sets, and the message lists the same-cadence alternatives when the endpoint publishes any.',
       retryable: false,
@@ -128,7 +128,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     {
       reason: 'invalid_timezone',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'timezone was blank, or upstream did not recognize the requested time zone',
+      when: 'timezone was blank, or upstream did not recognize the requested time zone.',
       recovery:
         'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
       retryable: false,
@@ -136,7 +136,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     {
       reason: 'request_too_large',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Open-Meteo refused the request as asking for too much data in one call',
+      when: 'Open-Meteo refused the request as asking for too much data in one call.',
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name and the model are valid — the size of the request is what was rejected.`,
       retryable: false,
     },
@@ -289,7 +289,6 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide at least one of hourly_variables or daily_variables.',
-        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -306,11 +305,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       input.daily_variables,
     );
     if (mismatches.length > 0) {
-      throw ctx.fail(
-        'variable_wrong_cadence',
-        describeCadenceMismatches(mismatches),
-        ctx.recoveryFor('variable_wrong_cadence'),
-      );
+      throw ctx.fail('variable_wrong_cadence', describeCadenceMismatches(mismatches));
     }
 
     /*
@@ -319,11 +314,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
      * before the call — no documented workflow asks a caller to send one.
      */
     if (input.timezone.trim() === '') {
-      throw ctx.fail(
-        'invalid_timezone',
-        BLANK_TIMEZONE_MESSAGE,
-        ctx.recoveryFor('invalid_timezone'),
-      );
+      throw ctx.fail('invalid_timezone', BLANK_TIMEZONE_MESSAGE);
     }
 
     const service = getOpenMeteoService();
@@ -346,11 +337,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
 
     if (data.error) {
       if (isInvalidTimezoneReason(data.reason)) {
-        throw ctx.fail(
-          'invalid_timezone',
-          frameInvalidTimezoneMessage(data.reason),
-          ctx.recoveryFor('invalid_timezone'),
-        );
+        throw ctx.fail('invalid_timezone', frameInvalidTimezoneMessage(data.reason));
       }
       /*
        * Volume, not vocabulary: upstream refuses an over-wide request through the same
@@ -361,13 +348,11 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         throw ctx.fail(
           'request_too_large',
           frameRequestTooLargeMessage(data.reason, PAYLOAD_NARROWING),
-          ctx.recoveryFor('request_too_large'),
         );
       }
       throw ctx.fail(
         'invalid_variable',
         frameInvalidVariableMessage(data.reason, 'variable or model'),
-        ctx.recoveryFor('invalid_variable'),
       );
     }
 

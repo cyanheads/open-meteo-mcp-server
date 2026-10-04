@@ -8,6 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoSearchLocationsTool } from '@/mcp-server/tools/definitions/search-locations.tool.js';
 import { firstText } from '../helpers/content.js';
+import { wireError } from '../helpers/wire-error.js';
 
 const mockGetGeocode = vi.fn();
 
@@ -112,9 +113,8 @@ describe('openmeteoSearchLocationsTool', () => {
   it('throws no_results with correct code when results key is absent', async () => {
     // API returns {} without results key on no-match — guard: results ?? []
     mockGetGeocode.mockResolvedValue({ generationtime_ms: 0.085 });
-    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
     const input = openmeteoSearchLocationsTool.input.parse({ name: 'zzzznotaplace' });
-    await expect(openmeteoSearchLocationsTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoSearchLocationsTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: {
         reason: 'no_results',
@@ -135,14 +135,8 @@ describe('openmeteoSearchLocationsTool', () => {
 
   it('no_results recovery covers both dropping an admin qualifier and querying the nearest town for a physical feature', async () => {
     mockGetGeocode.mockResolvedValue({ generationtime_ms: 0.1 });
-    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
     const input = openmeteoSearchLocationsTool.input.parse({ name: 'Baoding Hebei' });
-    const err = (await Promise.resolve()
-      .then(() => openmeteoSearchLocationsTool.handler(input, ctx))
-      .catch((e: unknown) => e)) as {
-      data: { recovery: { hint: string } };
-    };
-    const hint = err.data.recovery.hint;
+    const hint = (await wireError(openmeteoSearchLocationsTool, input)).data?.recovery?.hint;
     // Administrative-qualifier strand: drop the qualifier, search the bare name.
     expect(hint).toMatch(/Baoding/);
     expect(hint).toMatch(/drop|bare place name|qualifier/i);
@@ -159,12 +153,8 @@ describe('openmeteoSearchLocationsTool', () => {
      * the recovery has to name what a caller retries a short one with.
      */
     mockGetGeocode.mockResolvedValue({ generationtime_ms: 0.1 });
-    const ctx = createMockContext({ errors: openmeteoSearchLocationsTool.errors });
     const input = openmeteoSearchLocationsTool.input.parse({ name: '서울' });
-    const err = (await Promise.resolve()
-      .then(() => openmeteoSearchLocationsTool.handler(input, ctx))
-      .catch((e: unknown) => e)) as { data: { recovery: { hint: string } } };
-    const hint = err.data.recovery.hint;
+    const hint = (await wireError(openmeteoSearchLocationsTool, input)).data?.recovery?.hint;
 
     expect(hint).toMatch(/one- or two-character|1-2 character/i);
     // Both working next steps: the full administrative name and the romanized name.

@@ -10,6 +10,7 @@ import { openmeteoGetHistoricalTool } from '@/mcp-server/tools/definitions/get-h
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { wireError } from '../helpers/wire-error.js';
 
 const mockGetHistorical = vi.fn();
 const mockSpillover = vi.fn();
@@ -203,7 +204,6 @@ describe('openmeteoGetHistoricalTool', () => {
   });
 
   it('throws date_out_of_range with correct reason when start_date before 1940', async () => {
-    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -211,7 +211,7 @@ describe('openmeteoGetHistoricalTool', () => {
       end_date: '1900-12-31',
       daily_variables: ['temperature_2m_max'],
     });
-    await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetHistoricalTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'date_out_of_range',
@@ -245,7 +245,6 @@ describe('openmeteoGetHistoricalTool', () => {
   it('rejects a blank timezone before the network call (#38)', async () => {
     // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
     // upstream's GMT default rather than the documented "auto".
-    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -254,7 +253,7 @@ describe('openmeteoGetHistoricalTool', () => {
       daily_variables: ['temperature_2m_max'],
       timezone: '',
     });
-    await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetHistoricalTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('timezone was blank'),
       data: {
@@ -272,7 +271,6 @@ describe('openmeteoGetHistoricalTool', () => {
       error: true,
       reason: 'Invalid timezone',
     });
-    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -281,7 +279,7 @@ describe('openmeteoGetHistoricalTool', () => {
       daily_variables: ['temperature_2m_max'],
       timezone: 'Mars/Olympus',
     });
-    await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetHistoricalTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
       data: {
@@ -341,7 +339,6 @@ describe('openmeteoGetHistoricalTool', () => {
       error: true,
       reason: upstreamReason,
     });
-    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -349,7 +346,7 @@ describe('openmeteoGetHistoricalTool', () => {
       end_date: '2024-07-02',
       hourly_variables: ['bogus_historical_var'],
     });
-    await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetHistoricalTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       // The tool now takes models too, so the framing covers both kinds of name (#37).
       message: expect.stringMatching(/^Unknown variable or model name: bogus_historical_var\./),
@@ -369,7 +366,6 @@ describe('openmeteoGetHistoricalTool', () => {
       reason:
         'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
     });
-    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -377,12 +373,7 @@ describe('openmeteoGetHistoricalTool', () => {
       end_date: '2026-01-01',
       hourly_variables: ['temperature_2m', 'precipitation'],
     });
-
-    const error = await Promise.resolve(openmeteoGetHistoricalTool.handler(input, ctx)).catch(
-      (e: Error) => e,
-    );
-
-    if (!(error instanceof Error)) throw new Error('Expected the historical handler to reject');
+    const error = await wireError(openmeteoGetHistoricalTool, input);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {

@@ -10,6 +10,7 @@ import { openmeteoGetForecastTool } from '@/mcp-server/tools/definitions/get-for
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { wireError } from '../helpers/wire-error.js';
 
 const mockGetForecast = vi.fn();
 const mockSpillover = vi.fn();
@@ -174,12 +175,11 @@ describe('openmeteoGetForecastTool', () => {
   });
 
   it('throws no_variables_requested (with correct reason and recovery hint) when neither hourly nor daily provided', async () => {
-    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
     });
-    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetForecastTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'no_variables_requested',
@@ -195,14 +195,13 @@ describe('openmeteoGetForecastTool', () => {
   it('rejects a blank timezone before the network call (#38)', async () => {
     // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
     // upstream's GMT default rather than the documented "auto".
-    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
       hourly_variables: ['temperature_2m'],
       timezone: '',
     });
-    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetForecastTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('timezone was blank'),
       data: {
@@ -220,14 +219,13 @@ describe('openmeteoGetForecastTool', () => {
       error: true,
       reason: 'Invalid timezone',
     });
-    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
       hourly_variables: ['temperature_2m'],
       timezone: 'Mars/Olympus',
     });
-    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetForecastTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
       data: {
@@ -283,13 +281,12 @@ describe('openmeteoGetForecastTool', () => {
       error: true,
       reason: upstreamReason,
     });
-    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
       hourly_variables: ['temperature_2m', 'not_a_real_variable_xyz'],
     });
-    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetForecastTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       // Leads with guidance and names the requested values without claiming
       // the valid ones are unknown
@@ -303,7 +300,7 @@ describe('openmeteoGetForecastTool', () => {
       },
     });
     // Raw upstream string is demoted to a trailing parenthetical, not the lead
-    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetForecastTool, input)).resolves.toMatchObject({
       message: expect.stringContaining(`(Upstream: ${upstreamReason})`),
     });
   });
@@ -316,7 +313,6 @@ describe('openmeteoGetForecastTool', () => {
       error: true,
       reason: TOO_MUCH_DATA_REASON,
     });
-    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -324,12 +320,7 @@ describe('openmeteoGetForecastTool', () => {
       past_days: 92,
       hourly_variables: ['temperature_2m', 'precipitation'],
     });
-
-    const error = await Promise.resolve(openmeteoGetForecastTool.handler(input, ctx)).catch(
-      (e: Error) => e,
-    );
-
-    if (!(error instanceof Error)) throw new Error('Expected the forecast handler to reject');
+    const error = await wireError(openmeteoGetForecastTool, input);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
@@ -346,7 +337,6 @@ describe('openmeteoGetForecastTool', () => {
     // The live 400 for this request echoes the whole encoded list, valid names
     // included, so the offender is never isolated upstream. Rejecting before the call
     // is what makes the next attempt convergent.
-    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 40.71427,
       longitude: -74.00597,
@@ -363,7 +353,7 @@ describe('openmeteoGetForecastTool', () => {
       ],
     });
 
-    await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetForecastTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message:
         'cloud_cover is not valid in daily_variables — Open-Meteo publishes it as an hourly variable. Move it to hourly_variables, or stay in daily_variables with cloud_cover_max, cloud_cover_mean, cloud_cover_min.',

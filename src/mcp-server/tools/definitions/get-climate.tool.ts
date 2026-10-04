@@ -68,7 +68,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     {
       reason: 'date_out_of_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'start_date predates 1950-01-01 or end_date is after 2050-12-31',
+      when: 'start_date predates 1950-01-01 or end_date is after 2050-12-31.',
       recovery:
         'Use dates between 1950-01-01 and 2050-12-31 — the CMIP6 projection coverage. For observed history before 1950 limits, use openmeteo_get_historical (the archive, from 1940).',
       retryable: false,
@@ -76,14 +76,14 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     {
       reason: 'date_order_invalid',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'end_date is before start_date',
+      when: 'The end_date value is earlier than the start_date value.',
       recovery: 'Ensure end_date is on or after start_date.',
       retryable: false,
     },
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'daily_variables was not provided or is empty',
+      when: 'daily_variables was not provided or is empty.',
       recovery:
         'Provide daily_variables with at least one variable (e.g., ["temperature_2m_max", "precipitation_sum"]).',
       retryable: false,
@@ -91,14 +91,14 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An unknown variable name or unsupported climate model was requested',
+      when: 'An unknown variable name or unsupported climate model was requested.',
       recovery: `Check names against Open-Meteo Climate API docs. Common daily variables: temperature_2m_max, temperature_2m_min, temperature_2m_mean, precipitation_sum, rain_sum, snowfall_sum, wind_speed_10m_mean, wind_speed_10m_max, shortwave_radiation_sum, cloud_cover_mean. Documented models: ${CLIMATE_MODEL_LIST}. When the message names one model, correct only that one — the rest of the models list is valid.`,
       retryable: false,
     },
     {
       reason: 'invalid_timezone',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'timezone was blank, or upstream did not recognize the requested time zone',
+      when: 'timezone was blank, or upstream did not recognize the requested time zone.',
       recovery:
         'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
       retryable: false,
@@ -106,7 +106,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     {
       reason: 'request_too_large',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Open-Meteo refused the request as asking for too much data in one call',
+      when: 'Open-Meteo refused the request as asking for too much data in one call.',
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name and model is valid and the dates are in range — the size of the request is what was rejected.`,
       retryable: false,
     },
@@ -232,7 +232,6 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide daily_variables with at least one climate variable.',
-        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -240,7 +239,6 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       throw ctx.fail(
         'date_order_invalid',
         `end_date (${input.end_date}) is before start_date (${input.start_date}).`,
-        ctx.recoveryFor('date_order_invalid'),
       );
     }
 
@@ -248,7 +246,6 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       throw ctx.fail(
         'date_out_of_range',
         `start_date ${input.start_date} predates CMIP6 projection coverage (1950-01-01).`,
-        ctx.recoveryFor('date_out_of_range'),
       );
     }
 
@@ -256,7 +253,6 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       throw ctx.fail(
         'date_out_of_range',
         `end_date ${input.end_date} is after CMIP6 projection coverage (2050-12-31).`,
-        ctx.recoveryFor('date_out_of_range'),
       );
     }
 
@@ -266,11 +262,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
      * before the call — no documented workflow asks a caller to send one.
      */
     if (input.timezone.trim() === '') {
-      throw ctx.fail(
-        'invalid_timezone',
-        BLANK_TIMEZONE_MESSAGE,
-        ctx.recoveryFor('invalid_timezone'),
-      );
+      throw ctx.fail('invalid_timezone', BLANK_TIMEZONE_MESSAGE);
     }
 
     const service = getOpenMeteoService();
@@ -293,11 +285,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     if (data.error) {
       const reason = data.reason ?? '';
       if (isInvalidTimezoneReason(data.reason)) {
-        throw ctx.fail(
-          'invalid_timezone',
-          frameInvalidTimezoneMessage(data.reason),
-          ctx.recoveryFor('invalid_timezone'),
-        );
+        throw ctx.fail('invalid_timezone', frameInvalidTimezoneMessage(data.reason));
       }
       /*
        * Volume, not vocabulary: a 1950–2050 pull across every model is refused through
@@ -306,18 +294,10 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
        * of the date branch so a future rewording mentioning a date cannot claim it.
        */
       if (isRequestTooLargeReason(reason)) {
-        throw ctx.fail(
-          'request_too_large',
-          frameRequestTooLargeMessage(reason, PAYLOAD_NARROWING),
-          ctx.recoveryFor('request_too_large'),
-        );
+        throw ctx.fail('request_too_large', frameRequestTooLargeMessage(reason, PAYLOAD_NARROWING));
       }
       if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
-        throw ctx.fail(
-          'date_out_of_range',
-          reason || 'Date out of CMIP6 projection range.',
-          ctx.recoveryFor('date_out_of_range'),
-        );
+        throw ctx.fail('date_out_of_range', reason || 'Date out of CMIP6 projection range.');
       }
       /*
        * The models array goes out with a literal comma, so upstream parses it as a list
@@ -330,7 +310,6 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       throw ctx.fail(
         'invalid_variable',
         frameInvalidVariableMessage(data.reason, 'variable or model'),
-        ctx.recoveryFor('invalid_variable'),
       );
     }
 

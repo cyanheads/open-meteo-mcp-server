@@ -72,7 +72,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     {
       reason: 'date_out_of_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'start_date predates 1940-01-01, or the requested dates fall outside the coverage of the selected model',
+      when: 'start_date predates 1940-01-01, or the requested dates fall outside the coverage of the selected model.',
       recovery:
         'Use start_date >= 1940-01-01. A selected ERA5-family model updates daily with roughly a 5-day delay, so for the last few days request models: ["ecmwf_ifs"], drop models to use the Best Match blend, or use openmeteo_get_forecast with past_days instead.',
       retryable: false,
@@ -80,28 +80,28 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     {
       reason: 'date_order_invalid',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'end_date is before start_date',
+      when: 'The end_date value is earlier than the start_date value.',
       recovery: 'Ensure end_date is on or after start_date.',
       retryable: false,
     },
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Neither hourly_variables nor daily_variables was provided',
+      when: 'Neither hourly_variables nor daily_variables was provided.',
       recovery: 'Provide at least one of hourly_variables or daily_variables.',
       retryable: false,
     },
     {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An unknown variable name or unsupported archive model was requested',
+      when: 'An unknown variable name or unsupported archive model was requested.',
       recovery: `Check the variable name against Open-Meteo docs. Common hourly: temperature_2m, precipitation, wind_speed_10m, relative_humidity_2m, cloud_cover. Common daily: temperature_2m_max, temperature_2m_min, precipitation_sum. Documented models: ${ARCHIVE_MODEL_NAMES}. When the message names one model, correct only that one — the rest of the models list is valid.`,
       retryable: false,
     },
     {
       reason: 'variable_wrong_cadence',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A variable Open-Meteo documents under one cadence was passed in the other cadence field — for example cloud_cover in daily_variables, or temperature_2m_max in hourly_variables',
+      when: 'A variable sat in the cadence field Open-Meteo does not document it under — for example cloud_cover in daily_variables, or temperature_2m_max in hourly_variables — caught before the request is sent.',
       recovery:
         'Move each variable the message names to the field the message names, or drop it — hourly_variables and daily_variables take separate archive variable sets, and the message lists the same-cadence alternatives when the archive publishes any.',
       retryable: false,
@@ -109,7 +109,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     {
       reason: 'invalid_timezone',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'timezone was blank, or upstream did not recognize the requested time zone',
+      when: 'timezone was blank, or upstream did not recognize the requested time zone.',
       recovery:
         'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
       retryable: false,
@@ -117,7 +117,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     {
       reason: 'request_too_large',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Open-Meteo refused the request as asking for too much data in one call',
+      when: 'Open-Meteo refused the request as asking for too much data in one call.',
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid and the dates are in range — the size of the request is what was rejected.`,
       retryable: false,
     },
@@ -264,7 +264,6 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide at least one of hourly_variables or daily_variables.',
-        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -281,18 +280,13 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       input.daily_variables,
     );
     if (mismatches.length > 0) {
-      throw ctx.fail(
-        'variable_wrong_cadence',
-        describeCadenceMismatches(mismatches),
-        ctx.recoveryFor('variable_wrong_cadence'),
-      );
+      throw ctx.fail('variable_wrong_cadence', describeCadenceMismatches(mismatches));
     }
 
     if (input.end_date < input.start_date) {
       throw ctx.fail(
         'date_order_invalid',
         `end_date (${input.end_date}) is before start_date (${input.start_date}).`,
-        ctx.recoveryFor('date_order_invalid'),
       );
     }
 
@@ -300,7 +294,6 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       throw ctx.fail(
         'date_out_of_range',
         `start_date ${input.start_date} predates the archive's coverage (1940-01-01).`,
-        ctx.recoveryFor('date_out_of_range'),
       );
     }
 
@@ -310,11 +303,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
      * before the call — no documented workflow asks a caller to send one.
      */
     if (input.timezone.trim() === '') {
-      throw ctx.fail(
-        'invalid_timezone',
-        BLANK_TIMEZONE_MESSAGE,
-        ctx.recoveryFor('invalid_timezone'),
-      );
+      throw ctx.fail('invalid_timezone', BLANK_TIMEZONE_MESSAGE);
     }
 
     const service = getOpenMeteoService();
@@ -338,11 +327,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     if (data.error) {
       const reason = data.reason ?? '';
       if (isInvalidTimezoneReason(data.reason)) {
-        throw ctx.fail(
-          'invalid_timezone',
-          frameInvalidTimezoneMessage(data.reason),
-          ctx.recoveryFor('invalid_timezone'),
-        );
+        throw ctx.fail('invalid_timezone', frameInvalidTimezoneMessage(data.reason));
       }
       /*
        * Volume, not vocabulary: upstream refuses an over-wide request through the same
@@ -351,18 +336,10 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
        * branch so a future rewording that happens to mention a date cannot claim it.
        */
       if (isRequestTooLargeReason(reason)) {
-        throw ctx.fail(
-          'request_too_large',
-          frameRequestTooLargeMessage(reason, PAYLOAD_NARROWING),
-          ctx.recoveryFor('request_too_large'),
-        );
+        throw ctx.fail('request_too_large', frameRequestTooLargeMessage(reason, PAYLOAD_NARROWING));
       }
       if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
-        throw ctx.fail(
-          'date_out_of_range',
-          reason || 'Date out of archive range.',
-          ctx.recoveryFor('date_out_of_range'),
-        );
+        throw ctx.fail('date_out_of_range', reason || 'Date out of archive range.');
       }
       /*
        * The models array goes out with a literal comma, so upstream parses it as a list
@@ -372,7 +349,6 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       throw ctx.fail(
         'invalid_variable',
         frameInvalidVariableMessage(data.reason, 'variable or model'),
-        ctx.recoveryFor('invalid_variable'),
       );
     }
 

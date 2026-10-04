@@ -14,6 +14,7 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoDataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 import { firstText } from '../helpers/content.js';
+import { wireError } from '../helpers/wire-error.js';
 
 // Canvas mock — returns undefined by default; individual tests override
 let mockCanvasInstance: unknown;
@@ -54,12 +55,11 @@ describe('openmeteoDataframeQueryTool', () => {
         }),
       ),
     };
-    const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
       canvas_id: 'fakeCanvas',
       sql: 'SELECT 1',
     });
-    await expect(openmeteoDataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoDataframeQueryTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       message: expect.not.stringContaining('Omit canvas_id'),
       data: {
@@ -81,15 +81,13 @@ describe('openmeteoDataframeQueryTool', () => {
       provider,
       new CanvasRegistry(provider, { ...DEFAULT_CANVAS_REGISTRY_OPTIONS, sweeperIntervalMs: 0 }),
     );
-    const ctx = createMockContext({
-      tenantId: 'tenant-query',
-      errors: openmeteoDataframeQueryTool.errors,
-    });
     const input = openmeteoDataframeQueryTool.input.parse({
       canvas_id: 'neverMint1',
       sql: 'SELECT 1',
     });
-    await expect(openmeteoDataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(
+      wireError(openmeteoDataframeQueryTool, input, { context: { tenantId: 'tenant-query' } }),
+    ).resolves.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       message: 'Canvas "neverMint1" not found or expired (24 h sliding TTL).',
       data: {
@@ -115,13 +113,11 @@ describe('openmeteoDataframeQueryTool', () => {
         ),
     };
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
-
-    const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
       canvas_id: 'testCanv01',
       sql: 'SELECT * FROM information_schema.tables',
     });
-    await expect(openmeteoDataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoDataframeQueryTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'system_catalog_access',
@@ -151,26 +147,19 @@ describe('openmeteoDataframeQueryTool', () => {
     };
     mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
 
-    const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
       canvas_id: 'testCanv01',
       sql: 'SELECT COUNT(*) FROM spillover_0',
     });
 
-    const err = (await Promise.resolve()
-      .then(() => openmeteoDataframeQueryTool.handler(input, ctx))
-      .catch((e: unknown) => e)) as {
-      code: number;
-      message: string;
-      data: { reason: string; recovery: { hint: string } };
-    };
+    const err = await wireError(openmeteoDataframeQueryTool, input);
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(err.data.reason).toBe('missing_table');
+    expect(err.data?.reason).toBe('missing_table');
     expect(err.message).toContain('spillover_0');
-    expect(err.data.recovery.hint).toContain('openmeteo_dataframe_describe');
+    expect(err.data?.recovery?.hint).toContain('openmeteo_dataframe_describe');
     // The framework leak is gone from both the message and the recovery hint.
-    expect(err.data.recovery.hint).not.toContain('registerTable');
-    expect(err.data.recovery.hint).not.toContain('describe()');
+    expect(err.data?.recovery?.hint).not.toContain('registerTable');
+    expect(err.data?.recovery?.hint).not.toContain('describe()');
     expect(err.message).not.toContain('describe()');
   });
 

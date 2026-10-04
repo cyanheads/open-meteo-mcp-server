@@ -56,14 +56,14 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     {
       reason: 'canvas_not_enabled',
       code: JsonRpcErrorCode.InternalError,
-      when: 'CANVAS_PROVIDER_TYPE is not set to duckdb',
+      when: 'CANVAS_PROVIDER_TYPE is not set to duckdb.',
       recovery: 'Set CANVAS_PROVIDER_TYPE=duckdb and restart the server to enable DataCanvas.',
       retryable: false,
     },
     {
       reason: 'canvas_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The canvas_id is unknown or has expired (TTL is 24 h sliding)',
+      when: 'The canvas_id is unknown or has expired under its 24 h sliding TTL.',
       recovery:
         'Re-run openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate to stage a fresh canvas, then retry.',
       retryable: false,
@@ -71,7 +71,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     {
       reason: 'system_catalog_access',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL references a system catalog (information_schema, sqlite_master, pg_catalog, or a duckdb_*() function)',
+      when: 'The SQL references a system catalog such as information_schema, sqlite_master, pg_catalog, or a duckdb_*() function.',
       recovery:
         'List tables and columns with openmeteo_dataframe_describe instead — system catalogs are blocked so callers cannot enumerate other staged canvases.',
       retryable: false,
@@ -79,7 +79,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     {
       reason: 'missing_table',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The SQL references a table that is not staged on this canvas — a mistyped name, or one that expired (24 h sliding TTL) or was dropped',
+      when: 'The SQL references a table that is not staged on this canvas — a mistyped name, or one that expired (24 h sliding TTL) or was dropped.',
       recovery:
         'List the staged tables and columns with openmeteo_dataframe_describe, then reference an existing name — or re-run openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate to stage a fresh canvas.',
       retryable: false,
@@ -114,7 +114,6 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
       throw ctx.fail(
         'canvas_not_enabled',
         'DataCanvas is not enabled. Set CANVAS_PROVIDER_TYPE=duckdb and restart.',
-        ctx.recoveryFor('canvas_not_enabled'),
       );
     }
 
@@ -126,7 +125,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
         throw ctx.fail(
           'canvas_not_found',
           `Canvas "${input.canvas_id}" not found or expired (24 h sliding TTL).`,
-          ctx.recoveryFor('canvas_not_found'),
+          undefined,
           { cause: err },
         );
       }
@@ -143,12 +142,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
       .query(input.sql, { signal: ctx.signal, denySystemCatalogs: true })
       .catch((err: unknown) => {
         if (err instanceof McpError && err.data?.reason === 'system_catalog_access') {
-          throw ctx.fail(
-            'system_catalog_access',
-            err.message,
-            ctx.recoveryFor('system_catalog_access'),
-            { cause: err },
-          );
+          throw ctx.fail('system_catalog_access', err.message, undefined, { cause: err });
         }
         if (err instanceof McpError && err.data?.reason === 'missing_table') {
           const tableName = err.data.tableName;
@@ -157,7 +151,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
           throw ctx.fail(
             'missing_table',
             `${named} is not staged on canvas "${input.canvas_id}". Use the exact table_name returned by openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate, or call openmeteo_dataframe_describe to list staged tables. It may also have expired (24 h sliding TTL) or been dropped.`,
-            ctx.recoveryFor('missing_table'),
+            undefined,
             { cause: err },
           );
         }

@@ -19,7 +19,7 @@ export const openmeteoGetElevationTool = tool('openmeteo_get_elevation', {
     {
       reason: 'coordinate_count_mismatch',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'latitudes and longitudes arrays have different lengths',
+      when: 'The latitudes and longitudes arrays have different lengths.',
       recovery: 'Provide equal-length latitude and longitude arrays.',
       retryable: false,
     },
@@ -61,7 +61,6 @@ export const openmeteoGetElevationTool = tool('openmeteo_get_elevation', {
       throw ctx.fail(
         'coordinate_count_mismatch',
         `latitudes length (${input.latitudes.length}) ≠ longitudes length (${input.longitudes.length}).`,
-        ctx.recoveryFor('coordinate_count_mismatch'),
       );
     }
 

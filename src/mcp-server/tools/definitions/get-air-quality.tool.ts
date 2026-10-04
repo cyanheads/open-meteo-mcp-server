@@ -76,7 +76,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An unknown air quality variable name was requested',
+      when: 'An unknown air quality variable name was requested.',
       recovery:
         'Check variable names. Common: pm2_5, pm10, ozone, nitrogen_dioxide, sulphur_dioxide, carbon_monoxide, european_aqi, us_aqi.',
       retryable: false,
@@ -84,7 +84,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Neither current_variables nor hourly_variables was provided',
+      when: 'Neither current_variables nor hourly_variables was provided.',
       recovery:
         'Provide at least one air quality variable in current_variables (values right now) or hourly_variables (a time series).',
       retryable: false,
@@ -92,7 +92,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     {
       reason: 'date_range_incomplete',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Only one of start_date / end_date was provided — the CAMS archive requires the pair together',
+      when: 'Only one of start_date / end_date was provided — the CAMS archive requires the pair together.',
       recovery:
         'Provide both start_date and end_date to pull an archive range, or omit both and use forecast_days / past_days for the forecast window.',
       retryable: false,
@@ -100,7 +100,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     {
       reason: 'forecast_window_conflict',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'forecast_days or a non-zero past_days was combined with start_date or end_date',
+      when: 'A start_date or end_date range was combined with forecast_days or a non-zero past_days value.',
       recovery:
         'Drop forecast_days and past_days to pull the archive range, or drop start_date and end_date to pull the forecast window — the endpoint accepts one window per call, never both.',
       retryable: false,
@@ -108,14 +108,14 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     {
       reason: 'date_order_invalid',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'end_date is before start_date',
+      when: 'The end_date value is earlier than the start_date value.',
       recovery: 'Ensure end_date is on or after start_date.',
       retryable: false,
     },
     {
       reason: 'invalid_timezone',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'timezone was blank, or upstream did not recognize the requested time zone',
+      when: 'timezone was blank, or upstream did not recognize the requested time zone.',
       recovery:
         'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
       retryable: false,
@@ -123,7 +123,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     {
       reason: 'request_too_large',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Open-Meteo refused the request as asking for too much data in one call',
+      when: 'Open-Meteo refused the request as asking for too much data in one call.',
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid — the size of the request is what was rejected, so re-checking spelling will not help.`,
       retryable: false,
     },
@@ -271,7 +271,6 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide at least one air quality variable in current_variables or hourly_variables.',
-        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -292,7 +291,6 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       throw ctx.fail(
         'forecast_window_conflict',
         'forecast_days/past_days cannot be combined with start_date/end_date — the air-quality endpoint serves either the forecast window or an archive range, not both.',
-        ctx.recoveryFor('forecast_window_conflict'),
       );
     }
 
@@ -300,7 +298,6 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       throw ctx.fail(
         'date_range_incomplete',
         `The CAMS archive needs start_date and end_date together — only ${hasStart ? 'start_date' : 'end_date'} was provided.`,
-        ctx.recoveryFor('date_range_incomplete'),
       );
     }
 
@@ -311,7 +308,6 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       throw ctx.fail(
         'date_order_invalid',
         `end_date (${input.end_date}) is before start_date (${input.start_date}).`,
-        ctx.recoveryFor('date_order_invalid'),
       );
     }
 
@@ -328,11 +324,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
      * before the call — no documented workflow asks a caller to send one.
      */
     if (input.timezone.trim() === '') {
-      throw ctx.fail(
-        'invalid_timezone',
-        BLANK_TIMEZONE_MESSAGE,
-        ctx.recoveryFor('invalid_timezone'),
-      );
+      throw ctx.fail('invalid_timezone', BLANK_TIMEZONE_MESSAGE);
     }
 
     const service = getOpenMeteoService();
@@ -350,11 +342,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
 
     if (data.error) {
       if (isInvalidTimezoneReason(data.reason)) {
-        throw ctx.fail(
-          'invalid_timezone',
-          frameInvalidTimezoneMessage(data.reason),
-          ctx.recoveryFor('invalid_timezone'),
-        );
+        throw ctx.fail('invalid_timezone', frameInvalidTimezoneMessage(data.reason));
       }
       /*
        * Volume, not vocabulary: upstream refuses an over-wide request through the same
@@ -365,14 +353,9 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
         throw ctx.fail(
           'request_too_large',
           frameRequestTooLargeMessage(data.reason, PAYLOAD_NARROWING),
-          ctx.recoveryFor('request_too_large'),
         );
       }
-      throw ctx.fail(
-        'invalid_variable',
-        frameInvalidVariableMessage(data.reason),
-        ctx.recoveryFor('invalid_variable'),
-      );
+      throw ctx.fail('invalid_variable', frameInvalidVariableMessage(data.reason));
     }
 
     const rawHourlyUnits = toUnitsMap(data.hourly_units as Record<string, unknown> | undefined);

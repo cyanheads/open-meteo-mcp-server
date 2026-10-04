@@ -10,6 +10,7 @@ import { openmeteoGetFloodTool } from '@/mcp-server/tools/definitions/get-flood.
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { wireError } from '../helpers/wire-error.js';
 
 const mockGetFlood = vi.fn();
 const mockSpillover = vi.fn();
@@ -120,7 +121,6 @@ describe('openmeteoGetFloodTool', () => {
   });
 
   it('throws no_variables_requested (reason + recovery hint) when daily_variables is empty', async () => {
-    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     // Schema now accepts [] (optional, .min(1) dropped), so the input parses and the
     // declared recovery fires instead of a generic Zod rejection — no bypass needed.
     const input = openmeteoGetFloodTool.input.parse({
@@ -128,7 +128,7 @@ describe('openmeteoGetFloodTool', () => {
       longitude: -122.3,
       daily_variables: [],
     });
-    await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetFloodTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'no_variables_requested',
@@ -157,14 +157,13 @@ describe('openmeteoGetFloodTool', () => {
    * fixes none of them.
    */
   it('throws date_range_incomplete when only start_date is provided', async () => {
-    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
       daily_variables: ['river_discharge'],
       start_date: '2024-01-01',
     });
-    await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetFloodTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('start_date'),
       data: {
@@ -198,7 +197,6 @@ describe('openmeteoGetFloodTool', () => {
   ])(
     'throws forecast_days_conflict when forecast_days is combined with %s',
     async (_label, dates) => {
-      const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
       const input = openmeteoGetFloodTool.input.parse({
         latitude: 47.6,
         longitude: -122.3,
@@ -206,7 +204,7 @@ describe('openmeteoGetFloodTool', () => {
         forecast_days: 7,
         ...dates,
       });
-      await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
+      await expect(wireError(openmeteoGetFloodTool, input)).resolves.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
         data: {
           reason: 'forecast_days_conflict',
@@ -297,14 +295,13 @@ describe('openmeteoGetFloodTool', () => {
   it('rejects a blank timezone before the network call (#38)', async () => {
     // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
     // upstream's GMT default rather than the documented "auto".
-    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
       daily_variables: ['river_discharge'],
       timezone: '',
     });
-    await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetFloodTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('timezone was blank'),
       data: {
@@ -318,14 +315,13 @@ describe('openmeteoGetFloodTool', () => {
   it('reclassifies the upstream Invalid timezone envelope away from invalid_variable (#38)', async () => {
     // Live upstream shape for an unknown zone: HTTP 400, {"reason":"Invalid timezone","error":true}.
     mockGetFlood.mockResolvedValue({ ...MOCK_RESPONSE, error: true, reason: 'Invalid timezone' });
-    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
       daily_variables: ['river_discharge'],
       timezone: 'Mars/Olympus',
     });
-    await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetFloodTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
       data: {
@@ -379,13 +375,12 @@ describe('openmeteoGetFloodTool', () => {
       reason:
         "Data corrupted at path ''. Cannot initialize ForecastVariableDaily from invalid String value bogus_discharge.",
     });
-    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
       daily_variables: ['bogus_discharge'],
     });
-    await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetFloodTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringMatching(/^Unknown discharge variable name: bogus_discharge\./),
       data: {
@@ -404,7 +399,6 @@ describe('openmeteoGetFloodTool', () => {
       reason:
         'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
     });
-    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -412,12 +406,7 @@ describe('openmeteoGetFloodTool', () => {
       start_date: '1984-01-01',
       end_date: '2023-12-31',
     });
-
-    const error = await Promise.resolve(openmeteoGetFloodTool.handler(input, ctx)).catch(
-      (e: Error) => e,
-    );
-
-    if (!(error instanceof Error)) throw new Error('Expected the flood handler to reject');
+    const error = await wireError(openmeteoGetFloodTool, input);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {

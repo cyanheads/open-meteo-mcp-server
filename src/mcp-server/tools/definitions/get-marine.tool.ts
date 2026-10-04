@@ -79,7 +79,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An unknown marine variable name was requested',
+      when: 'An unknown marine variable name was requested.',
       recovery:
         'Check variable names against Open-Meteo marine docs. Common: wave_height, wave_direction, wave_period, wind_wave_height, swell_wave_height, wave_height_max.',
       retryable: false,
@@ -87,7 +87,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     {
       reason: 'variable_wrong_cadence',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A variable Open-Meteo documents under one cadence was passed in the other cadence field — for example wave_height in daily_variables, or wave_height_max in hourly_variables',
+      when: 'A variable sat in the cadence field Open-Meteo does not document it under — for example wave_height in daily_variables, or wave_height_max in hourly_variables — caught before the request is sent.',
       recovery:
         'Move each variable the message names to the field the message names, or drop it — hourly_variables and daily_variables take separate marine variable sets, and the message lists the same-cadence alternatives when the endpoint publishes any.',
       retryable: false,
@@ -95,14 +95,14 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Neither hourly_variables nor daily_variables was provided',
+      when: 'Neither hourly_variables nor daily_variables was provided.',
       recovery: 'Provide at least one of hourly_variables or daily_variables.',
       retryable: false,
     },
     {
       reason: 'date_range_incomplete',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Only one of start_date / end_date was provided — the marine archive requires the pair together',
+      when: 'Only one of start_date / end_date was provided — the marine archive requires the pair together.',
       recovery:
         'Provide both start_date and end_date to pull an archive range, or omit both and use forecast_days / past_days for the forecast window.',
       retryable: false,
@@ -110,7 +110,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     {
       reason: 'forecast_window_conflict',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'forecast_days or a non-zero past_days was combined with start_date or end_date',
+      when: 'A start_date or end_date range was combined with forecast_days or a non-zero past_days value.',
       recovery:
         'Drop forecast_days and past_days to pull the archive range, or drop start_date and end_date to pull the forecast window — the endpoint accepts one window per call, never both.',
       retryable: false,
@@ -118,14 +118,14 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     {
       reason: 'date_order_invalid',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'end_date is before start_date',
+      when: 'The end_date value is earlier than the start_date value.',
       recovery: 'Ensure end_date is on or after start_date.',
       retryable: false,
     },
     {
       reason: 'invalid_timezone',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'timezone was blank, or upstream did not recognize the requested time zone',
+      when: 'timezone was blank, or upstream did not recognize the requested time zone.',
       recovery:
         'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
       retryable: false,
@@ -133,7 +133,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     {
       reason: 'request_too_large',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Open-Meteo refused the request as asking for too much data in one call',
+      when: 'Open-Meteo refused the request as asking for too much data in one call.',
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid — the size of the request is what was rejected, so re-checking spelling will not help.`,
       retryable: false,
     },
@@ -268,7 +268,6 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide at least one of hourly_variables or daily_variables.',
-        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -284,11 +283,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       input.daily_variables,
     );
     if (mismatches.length > 0) {
-      throw ctx.fail(
-        'variable_wrong_cadence',
-        describeCadenceMismatches(mismatches),
-        ctx.recoveryFor('variable_wrong_cadence'),
-      );
+      throw ctx.fail('variable_wrong_cadence', describeCadenceMismatches(mismatches));
     }
 
     /**
@@ -308,7 +303,6 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       throw ctx.fail(
         'forecast_window_conflict',
         'forecast_days/past_days cannot be combined with start_date/end_date — the marine endpoint serves either the forecast window or an archive range, not both.',
-        ctx.recoveryFor('forecast_window_conflict'),
       );
     }
 
@@ -316,7 +310,6 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       throw ctx.fail(
         'date_range_incomplete',
         `The marine archive needs start_date and end_date together — only ${hasStart ? 'start_date' : 'end_date'} was provided.`,
-        ctx.recoveryFor('date_range_incomplete'),
       );
     }
 
@@ -327,7 +320,6 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       throw ctx.fail(
         'date_order_invalid',
         `end_date (${input.end_date}) is before start_date (${input.start_date}).`,
-        ctx.recoveryFor('date_order_invalid'),
       );
     }
 
@@ -344,11 +336,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
      * before the call — no documented workflow asks a caller to send one.
      */
     if (input.timezone.trim() === '') {
-      throw ctx.fail(
-        'invalid_timezone',
-        BLANK_TIMEZONE_MESSAGE,
-        ctx.recoveryFor('invalid_timezone'),
-      );
+      throw ctx.fail('invalid_timezone', BLANK_TIMEZONE_MESSAGE);
     }
 
     const service = getOpenMeteoService();
@@ -366,11 +354,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
 
     if (data.error) {
       if (isInvalidTimezoneReason(data.reason)) {
-        throw ctx.fail(
-          'invalid_timezone',
-          frameInvalidTimezoneMessage(data.reason),
-          ctx.recoveryFor('invalid_timezone'),
-        );
+        throw ctx.fail('invalid_timezone', frameInvalidTimezoneMessage(data.reason));
       }
       /*
        * Volume, not vocabulary: upstream refuses an over-wide request through the same
@@ -381,14 +365,9 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
         throw ctx.fail(
           'request_too_large',
           frameRequestTooLargeMessage(data.reason, PAYLOAD_NARROWING),
-          ctx.recoveryFor('request_too_large'),
         );
       }
-      throw ctx.fail(
-        'invalid_variable',
-        frameInvalidVariableMessage(data.reason),
-        ctx.recoveryFor('invalid_variable'),
-      );
+      throw ctx.fail('invalid_variable', frameInvalidVariableMessage(data.reason));
     }
 
     const rawHourlyUnits = toUnitsMap(data.hourly_units as Record<string, unknown> | undefined);

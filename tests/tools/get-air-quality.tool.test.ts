@@ -10,6 +10,7 @@ import { openmeteoGetAirQualityTool } from '@/mcp-server/tools/definitions/get-a
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { wireError } from '../helpers/wire-error.js';
 
 const mockGetAirQuality = vi.fn();
 const mockSpillover = vi.fn();
@@ -111,14 +112,13 @@ describe('openmeteoGetAirQualityTool', () => {
   it('rejects a blank timezone before the network call (#38)', async () => {
     // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
     // upstream's GMT default rather than the documented "auto".
-    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
       hourly_variables: ['pm2_5'],
       timezone: '',
     });
-    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetAirQualityTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('timezone was blank'),
       data: {
@@ -136,14 +136,13 @@ describe('openmeteoGetAirQualityTool', () => {
       error: true,
       reason: 'Invalid timezone',
     });
-    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
       hourly_variables: ['pm2_5'],
       timezone: 'Mars/Olympus',
     });
-    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetAirQualityTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
       data: {
@@ -196,13 +195,12 @@ describe('openmeteoGetAirQualityTool', () => {
       reason:
         "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_aqi.",
     });
-    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
       hourly_variables: ['bogus_aqi'],
     });
-    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetAirQualityTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringMatching(/^Unknown variable name: bogus_aqi\./),
       data: {
@@ -221,19 +219,13 @@ describe('openmeteoGetAirQualityTool', () => {
       reason:
         'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
     });
-    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
       hourly_variables: ['pm2_5', 'european_aqi'],
       past_days: 92,
     });
-
-    const error = await Promise.resolve(openmeteoGetAirQualityTool.handler(input, ctx)).catch(
-      (e: Error) => e,
-    );
-
-    if (!(error instanceof Error)) throw new Error('Expected the air-quality handler to reject');
+    const error = await wireError(openmeteoGetAirQualityTool, input);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
@@ -355,14 +347,13 @@ describe('openmeteoGetAirQualityTool', () => {
     ['start_date only', { start_date: '2024-07-01' }, 'start_date'],
     ['end_date only', { end_date: '2024-07-03' }, 'end_date'],
   ])('throws date_range_incomplete with %s', async (_label, dates, named) => {
-    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
       hourly_variables: ['pm2_5'],
       ...dates,
     });
-    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetAirQualityTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining(named),
       data: {
@@ -384,14 +375,13 @@ describe('openmeteoGetAirQualityTool', () => {
       { past_days: 3, start_date: '2024-07-01', end_date: '2024-07-03' },
     ],
   ])('throws forecast_window_conflict for %s', async (_label, window) => {
-    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
       hourly_variables: ['pm2_5'],
       ...window,
     });
-    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetAirQualityTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'forecast_window_conflict',
@@ -405,7 +395,6 @@ describe('openmeteoGetAirQualityTool', () => {
     // Upstream answers a reversed range with a bare `{"error":true,"reason":"Bad Request"}`,
     // which the post-call branch frames as an unknown variable name — advice that fixes
     // nothing. The three sibling tools already reject the pair locally.
-    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,
       longitude: -122.3321,
@@ -413,7 +402,7 @@ describe('openmeteoGetAirQualityTool', () => {
       start_date: '2024-07-02',
       end_date: '2024-07-01',
     });
-    await expect(openmeteoGetAirQualityTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetAirQualityTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('end_date (2024-07-01) is before start_date (2024-07-02)'),
       data: {

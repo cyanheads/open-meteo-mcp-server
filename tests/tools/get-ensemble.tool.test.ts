@@ -10,6 +10,7 @@ import { openmeteoGetEnsembleTool } from '@/mcp-server/tools/definitions/get-ens
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { wireError } from '../helpers/wire-error.js';
 
 const mockGetEnsemble = vi.fn();
 const mockSpillover = vi.fn();
@@ -360,7 +361,6 @@ describe('openmeteoGetEnsembleTool', () => {
   it('rejects a blank timezone before the network call (#38)', async () => {
     // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
     // upstream's GMT default rather than the documented "auto".
-    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -368,7 +368,7 @@ describe('openmeteoGetEnsembleTool', () => {
       models: 'ecmwf_ifs025',
       timezone: '',
     });
-    await expect(openmeteoGetEnsembleTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetEnsembleTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('timezone was blank'),
       data: {
@@ -386,7 +386,6 @@ describe('openmeteoGetEnsembleTool', () => {
       error: true,
       reason: 'Invalid timezone',
     });
-    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -394,7 +393,7 @@ describe('openmeteoGetEnsembleTool', () => {
       models: 'ecmwf_ifs025',
       timezone: 'Mars/Olympus',
     });
-    await expect(openmeteoGetEnsembleTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetEnsembleTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
       data: {
@@ -449,13 +448,12 @@ describe('openmeteoGetEnsembleTool', () => {
       reason:
         "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_ens_xyz.",
     });
-    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
       hourly_variables: ['bogus_ens_xyz'],
     });
-    await expect(openmeteoGetEnsembleTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetEnsembleTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringMatching(/^Unknown variable or model name: bogus_ens_xyz\./),
       data: {
@@ -474,7 +472,6 @@ describe('openmeteoGetEnsembleTool', () => {
       reason:
         'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
     });
-    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -483,12 +480,7 @@ describe('openmeteoGetEnsembleTool', () => {
       forecast_days: 16,
       past_days: 92,
     });
-
-    const error = await Promise.resolve(openmeteoGetEnsembleTool.handler(input, ctx)).catch(
-      (e: Error) => e,
-    );
-
-    if (!(error instanceof Error)) throw new Error('Expected the ensemble handler to reject');
+    const error = await wireError(openmeteoGetEnsembleTool, input);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {

@@ -14,6 +14,7 @@ import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testi
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoDataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 import { firstText } from '../helpers/content.js';
+import { wireError } from '../helpers/wire-error.js';
 
 // Canvas mock — returns undefined by default; individual tests override
 let mockCanvasInstance: unknown;
@@ -61,11 +62,10 @@ describe('openmeteoDataframeDescribeTool', () => {
         }),
       ),
     };
-    const ctx = createMockContext({ errors: openmeteoDataframeDescribeTool.errors });
     const input = openmeteoDataframeDescribeTool.input.parse({
       canvas_id: 'fakeCanvas',
     });
-    await expect(openmeteoDataframeDescribeTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoDataframeDescribeTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       message: expect.not.stringContaining('Omit canvas_id'),
       data: {
@@ -202,12 +202,10 @@ describe('openmeteoDataframeDescribeTool against the real canvas registry', () =
   });
 
   it('maps a well-formed id that was never minted to canvas_not_found', async () => {
-    const ctx = createMockContext({
-      tenantId: TENANT,
-      errors: openmeteoDataframeDescribeTool.errors,
-    });
     const input = openmeteoDataframeDescribeTool.input.parse({ canvas_id: 'neverMint1' });
-    await expect(openmeteoDataframeDescribeTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(
+      wireError(openmeteoDataframeDescribeTool, input, { context: { tenantId: TENANT } }),
+    ).resolves.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       message: 'Canvas "neverMint1" not found or expired (24 h sliding TTL).',
       data: { reason: 'canvas_not_found', recovery: { hint: toolRecovery } },
@@ -230,7 +228,9 @@ describe('openmeteoDataframeDescribeTool against the real canvas registry', () =
     });
 
     now += DEFAULT_CANVAS_REGISTRY_OPTIONS.ttlMs + 1;
-    await expect(openmeteoDataframeDescribeTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(
+      wireError(openmeteoDataframeDescribeTool, input, { context: { tenantId: TENANT } }),
+    ).resolves.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: { reason: 'canvas_not_found', recovery: { hint: toolRecovery } },
     });

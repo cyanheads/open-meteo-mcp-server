@@ -10,6 +10,7 @@ import { openmeteoGetMarineTool } from '@/mcp-server/tools/definitions/get-marin
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { wireError } from '../helpers/wire-error.js';
 
 const mockGetMarine = vi.fn();
 const mockSpillover = vi.fn();
@@ -207,14 +208,13 @@ describe('openmeteoGetMarineTool', () => {
   it('rejects a blank timezone before the network call (#38)', async () => {
     // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
     // upstream's GMT default rather than the documented "auto".
-    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
       hourly_variables: ['wave_height'],
       timezone: '',
     });
-    await expect(openmeteoGetMarineTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetMarineTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('timezone was blank'),
       data: {
@@ -228,14 +228,13 @@ describe('openmeteoGetMarineTool', () => {
   it('reclassifies the upstream Invalid timezone envelope away from invalid_variable (#38)', async () => {
     // Live upstream shape for an unknown zone: HTTP 400, {"reason":"Invalid timezone","error":true}.
     mockGetMarine.mockResolvedValue({ ...MOCK_RESPONSE, error: true, reason: 'Invalid timezone' });
-    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
       hourly_variables: ['wave_height'],
       timezone: 'Mars/Olympus',
     });
-    await expect(openmeteoGetMarineTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetMarineTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
       data: {
@@ -288,13 +287,12 @@ describe('openmeteoGetMarineTool', () => {
       reason:
         "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_wave.",
     });
-    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
       hourly_variables: ['bogus_wave'],
     });
-    await expect(openmeteoGetMarineTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetMarineTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringMatching(/^Unknown variable name: bogus_wave\./),
       data: {
@@ -313,19 +311,13 @@ describe('openmeteoGetMarineTool', () => {
       reason:
         'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
     });
-    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
       hourly_variables: ['wave_height', 'wave_period'],
       past_days: 92,
     });
-
-    const error = await Promise.resolve(openmeteoGetMarineTool.handler(input, ctx)).catch(
-      (e: Error) => e,
-    );
-
-    if (!(error instanceof Error)) throw new Error('Expected the marine handler to reject');
+    const error = await wireError(openmeteoGetMarineTool, input);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
@@ -425,14 +417,13 @@ describe('openmeteoGetMarineTool', () => {
     ['start_date only', { start_date: '2024-07-01' }, 'start_date'],
     ['end_date only', { end_date: '2024-07-02' }, 'end_date'],
   ])('throws date_range_incomplete with %s', async (_label, dates, named) => {
-    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
       hourly_variables: ['wave_height'],
       ...dates,
     });
-    await expect(openmeteoGetMarineTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetMarineTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining(named),
       data: {
@@ -454,14 +445,13 @@ describe('openmeteoGetMarineTool', () => {
       { past_days: 3, start_date: '2024-07-01', end_date: '2024-07-02' },
     ],
   ])('throws forecast_window_conflict for %s', async (_label, window) => {
-    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
       hourly_variables: ['wave_height'],
       ...window,
     });
-    await expect(openmeteoGetMarineTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetMarineTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'forecast_window_conflict',
@@ -475,7 +465,6 @@ describe('openmeteoGetMarineTool', () => {
     // Upstream answers a reversed range with a bare `{"error":true,"reason":"Bad Request"}`,
     // which the post-call branch frames as an unknown variable name — advice that fixes
     // nothing. The three sibling tools already reject the pair locally.
-    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
       longitude: -122.5,
@@ -483,7 +472,7 @@ describe('openmeteoGetMarineTool', () => {
       start_date: '2024-07-02',
       end_date: '2024-07-01',
     });
-    await expect(openmeteoGetMarineTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetMarineTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('end_date (2024-07-01) is before start_date (2024-07-02)'),
       data: {

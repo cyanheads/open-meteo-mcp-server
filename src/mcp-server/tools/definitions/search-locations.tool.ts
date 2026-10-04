@@ -85,7 +85,7 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
     {
       reason: 'no_results',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The search returned no matching places',
+      when: 'The search returned no matching places.',
       recovery:
         'If a region or country qualifier was folded into name, drop it and search the bare place name ("Baoding", not "Baoding Hebei") — use the country input or read admin1 on the results to disambiguate. A one- or two-character native-script name ("서울", "大阪", "東京") is matched only against an index entry of exactly that length, so retry with the full administrative name ("서울특별시", "大阪市", "東京都") or the romanized name ("Seoul", "Osaka", "Tokyo") — setting language alone will not resolve it. The index covers populated places only: a physical feature or landmark ("Sahara Desert") often will not resolve, so search the nearest town or city instead. Otherwise check the spelling.',
       retryable: false,
@@ -209,11 +209,7 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
     }
 
     if (results.length === 0) {
-      throw ctx.fail(
-        'no_results',
-        `No places found matching "${input.name}".`,
-        ctx.recoveryFor('no_results'),
-      );
+      throw ctx.fail('no_results', `No places found matching "${input.name}".`);
     }
 
     /*

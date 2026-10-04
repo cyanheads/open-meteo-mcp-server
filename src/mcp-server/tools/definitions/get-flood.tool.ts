@@ -71,7 +71,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'daily_variables was not provided or is empty',
+      when: 'daily_variables was not provided or is empty.',
       recovery:
         'Provide daily_variables with at least one discharge variable (e.g., ["river_discharge", "river_discharge_p25", "river_discharge_p75"]).',
       retryable: false,
@@ -79,7 +79,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     {
       reason: 'date_range_incomplete',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Only one of start_date / end_date was provided — GloFAS requires the pair together',
+      when: 'Only one of start_date / end_date was provided — GloFAS requires the pair together.',
       recovery:
         'Provide both start_date and end_date to pull a historical range, or omit both and use forecast_days for the forecast outlook.',
       retryable: false,
@@ -87,7 +87,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     {
       reason: 'forecast_days_conflict',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'forecast_days was combined with start_date or end_date',
+      when: 'A start_date or end_date range was combined with a forecast_days value.',
       recovery:
         'Drop forecast_days to pull the historical range, or drop start_date and end_date to pull the forecast — GloFAS accepts one mode per call, never both.',
       retryable: false,
@@ -95,21 +95,21 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     {
       reason: 'date_order_invalid',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'end_date is before start_date',
+      when: 'The end_date value is earlier than the start_date value.',
       recovery: 'Ensure end_date is on or after start_date.',
       retryable: false,
     },
     {
       reason: 'date_out_of_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'start_date predates 1984-01-01 or date range is otherwise invalid',
+      when: 'start_date predates 1984-01-01 or date range is otherwise invalid.',
       recovery: 'Use start_date >= 1984-01-01. GloFAS reanalysis covers from 1984-01-01 onward.',
       retryable: false,
     },
     {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An unknown discharge variable name was requested',
+      when: 'An unknown discharge variable name was requested.',
       recovery:
         'Valid variables: river_discharge, river_discharge_mean, river_discharge_min, river_discharge_max, river_discharge_median, river_discharge_p25, river_discharge_p75.',
       retryable: false,
@@ -117,7 +117,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     {
       reason: 'invalid_timezone',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'timezone was blank, or upstream did not recognize the requested time zone',
+      when: 'timezone was blank, or upstream did not recognize the requested time zone.',
       recovery:
         'Set timezone to "auto" or an exact IANA time-zone name such as "America/Los_Angeles", or omit it entirely to use the "auto" default.',
       retryable: false,
@@ -125,7 +125,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     {
       reason: 'request_too_large',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Open-Meteo refused the request as asking for too much data in one call',
+      when: 'Open-Meteo refused the request as asking for too much data in one call.',
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid and the dates are in range — the size of the request is what was rejected.`,
       retryable: false,
     },
@@ -234,7 +234,6 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       throw ctx.fail(
         'no_variables_requested',
         'Provide daily_variables with at least one discharge variable.',
-        ctx.recoveryFor('no_variables_requested'),
       );
     }
 
@@ -255,7 +254,6 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       throw ctx.fail(
         'forecast_days_conflict',
         'forecast_days cannot be combined with start_date/end_date — GloFAS serves either the forecast window or a historical range, not both.',
-        ctx.recoveryFor('forecast_days_conflict'),
       );
     }
 
@@ -263,7 +261,6 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       throw ctx.fail(
         'date_range_incomplete',
         `GloFAS needs start_date and end_date together — only ${hasStart ? 'start_date' : 'end_date'} was provided.`,
-        ctx.recoveryFor('date_range_incomplete'),
       );
     }
 
@@ -271,7 +268,6 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       throw ctx.fail(
         'date_order_invalid',
         `end_date (${input.end_date}) is before start_date (${input.start_date}).`,
-        ctx.recoveryFor('date_order_invalid'),
       );
     }
 
@@ -279,7 +275,6 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       throw ctx.fail(
         'date_out_of_range',
         `start_date ${input.start_date} predates GloFAS reanalysis coverage (1984-01-01).`,
-        ctx.recoveryFor('date_out_of_range'),
       );
     }
 
@@ -289,11 +284,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
      * before the call — no documented workflow asks a caller to send one.
      */
     if (input.timezone.trim() === '') {
-      throw ctx.fail(
-        'invalid_timezone',
-        BLANK_TIMEZONE_MESSAGE,
-        ctx.recoveryFor('invalid_timezone'),
-      );
+      throw ctx.fail('invalid_timezone', BLANK_TIMEZONE_MESSAGE);
     }
 
     const service = getOpenMeteoService();
@@ -313,11 +304,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     if (data.error) {
       const reason = data.reason ?? '';
       if (isInvalidTimezoneReason(data.reason)) {
-        throw ctx.fail(
-          'invalid_timezone',
-          frameInvalidTimezoneMessage(data.reason),
-          ctx.recoveryFor('invalid_timezone'),
-        );
+        throw ctx.fail('invalid_timezone', frameInvalidTimezoneMessage(data.reason));
       }
       /*
        * Volume, not vocabulary: upstream refuses an over-wide request through the same
@@ -326,23 +313,14 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
        * branch so a future rewording that happens to mention a date cannot claim it.
        */
       if (isRequestTooLargeReason(reason)) {
-        throw ctx.fail(
-          'request_too_large',
-          frameRequestTooLargeMessage(reason, PAYLOAD_NARROWING),
-          ctx.recoveryFor('request_too_large'),
-        );
+        throw ctx.fail('request_too_large', frameRequestTooLargeMessage(reason, PAYLOAD_NARROWING));
       }
       if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
-        throw ctx.fail(
-          'date_out_of_range',
-          reason || 'Date out of GloFAS range.',
-          ctx.recoveryFor('date_out_of_range'),
-        );
+        throw ctx.fail('date_out_of_range', reason || 'Date out of GloFAS range.');
       }
       throw ctx.fail(
         'invalid_variable',
         frameInvalidVariableMessage(data.reason, 'discharge variable'),
-        ctx.recoveryFor('invalid_variable'),
       );
     }
 

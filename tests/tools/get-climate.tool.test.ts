@@ -10,6 +10,7 @@ import { openmeteoGetClimateTool } from '@/mcp-server/tools/definitions/get-clim
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { wireError } from '../helpers/wire-error.js';
 
 const mockGetClimate = vi.fn();
 const mockSpillover = vi.fn();
@@ -223,7 +224,6 @@ describe('openmeteoGetClimateTool', () => {
   });
 
   it('throws date_out_of_range with correct reason when start_date before 1950', async () => {
-    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -231,7 +231,7 @@ describe('openmeteoGetClimateTool', () => {
       end_date: '1950-01-05',
       daily_variables: ['temperature_2m_max'],
     });
-    await expect(openmeteoGetClimateTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetClimateTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'date_out_of_range',
@@ -256,7 +256,6 @@ describe('openmeteoGetClimateTool', () => {
   });
 
   it('throws no_variables_requested (reason + recovery hint) when daily_variables is empty', async () => {
-    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     // Schema now accepts [] (optional, .min(1) dropped), so the input parses and the
     // declared recovery fires instead of a generic Zod rejection — no bypass needed.
     const input = openmeteoGetClimateTool.input.parse({
@@ -266,7 +265,7 @@ describe('openmeteoGetClimateTool', () => {
       end_date: '2049-01-02',
       daily_variables: [],
     });
-    await expect(openmeteoGetClimateTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetClimateTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'no_variables_requested',
@@ -294,7 +293,6 @@ describe('openmeteoGetClimateTool', () => {
   it('rejects a blank timezone before the network call (#38)', async () => {
     // openMeteoUrl omits an empty value, so a blank timezone used to fall through to
     // upstream's GMT default rather than the documented "auto".
-    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -303,7 +301,7 @@ describe('openmeteoGetClimateTool', () => {
       daily_variables: ['temperature_2m_max'],
       timezone: '',
     });
-    await expect(openmeteoGetClimateTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetClimateTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('timezone was blank'),
       data: {
@@ -321,7 +319,6 @@ describe('openmeteoGetClimateTool', () => {
       error: true,
       reason: 'Invalid timezone',
     });
-    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -330,7 +327,7 @@ describe('openmeteoGetClimateTool', () => {
       daily_variables: ['temperature_2m_max'],
       timezone: 'Mars/Olympus',
     });
-    await expect(openmeteoGetClimateTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetClimateTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining('Open-Meteo rejected the requested timezone'),
       data: {
@@ -387,7 +384,6 @@ describe('openmeteoGetClimateTool', () => {
       reason:
         "Data corrupted at path ''. Cannot initialize MultiDomains from invalid String value BOGUS_MODEL.",
     });
-    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.33,
@@ -396,7 +392,7 @@ describe('openmeteoGetClimateTool', () => {
       daily_variables: ['temperature_2m_max'],
       models: ['BOGUS_MODEL'],
     });
-    await expect(openmeteoGetClimateTool.handler(input, ctx)).rejects.toMatchObject({
+    await expect(wireError(openmeteoGetClimateTool, input)).resolves.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringMatching(/^Unknown variable or model name: BOGUS_MODEL\./),
       data: {
@@ -415,7 +411,6 @@ describe('openmeteoGetClimateTool', () => {
       reason:
         'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
     });
-    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
@@ -424,12 +419,7 @@ describe('openmeteoGetClimateTool', () => {
       daily_variables: ['temperature_2m_max', 'temperature_2m_min', 'precipitation_sum'],
       models: ALL_MODELS,
     });
-
-    const error = await Promise.resolve(openmeteoGetClimateTool.handler(input, ctx)).catch(
-      (e: Error) => e,
-    );
-
-    if (!(error instanceof Error)) throw new Error('Expected the climate handler to reject');
+    const error = await wireError(openmeteoGetClimateTool, input);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       data: {
