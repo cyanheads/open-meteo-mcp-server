@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 05:01:16
+Generated on: 2026-10-04 06:03:36
 
 ```text
 open-meteo-mcp-server/
@@ -27,6 +27,7 @@ open-meteo-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -129,9 +130,11 @@ open-meteo-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/
@@ -145,6 +148,7 @@ open-meteo-mcp-server/
 │   │   └── tools/
 │   │       ├── definitions/
 │   │       │   ├── dataframe-describe.tool.ts
+│   │       │   ├── dataframe-drop.tool.ts
 │   │       │   ├── dataframe-query.tool.ts
 │   │       │   ├── get-air-quality.tool.ts
 │   │       │   ├── get-climate.tool.ts
@@ -170,11 +174,14 @@ open-meteo-mcp-server/
 │   │   └── canvas-accessor.ts
 │   └── index.ts
 ├── tests/
+│   ├── config/
+│   │   └── server-config.test.ts
 │   ├── fuzz/
 │   │   └── search-locations.tool.fuzz.test.ts
 │   ├── helpers/
 │   │   ├── content.ts
-│   │   └── inline-surface.ts
+│   │   ├── inline-surface.ts
+│   │   └── wire-error.ts
 │   ├── integration/
 │   │   └── search-locations-contract.int.test.ts
 │   ├── prompts/
@@ -188,6 +195,7 @@ open-meteo-mcp-server/
 │   └── tools/
 │       ├── canvas-id-input.test.ts
 │       ├── dataframe-describe.tool.test.ts
+│       ├── dataframe-drop.tool.test.ts
 │       ├── dataframe-query.tool.test.ts
 │       ├── error-contract.test.ts
 │       ├── get-air-quality.tool.test.ts
