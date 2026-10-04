@@ -18,18 +18,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/open-meteo-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.3.11",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
-      ],
       "environmentVariables": [
         {
           "name": "MCP_LOG_LEVEL",
@@ -44,6 +34,13 @@
           "format": "string",
           "isRequired": false,
           "default": "none"
+        },
+        {
+          "name": "OPENMETEO_DATAFRAME_DROP_ENABLED",
+          "description": "Set to 'true' to make openmeteo_dataframe_drop callable — it removes one staged table or view from a DataCanvas. Default 'false' lists the tool as disabled. Has no effect unless CANVAS_PROVIDER_TYPE=duckdb.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
         }
       ],
       "transport": {
@@ -54,19 +51,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/open-meteo-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.3.11",
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",
@@ -108,6 +101,13 @@
           "format": "string",
           "isRequired": false,
           "default": "none"
+        },
+        {
+          "name": "OPENMETEO_DATAFRAME_DROP_ENABLED",
+          "description": "Set to 'true' to make openmeteo_dataframe_drop callable — it removes one staged table or view from a DataCanvas. Default 'false' lists the tool as disabled. Has no effect unless CANVAS_PROVIDER_TYPE=duckdb.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
         }
       ],
       "transport": {
