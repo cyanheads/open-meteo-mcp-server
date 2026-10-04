@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-03
 
-New opt-in openmeteo_dataframe_drop tool removes a staged DataCanvas table or view, enabled with OPENMETEO_DATAFRAME_DROP_ENABLED=true. mcp-ts-core ^0.13.11 adds a request id to every error response and fills each tool's declared recovery hint from its contract.
+New opt-in openmeteo_dataframe_drop tool removes a staged DataCanvas table or view, enabled with OPENMETEO_DATAFRAME_DROP_ENABLED=true. mcp-ts-core ^0.13.11 adds a request id to every tool error result and fills each tool's declared recovery hint from its contract.
 
 ## [0.3.11](changelog/0.3.x/0.3.11.md) — 2026-09-21
 
