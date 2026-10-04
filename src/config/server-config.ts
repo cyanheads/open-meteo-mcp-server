@@ -1,6 +1,7 @@
 /**
  * @fileoverview Server-specific environment variable configuration for open-meteo-mcp-server.
  * All fields are optional — the server works zero-config for non-commercial use.
+ * OPENMETEO_DATAFRAME_DROP_ENABLED is the one feature flag: it opts in to openmeteo_dataframe_drop.
  * @module config/server-config
  */
 
@@ -40,6 +41,10 @@ const ServerConfigSchema = z.object({
     .string()
     .default('https://climate-api.open-meteo.com')
     .describe('Base URL for the Open-Meteo Climate (CMIP6 projections) API'),
+  dataframeDropEnabled: z
+    .stringbool()
+    .default(false)
+    .describe('Register openmeteo_dataframe_drop as callable; off leaves it listed as disabled'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -54,6 +59,7 @@ export function getServerConfig(): z.infer<typeof ServerConfigSchema> {
     ensembleBaseUrl: 'OPEN_METEO_ENSEMBLE_BASE_URL',
     floodBaseUrl: 'OPEN_METEO_FLOOD_BASE_URL',
     climateBaseUrl: 'OPEN_METEO_CLIMATE_BASE_URL',
+    dataframeDropEnabled: 'OPENMETEO_DATAFRAME_DROP_ENABLED',
   });
   return _config;
 }

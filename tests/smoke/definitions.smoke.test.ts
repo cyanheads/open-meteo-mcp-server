@@ -10,7 +10,7 @@ const tools = Object.values(definitions);
 
 describe('server definition smoke test', () => {
   it('loads every registered tool with a complete executable contract', () => {
-    expect(tools).toHaveLength(11);
+    expect(tools).toHaveLength(12);
 
     for (const definition of tools) {
       expect(definition.name).toMatch(/^openmeteo_/);

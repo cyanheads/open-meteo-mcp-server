@@ -5,8 +5,10 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
+import { getServerConfig } from './config/server-config.js';
 import {
   openmeteoDataframeDescribeTool,
+  openmeteoDataframeDropTool,
   openmeteoDataframeQueryTool,
   openmeteoGetAirQualityTool,
   openmeteoGetClimateTool,
@@ -37,6 +39,7 @@ await createApp({
     openmeteoGetClimateTool,
     openmeteoDataframeQueryTool,
     openmeteoDataframeDescribeTool,
+    openmeteoDataframeDropTool,
   ],
   resources: [],
   prompts: [],
@@ -60,7 +63,11 @@ await createApp({
     'DataCanvas workflow (requires CANVAS_PROVIDER_TYPE=duckdb):\n' +
     '- openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate with a large query returns canvas_id + truncated: true\n' +
     '- openmeteo_dataframe_describe — list tables and columns on the canvas. Call it first: the staged table name is generated and its columns vary per request (per-member and per-model suffixes), so there is no valid SQL to write until the schema is read\n' +
-    '- openmeteo_dataframe_query — run SQL SELECT against staged tables\n\n' +
+    '- openmeteo_dataframe_query — run SQL SELECT against staged tables\n' +
+    (getServerConfig().dataframeDropEnabled
+      ? '- openmeteo_dataframe_drop — remove one staged table or view once you are done with it; the canvas and its other tables stay\n'
+      : '') +
+    '\n' +
     'Notes:\n' +
     '- All weather tools take latitude/longitude — use openmeteo_search_locations first for place names\n' +
     '- The archive default is the Best Match blend, so its provenance varies by date; its ERA5 components lag ~1–5 days while IFS HRES does not. For recent history, use openmeteo_get_forecast with past_days, or request models: ["ecmwf_ifs"] on openmeteo_get_historical\n' +

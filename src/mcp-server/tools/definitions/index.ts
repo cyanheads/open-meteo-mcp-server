@@ -4,6 +4,7 @@
  */
 
 export { openmeteoDataframeDescribeTool } from './dataframe-describe.tool.js';
+export { openmeteoDataframeDropTool } from './dataframe-drop.tool.js';
 export { openmeteoDataframeQueryTool } from './dataframe-query.tool.js';
 export { openmeteoGetAirQualityTool } from './get-air-quality.tool.js';
 export { openmeteoGetClimateTool } from './get-climate.tool.js';

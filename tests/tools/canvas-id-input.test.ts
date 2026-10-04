@@ -13,6 +13,7 @@ import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   openmeteoDataframeDescribeTool,
+  openmeteoDataframeDropTool,
   openmeteoDataframeQueryTool,
   openmeteoGetAirQualityTool,
   openmeteoGetClimateTool,
@@ -54,6 +55,7 @@ const SEATTLE = { latitude: 47.6, longitude: -122.3 };
 const CASES = [
   { tool: openmeteoDataframeDescribeTool, rest: {}, required: true },
   { tool: openmeteoDataframeQueryTool, rest: { sql: 'SELECT 1' }, required: true },
+  { tool: openmeteoDataframeDropTool, rest: { table_name: 'spilled_ab12cd34' }, required: true },
   {
     tool: openmeteoGetForecastTool,
     rest: { ...SEATTLE, hourly_variables: ['temperature_2m'] },

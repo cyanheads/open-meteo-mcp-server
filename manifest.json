@@ -15,7 +15,8 @@
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production",
-        "CANVAS_PROVIDER_TYPE": "${user_config.CANVAS_PROVIDER_TYPE}"
+        "CANVAS_PROVIDER_TYPE": "${user_config.CANVAS_PROVIDER_TYPE}",
+        "OPENMETEO_DATAFRAME_DROP_ENABLED": "${user_config.OPENMETEO_DATAFRAME_DROP_ENABLED}"
       }
     }
   },
@@ -31,6 +32,13 @@
       "description": "Canvas engine for openmeteo_get_forecast / openmeteo_get_historical / openmeteo_get_marine / openmeteo_get_air_quality / openmeteo_get_ensemble / openmeteo_get_flood / openmeteo_get_climate spillover. Set to 'duckdb' to enable DataCanvas and the dataframe_query / dataframe_describe tools. Default 'none' — those tools still bound an over-budget response to a preview with truncated: true, but nothing stages the rows they omit.",
       "required": false,
       "default": "none"
+    },
+    "OPENMETEO_DATAFRAME_DROP_ENABLED": {
+      "title": "Enable Dataframe Drop",
+      "type": "boolean",
+      "description": "Make openmeteo_dataframe_drop callable — it removes one staged table or view from a DataCanvas. Off by default, which lists the tool as disabled. Has no effect unless the Canvas Provider is 'duckdb'.",
+      "required": false,
+      "default": false
     }
   }
 }

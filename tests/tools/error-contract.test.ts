@@ -20,6 +20,7 @@ import * as definitions from '@/mcp-server/tools/definitions/index.js';
  */
 const SERVICE_MARKED: Record<string, readonly string[]> = {
   openmeteo_dataframe_describe: [],
+  openmeteo_dataframe_drop: [],
   openmeteo_dataframe_query: [],
   openmeteo_get_air_quality: [],
   openmeteo_get_climate: [],

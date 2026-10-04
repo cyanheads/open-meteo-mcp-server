@@ -13,8 +13,8 @@ const TOOL_NAMES = Object.values(definitions)
   .sort();
 
 describe('advertised tool surface', () => {
-  it('registers eleven tools', () => {
-    expect(TOOL_NAMES).toHaveLength(11);
+  it('registers twelve tools', () => {
+    expect(TOOL_NAMES).toHaveLength(12);
   });
 
   it('names every tool openmeteo_<verb>_<object> — never a bare two-token name', () => {
