@@ -13,24 +13,25 @@ import { describe, expect, it } from 'vitest';
 import * as definitions from '@/mcp-server/tools/definitions/index.js';
 
 /**
- * Reasons each tool marks `thrownBy: 'service'`. Empty throughout: every declared
- * reason is thrown by the handler itself — the canvas and SQL-gate failures the
- * dataframe tools declare are caught from the framework and rethrown through
- * `ctx.fail`, so they count as handler-thrown too.
+ * Reasons each tool marks `thrownBy: 'service'`. `rate_limited` is the one: the
+ * Open-Meteo client raises it on HTTP 429 for every tool that calls upstream. Every
+ * other declared reason is thrown by the handler itself — the canvas and SQL-gate
+ * failures the dataframe tools declare are caught from the framework and rethrown
+ * through `ctx.fail`, so they count as handler-thrown too.
  */
 const SERVICE_MARKED: Record<string, readonly string[]> = {
   openmeteo_dataframe_describe: [],
   openmeteo_dataframe_drop: [],
   openmeteo_dataframe_query: [],
-  openmeteo_get_air_quality: [],
-  openmeteo_get_climate: [],
-  openmeteo_get_elevation: [],
-  openmeteo_get_ensemble: [],
-  openmeteo_get_flood: [],
-  openmeteo_get_forecast: [],
-  openmeteo_get_historical: [],
-  openmeteo_get_marine: [],
-  openmeteo_search_locations: [],
+  openmeteo_get_air_quality: ['rate_limited'],
+  openmeteo_get_climate: ['rate_limited'],
+  openmeteo_get_elevation: ['rate_limited'],
+  openmeteo_get_ensemble: ['rate_limited'],
+  openmeteo_get_flood: ['rate_limited'],
+  openmeteo_get_forecast: ['rate_limited'],
+  openmeteo_get_historical: ['rate_limited'],
+  openmeteo_get_marine: ['rate_limited'],
+  openmeteo_search_locations: ['rate_limited'],
 };
 
 const tools = Object.values(definitions);

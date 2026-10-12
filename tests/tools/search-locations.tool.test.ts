@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoSearchLocationsTool } from '@/mcp-server/tools/definitions/search-locations.tool.js';
 import { firstText } from '../helpers/content.js';
@@ -519,5 +519,123 @@ describe('openmeteoSearchLocationsTool low-confidence notice (#48)', () => {
     const text = firstText(openmeteoSearchLocationsTool.format!(result));
     expect(text).toContain('Bangalore Town');
     expect(text).not.toMatch(/official name/i);
+  });
+});
+
+describe('openmeteoSearchLocationsTool effective_language (#69)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  type SearchResult = Awaited<ReturnType<typeof runToolContract>>;
+
+  const structured = (result: SearchResult) =>
+    result.structuredContent as { effective_language?: string; notice?: string; count?: number };
+
+  const allText = (result: SearchResult) =>
+    result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+
+  it('declares effective_language as an optional enrichment field', () => {
+    const field = openmeteoSearchLocationsTool.enrichment?.effective_language;
+    expect(field?.isOptional()).toBe(true);
+    expect(field?.description ?? '').toMatch(/name, country, admin1, and admin2/);
+  });
+
+  it('reports the inferred language on both surfaces when the retry produced the results', async () => {
+    mockGetGeocode
+      .mockResolvedValueOnce({ generationtime_ms: 0.1 })
+      .mockResolvedValueOnce({ results: [SHANGHAI_ZH_RESULT] });
+
+    const result = await runToolContract(openmeteoSearchLocationsTool, { name: '上海' });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured(result).effective_language).toBe('zh');
+    expect(allText(result)).toContain('**Effective language:** zh');
+    // results, count, and notice are unchanged by the new field.
+    expect(structured(result).count).toBe(1);
+    expect(structured(result).notice).toBeUndefined();
+  });
+
+  it.each([
+    ['ja', 'さっぽろ', { ...SHANGHAI_ZH_RESULT, name: '札幌市' }],
+    ['ko', '서울특별시', { ...SHANGHAI_ZH_RESULT, name: '서울특별시' }],
+    ['ru', 'Москва', { ...SHANGHAI_ZH_RESULT, name: 'Москва' }],
+  ])('reports %s for a %s retry hit', async (language, name, hit) => {
+    mockGetGeocode
+      .mockResolvedValueOnce({ generationtime_ms: 0.1 })
+      .mockResolvedValueOnce({ results: [hit] });
+
+    const result = await runToolContract(openmeteoSearchLocationsTool, { name });
+
+    expect(mockGetGeocode).toHaveBeenNthCalledWith(
+      2,
+      name,
+      5,
+      language,
+      undefined,
+      expect.anything(),
+    );
+    expect(structured(result).effective_language).toBe(language);
+    expect(allText(result)).toContain(`**Effective language:** ${language}`);
+  });
+
+  it('carries no effective_language on a first-pass hit', async () => {
+    mockGetGeocode.mockResolvedValue({ results: [SEATTLE_RESULT] });
+
+    const result = await runToolContract(openmeteoSearchLocationsTool, { name: 'Seattle' });
+
+    expect(mockGetGeocode).toHaveBeenCalledTimes(1);
+    expect(structured(result)).not.toHaveProperty('effective_language');
+    expect(allText(result)).not.toContain('Effective language');
+  });
+
+  it('carries no effective_language on a native-script first-pass hit', async () => {
+    mockGetGeocode.mockResolvedValue({ results: [SHANGHAI_ZH_RESULT] });
+
+    const result = await runToolContract(openmeteoSearchLocationsTool, { name: '上海' });
+
+    expect(mockGetGeocode).toHaveBeenCalledTimes(1);
+    expect(structured(result)).not.toHaveProperty('effective_language');
+    expect(allText(result)).not.toContain('Effective language');
+  });
+
+  it('carries no effective_language when the caller set the language — one call, no retry', async () => {
+    mockGetGeocode.mockResolvedValue({ results: [{ ...SHANGHAI_ZH_RESULT, name: 'Shanghai' }] });
+
+    const result = await runToolContract(openmeteoSearchLocationsTool, {
+      name: '上海',
+      language: 'de',
+    });
+
+    expect(mockGetGeocode).toHaveBeenCalledTimes(1);
+    expect(mockGetGeocode).toHaveBeenCalledWith('上海', 5, 'de', undefined, expect.anything());
+    expect(structured(result)).not.toHaveProperty('effective_language');
+    expect(allText(result)).not.toContain('Effective language');
+  });
+
+  it('carries both the notice and effective_language on a low-population retry hit', async () => {
+    mockGetGeocode
+      .mockResolvedValueOnce({ generationtime_ms: 0.1 })
+      .mockResolvedValueOnce({ results: [{ ...SHANGHAI_ZH_RESULT, population: 900 }] });
+
+    const result = await runToolContract(openmeteoSearchLocationsTool, { name: '上海' });
+
+    expect(structured(result).effective_language).toBe('zh');
+    expect(structured(result).notice).toContain('Low-confidence match');
+    expect(allText(result)).toContain('**Effective language:** zh');
+    expect(allText(result)).toContain('Low-confidence match');
+  });
+
+  it('still throws no_results when the retry misses too, with no effective_language', async () => {
+    mockGetGeocode.mockResolvedValue({ generationtime_ms: 0.1 });
+
+    const result = await runToolContract(openmeteoSearchLocationsTool, { name: '上海' });
+
+    expect(mockGetGeocode).toHaveBeenCalledTimes(2);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'no_results' } },
+    });
+    expect(allText(result)).not.toContain('Effective language');
   });
 });

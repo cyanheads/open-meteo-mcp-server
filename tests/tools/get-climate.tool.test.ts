@@ -4,12 +4,13 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetClimateTool } from '@/mcp-server/tools/definitions/get-climate.tool.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
 import { wireError } from '../helpers/wire-error.js';
 
 const mockGetClimate = vi.fn();
@@ -206,6 +207,28 @@ describe('openmeteoGetClimateTool', () => {
     });
     const result = await openmeteoGetClimateTool.handler(input, ctx);
     expect(result.models).toBeUndefined();
+  });
+
+  it.each([
+    { models: [' CMCC_CM2_VHR4 ', ''], echoed: ['CMCC_CM2_VHR4'] },
+    { models: [''], echoed: undefined },
+  ])('sends and echoes models $models as $echoed (#62)', async ({ models, echoed }) => {
+    mockGetClimate.mockResolvedValue(MOCK_SINGLE_MODEL_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
+    const input = openmeteoGetClimateTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.33,
+      start_date: '2049-01-01',
+      end_date: '2049-01-02',
+      daily_variables: [' temperature_2m_max'],
+      models,
+    });
+    const result = await openmeteoGetClimateTool.handler(input, ctx);
+
+    const params = mockGetClimate.mock.calls[0]?.[2] as { daily?: string[]; models?: string[] };
+    expect(params.daily).toEqual(['temperature_2m_max']);
+    expect(params.models).toEqual(echoed);
+    expect(openmeteoGetClimateTool.output.parse(result).models).toEqual(echoed);
   });
 
   it('throws date_order_invalid with correct reason when end before start', async () => {
@@ -916,9 +939,7 @@ describe('openmeteoGetClimateTool', () => {
     expect(result.record_count).toBe(time.length);
   });
 
-  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
-    // The disclosure reached content[] through format() alone, so a structuredContent-only
-    // client saw truncated: true with no canvas_id and nothing explaining either.
+  it('discloses the disabled canvas in the notice and once across content[] (#51, #55)', async () => {
     const time = dailyDates(7670);
     mockGetClimate.mockResolvedValue({
       ...MOCK_MULTI_MODEL_RESPONSE,
@@ -926,26 +947,16 @@ describe('openmeteoGetClimateTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
-    const result = await openmeteoGetClimateTool.handler(
-      openmeteoGetClimateTool.input.parse({
-        latitude: 47.6,
-        longitude: -122.3,
-        start_date: '2030-01-01',
-        end_date: '2050-12-31',
-        daily_variables: ['temperature_2m_max'],
-        models: ALL_MODELS,
-      }),
-      ctx,
-    );
+    const result = await runToolContract(openmeteoGetClimateTool, {
+      latitude: 47.6,
+      longitude: -122.3,
+      start_date: '2030-01-01',
+      end_date: '2050-12-31',
+      daily_variables: ['temperature_2m_max'],
+      models: ALL_MODELS,
+    });
 
-    const notice = String(getEnrichment(ctx).notice);
-    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
-    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
-    expect(notice).toContain('fewer models');
-    expect(firstText(openmeteoGetClimateTool.format!(result))).toContain(
-      'CANVAS_PROVIDER_TYPE=none',
-    );
+    expectNoCanvasDisclosureOnce(result, 'fewer models');
   });
 
   it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
@@ -965,8 +976,9 @@ describe('openmeteoGetClimateTool', () => {
         truncated: true,
       }),
     );
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    // The short line only (#55) — the full disclosure reaches content[] via the notice trailer.
+    expect(text).toContain('bounded preview only; no canvas_id (DataCanvas disabled)');
+    expect(text).not.toContain('CANVAS_PROVIDER_TYPE');
     expect(text).toContain('fewer models');
     // Heading reports the upstream total and does not claim a canvas holds it.
     expect(text).toContain('1 shown of 7670 total rows)');

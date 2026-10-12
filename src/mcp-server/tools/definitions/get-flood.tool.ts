@@ -1,6 +1,6 @@
 /**
  * @fileoverview Tool: openmeteo_get_flood — GloFAS river discharge forecast and reanalysis.
- * Returns daily ensemble river discharge (m³/s) for up to ~7 months ahead, with reanalysis
+ * Returns daily river discharge (m³/s) for up to ~7 months ahead, with reanalysis
  * history back to 1984. Coordinate-based — the API selects the largest modeled river within
  * 5 km of the point, which is not always the closest one. Wide reanalysis ranges spill to
  * DataCanvas when canvas is enabled, and return a bounded preview with truncated: true when
@@ -14,6 +14,8 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
+import { CalendarDateSchema } from '../date-input.js';
+import { cleanNames } from '../name-input.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
 import {
@@ -22,6 +24,7 @@ import {
   canvasPointerNotice,
   exceedsInlineBudget,
   inlineBudget,
+  noCanvasLine,
   noCanvasNotice,
   stageSpill,
   unitsTrimmedNotice,
@@ -35,6 +38,7 @@ import {
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
   isRequestTooLargeReason,
+  RATE_LIMITED_ERROR,
 } from '../upstream-error.js';
 import { undefinedUnitColumns } from '../variable-cadence.js';
 
@@ -48,7 +52,7 @@ const PAYLOAD_NARROWING = 'a shorter start_date–end_date range, or fewer daily
 export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
   description:
     'GloFAS (Global Flood Awareness System) river discharge forecast and historical reanalysis. ' +
-    'Returns daily ensemble river discharge (m³/s) for the largest modeled river within 5 km of ' +
+    'Returns daily river discharge (m³/s) for the largest modeled river within 5 km of ' +
     'the given coordinates — no river ID needed. That river is not always the closest one: at 5 km ' +
     'resolution a point near a confluence or a pair of parallel channels can resolve to an ' +
     'unintended reach. When the returned discharge looks unrepresentative for the intended river, ' +
@@ -57,9 +61,12 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     'One mode per call: forecast_days for the ' +
     'future outlook, or start_date and end_date together for reanalysis history. The two modes ' +
     'are mutually exclusive, and a date range needs both ends — a lone start_date or end_date is ' +
-    'rejected. Available daily variables: "river_discharge" (ensemble mean), "river_discharge_mean", ' +
-    '"river_discharge_min", "river_discharge_max", "river_discharge_median", ' +
-    '"river_discharge_p25" (25th percentile), "river_discharge_p75" (75th percentile). ' +
+    'rejected. Available daily variables: "river_discharge" (the daily discharge value; the mean ' +
+    'across ensemble members is "river_discharge_mean"), and the ensemble statistics ' +
+    '"river_discharge_mean", "river_discharge_median", "river_discharge_min", ' +
+    '"river_discharge_max", "river_discharge_p25" (25th percentile), and "river_discharge_p75" ' +
+    '(75th percentile). The statistics are computed across ensemble members in forecast mode only; ' +
+    'in reanalysis mode they repeat river_discharge and are not uncertainty estimates. ' +
     'Returns null for coordinates far from any river or in areas without GloFAS coverage. ' +
     'A wide reanalysis range produces thousands of daily records and spills to a DataCanvas when ' +
     'canvas is enabled, returning canvas_id and table_name with truncated: true — inspect the ' +
@@ -71,7 +78,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'daily_variables was not provided or is empty.',
+      when: 'daily_variables named no variable — omitted, empty, or holding only blank or whitespace-only entries.',
       recovery:
         'Provide daily_variables with at least one discharge variable (e.g., ["river_discharge", "river_discharge_p25", "river_discharge_p75"]).',
       retryable: false,
@@ -129,6 +136,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid and the dates are in range — the size of the request is what was rejected.`,
       retryable: false,
     },
+    RATE_LIMITED_ERROR,
   ],
 
   input: z.object({
@@ -151,7 +159,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       .max(20)
       .optional()
       .describe(
-        'Daily discharge variables to fetch (e.g., ["river_discharge", "river_discharge_p25", "river_discharge_p75", "river_discharge_min", "river_discharge_max"]). Required.',
+        'Daily discharge variables to fetch (e.g., ["river_discharge", "river_discharge_p25", "river_discharge_p75", "river_discharge_min", "river_discharge_max"]). Required. river_discharge is the daily discharge value; the _mean, _median, _min, _max, _p25, and _p75 statistics span the ensemble members in forecast mode only — in reanalysis mode they repeat river_discharge and are not uncertainty estimates.',
       ),
     forecast_days: z
       .number()
@@ -162,20 +170,12 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       .describe(
         'Number of forecast days ahead (1–210). Mutually exclusive with start_date/end_date — omit it entirely when pulling a historical range.',
       ),
-    start_date: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .optional()
-      .describe(
-        'Start date for historical reanalysis (YYYY-MM-DD, e.g., "2023-01-01"). GloFAS reanalysis covers from 1984-01-01. Requires end_date — the pair must be sent together, and neither combines with forecast_days.',
-      ),
-    end_date: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .optional()
-      .describe(
-        'End date for historical reanalysis (YYYY-MM-DD, inclusive). Must be on or after start_date. Requires start_date — the pair must be sent together, and neither combines with forecast_days.',
-      ),
+    start_date: CalendarDateSchema.optional().describe(
+      'Start date for historical reanalysis (YYYY-MM-DD, e.g., "2023-01-01"). GloFAS reanalysis covers from 1984-01-01. Requires end_date — the pair must be sent together, and neither combines with forecast_days.',
+    ),
+    end_date: CalendarDateSchema.optional().describe(
+      'End date for historical reanalysis (YYYY-MM-DD, inclusive). Must be on or after start_date. Requires start_date — the pair must be sent together, and neither combines with forecast_days.',
+    ),
     timezone: z.string().default('auto').describe('IANA timezone or "auto". Default "auto".'),
     canvas_id: CanvasIdSchema.optional().describe(
       'DataCanvas token for wide reanalysis queries. When a result is too large to return inline — driven by total payload size, so a multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
@@ -229,11 +229,11 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
   },
 
   async handler(input, ctx) {
-    const dailyVariables = input.daily_variables;
-    if (!dailyVariables || dailyVariables.length === 0) {
+    const dailyVariables = cleanNames(input.daily_variables);
+    if (!dailyVariables) {
       throw ctx.fail(
         'no_variables_requested',
-        'Provide daily_variables with at least one discharge variable.',
+        'Provide daily_variables with at least one discharge variable — blank or whitespace-only entries do not count.',
       );
     }
 
@@ -395,9 +395,10 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
        * Falling through to the full inline return would report truncated: false on a
        * multi-decade reanalysis pull.
        *
-       * The disclosure is composed into `notice` as well as rendered by format(), for
-       * the reason the canvas pointer is: a structuredContent-only client reads one
-       * surface, and on this branch the omitted rows are behind no canvas at all.
+       * The full disclosure is composed into `notice`, for the reason the canvas pointer
+       * is: a structuredContent-only client reads one surface, and on this branch the
+       * omitted rows are behind no canvas at all. The notice trailer carries it into
+       * content[] as well, so format() renders only the short line.
        */
       notice.add(noCanvasNotice(PAYLOAD_NARROWING));
       return {
@@ -436,7 +437,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     if (result.truncated && result.canvas_id) {
       lines.push(`\n${canvasPointerLine(result.canvas_id, result.table_name ?? '')}`);
     } else if (result.truncated) {
-      lines.push(`\n${noCanvasNotice(PAYLOAD_NARROWING)}`);
+      lines.push(`\n${noCanvasLine(PAYLOAD_NARROWING)}`);
     }
 
     if (result.daily_units) lines.push('', `**Daily units:** ${formatUnits(result.daily_units)}`);

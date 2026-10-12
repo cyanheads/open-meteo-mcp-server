@@ -60,7 +60,7 @@ export function formatRecord(rec: Record<string, unknown>): string {
  * Format the `current` block for `format()` output.
  * e.g. `**2026-05-30T14:15** (interval: 900s) — temperature_2m: 16.3 | precipitation: 0`
  *
- * Not {@link formatRecord}: the block carries `interval`, the model's update cadence in
+ * Not {@link formatRecord}: the block carries `interval`, its aggregation interval in
  * seconds, which that function's per-key loop would render as a requested variable
  * alongside the real ones. Rendered here as metadata beside the timestamp, so the
  * variable list holds only what the caller asked for.

@@ -17,14 +17,23 @@ import {
   getOpenMeteoService,
 } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
+import { CalendarDateSchema } from '../date-input.js';
+import { cleanNames } from '../name-input.js';
 import { formatCurrent, formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
-import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
+import {
+  composeNotice,
+  describeCoverageGaps,
+  describeCurrentGaps,
+  findCoverageGaps,
+  findCurrentGaps,
+} from '../response-notice.js';
 import {
   boundedPreview,
   canvasPointerLine,
   canvasPointerNotice,
   exceedsInlineBudget,
   inlineBudget,
+  noCanvasLine,
   noCanvasNotice,
   stageSpill,
   unitsTrimmedNotice,
@@ -38,6 +47,7 @@ import {
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
   isRequestTooLargeReason,
+  RATE_LIMITED_ERROR,
 } from '../upstream-error.js';
 import { undefinedUnitColumns } from '../variable-cadence.js';
 
@@ -62,9 +72,11 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     'Common variables: pm2_5, pm10, carbon_monoxide, nitrogen_dioxide, sulphur_dioxide, ozone, ' +
     'dust, european_aqi, us_aqi, alder_pollen, birch_pollen, grass_pollen, mugwort_pollen, ' +
     'olive_pollen, ragweed_pollen. ' +
+    'Pollen is modeled for Europe only, and only in pollen season — elsewhere the pollen values ' +
+    'come back null, and the notice names them. ' +
     'Set current_variables for pollutant and AQI values at this instant — returned as a current ' +
     'object plus a current_units map, and enough on its own without hourly_variables; the ' +
-    'block’s interval field reports how often that value updates (3600 seconds on this endpoint). ' +
+    'block’s interval field is its aggregation interval in seconds (3600 on this endpoint). ' +
     'A wide window — a large past_days or date range plus many variables — produces thousands of ' +
     'records; these spill to a DataCanvas when canvas is enabled, returning canvas_id and ' +
     'table_name with truncated: true — inspect the staged columns with ' +
@@ -84,7 +96,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Neither current_variables nor hourly_variables was provided.',
+      when: 'Neither current_variables nor hourly_variables named a variable — blank or whitespace-only entries do not count.',
       recovery:
         'Provide at least one air quality variable in current_variables (values right now) or hourly_variables (a time series).',
       retryable: false,
@@ -127,6 +139,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid — the size of the request is what was rejected, so re-checking spelling will not help.`,
       retryable: false,
     },
+    RATE_LIMITED_ERROR,
   ],
 
   input: z.object({
@@ -143,7 +156,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       .max(50)
       .optional()
       .describe(
-        'Air quality variables to return for the current instant (e.g., ["pm2_5", "pm10", "european_aqi", "us_aqi"]). Uses Open-Meteo\'s current-conditions data, so it answers "what is the AQI now?" without requesting an hourly series and picking a row; the returned interval reports the update cadence, 3600 seconds on this endpoint. Satisfies the variable requirement on its own.',
+        'Air quality variables to return for the current instant (e.g., ["pm2_5", "pm10", "european_aqi", "us_aqi"]). Uses Open-Meteo\'s current-conditions data, so it answers "what is the AQI now?" without requesting an hourly series and picking a row; the returned interval is the block\'s aggregation interval, 3600 seconds on this endpoint. Satisfies the variable requirement on its own.',
       ),
     hourly_variables: z
       .array(z.string())
@@ -170,20 +183,12 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       .describe(
         'Include this many days of past data before today (0–92). Use for recent history instead of a start_date/end_date range. Default 0. Must stay 0 when start_date/end_date are used.',
       ),
-    start_date: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .optional()
-      .describe(
-        'Start date for the archive range (YYYY-MM-DD, e.g., "2024-07-01"). The CAMS global archive begins in August 2022; earlier dates return rows of nulls, and us_aqi starts a day later than the pollutant series (european_aqi starts with it). Requires end_date — the pair must be sent together, and neither combines with forecast_days or past_days.',
-      ),
-    end_date: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .optional()
-      .describe(
-        'End date for the archive range (YYYY-MM-DD, inclusive). Must be on or after start_date. Requires start_date — the pair must be sent together, and neither combines with forecast_days or past_days.',
-      ),
+    start_date: CalendarDateSchema.optional().describe(
+      'Start date for the archive range (YYYY-MM-DD, e.g., "2024-07-01"). The CAMS global archive begins in August 2022; earlier dates return rows of nulls, and us_aqi starts a day later than the pollutant series (european_aqi starts with it). Requires end_date — the pair must be sent together, and neither combines with forecast_days or past_days.',
+    ),
+    end_date: CalendarDateSchema.optional().describe(
+      'End date for the archive range (YYYY-MM-DD, inclusive). Must be on or after start_date. Requires start_date — the pair must be sent together, and neither combines with forecast_days or past_days.',
+    ),
     timezone: z.string().default('auto').describe('IANA timezone or "auto". Default "auto".'),
     canvas_id: CanvasIdSchema.optional().describe(
       'DataCanvas token for wide past_days, archive-range, or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
@@ -205,7 +210,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
         interval: z
           .number()
           .describe(
-            'Update cadence of the current-conditions data, in seconds (3600 = hourly on this endpoint) — metadata, not a requested variable',
+            'Aggregation interval of the current block, in seconds (3600 on this endpoint) — metadata, not a requested variable. Pollutant concentrations are instantaneous at current.time; the AQI indices are computed over their own averaging windows, not over interval',
           ),
       })
       .catchall(z.union([z.string(), z.number(), z.null()]))
@@ -260,17 +265,22 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); recognized variables whose requested window falls outside the CAMS archive, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); current values that are null under a real unit (no coverage at this location and time, such as pollen outside Europe); recognized variables whose requested window or location falls outside CAMS coverage, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
 
-  async handler(input, ctx) {
+  async handler(args, ctx) {
+    const input = {
+      ...args,
+      current_variables: cleanNames(args.current_variables),
+      hourly_variables: cleanNames(args.hourly_variables),
+    };
     const hasCurrent = (input.current_variables?.length ?? 0) > 0;
     const hasHourly = (input.hourly_variables?.length ?? 0) > 0;
     if (!hasCurrent && !hasHourly) {
       throw ctx.fail(
         'no_variables_requested',
-        'Provide at least one air quality variable in current_variables or hourly_variables.',
+        'Provide at least one air quality variable in current_variables or hourly_variables — blank or whitespace-only entries do not count.',
       );
     }
 
@@ -390,10 +400,12 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     }
 
     /*
-     * Temporal coverage, the case the check above cannot see: an archive range opening
-     * before CAMS begins comes back with real units (μg/m³, USAQI) and null values, so
-     * a 48-record all-null success is otherwise indistinguishable from a populated one.
+     * Coverage, the case the check above cannot see: pollen outside Europe, or an
+     * archive range opening before CAMS begins, comes back with real units (grains/m³,
+     * USAQI) and null values, so an all-null success is otherwise indistinguishable
+     * from a populated one.
      */
+    notice.add(describeCurrentGaps(findCurrentGaps(data.current, rawCurrentUnits)));
     notice.add(describeCoverageGaps(findCoverageGaps('hourly', data.hourly, rawHourlyUnits)));
     notice.add(unitsTrimmedNotice(omittedUnits, 'fewer current_variables / hourly_variables'));
 
@@ -431,9 +443,10 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
        * Falling through to the full inline return would report truncated: false on a
        * 92-day hourly window.
        *
-       * The disclosure is composed into `notice` as well as rendered by format(), for
-       * the reason the canvas pointer is: a structuredContent-only client reads one
-       * surface, and on this branch the omitted rows are behind no canvas at all.
+       * The full disclosure is composed into `notice`, for the reason the canvas pointer
+       * is: a structuredContent-only client reads one surface, and on this branch the
+       * omitted rows are behind no canvas at all. The notice trailer carries it into
+       * content[] as well, so format() renders only the short line.
        */
       notice.add(noCanvasNotice(PAYLOAD_NARROWING));
       return {
@@ -480,7 +493,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     if (result.truncated && result.canvas_id) {
       lines.push(canvasPointerLine(result.canvas_id, result.table_name ?? ''), '');
     } else if (result.truncated) {
-      lines.push(noCanvasNotice(PAYLOAD_NARROWING), '');
+      lines.push(noCanvasLine(PAYLOAD_NARROWING), '');
     }
 
     if (result.current_units) {
@@ -490,7 +503,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
 
     if (result.current) {
       // Its own section, and its own renderer: the block is one instant rather than a
-      // series, and `interval` is the model's cadence rather than a requested variable.
+      // series, and `interval` is its aggregation interval rather than a requested variable.
       lines.push('', '### Current conditions', formatCurrent(result.current));
     }
 

@@ -13,7 +13,9 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
+import { CalendarDateSchema } from '../date-input.js';
 import { CLIMATE_MODEL_LIST } from '../model-catalog.js';
+import { cleanNames } from '../name-input.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
 import {
@@ -22,6 +24,7 @@ import {
   canvasPointerNotice,
   exceedsInlineBudget,
   inlineBudget,
+  noCanvasLine,
   noCanvasNotice,
   stageSpill,
   unitsTrimmedNotice,
@@ -35,6 +38,7 @@ import {
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
   isRequestTooLargeReason,
+  RATE_LIMITED_ERROR,
 } from '../upstream-error.js';
 import { undefinedUnitColumns } from '../variable-cadence.js';
 
@@ -83,7 +87,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'daily_variables was not provided or is empty.',
+      when: 'daily_variables named no variable — omitted, empty, or holding only blank or whitespace-only entries.',
       recovery:
         'Provide daily_variables with at least one variable (e.g., ["temperature_2m_max", "precipitation_sum"]).',
       retryable: false,
@@ -110,6 +114,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name and model is valid and the dates are in range — the size of the request is what was rejected.`,
       retryable: false,
     },
+    RATE_LIMITED_ERROR,
   ],
 
   input: z.object({
@@ -121,18 +126,12 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
         'Latitude in decimal degrees. Use openmeteo_search_locations to resolve a place name to coordinates.',
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
-    start_date: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .describe(
-        'Start date (YYYY-MM-DD, e.g., "2049-01-01"). CMIP6 projections cover 1950-01-01 to 2050-12-31.',
-      ),
-    end_date: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .describe(
-        'End date (YYYY-MM-DD, inclusive, max 2050-12-31). Must be on or after start_date.',
-      ),
+    start_date: CalendarDateSchema.describe(
+      'Start date (YYYY-MM-DD, e.g., "2049-01-01"). CMIP6 projections cover 1950-01-01 to 2050-12-31.',
+    ),
+    end_date: CalendarDateSchema.describe(
+      'End date (YYYY-MM-DD, inclusive, max 2050-12-31). Must be on or after start_date.',
+    ),
     daily_variables: z
       .array(z.string())
       .max(50)
@@ -226,12 +225,17 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       ),
   },
 
-  async handler(input, ctx) {
+  async handler(args, ctx) {
+    const input = {
+      ...args,
+      daily_variables: cleanNames(args.daily_variables),
+      models: cleanNames(args.models),
+    };
     const dailyVariables = input.daily_variables;
-    if (!dailyVariables || dailyVariables.length === 0) {
+    if (!dailyVariables) {
       throw ctx.fail(
         'no_variables_requested',
-        'Provide daily_variables with at least one climate variable.',
+        'Provide daily_variables with at least one climate variable — blank or whitespace-only entries do not count.',
       );
     }
 
@@ -354,7 +358,6 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     notice.add(unitsTrimmedNotice(omittedUnits, 'fewer daily_variables, or fewer models'));
 
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : [];
-    const models = input.models && input.models.length > 0 ? input.models : undefined;
     const dateRange = {
       start: (dailyRecords[0]?.time as string) ?? input.start_date,
       end: (dailyRecords[dailyRecords.length - 1]?.time as string) ?? input.end_date,
@@ -373,7 +376,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
           longitude: data.longitude,
           elevation: data.elevation,
           timezone: data.timezone,
-          models,
+          models: input.models,
           date_range: dateRange,
           record_count: handle.rowCount,
           // Same selection the canvas-less branch makes, so both paths return the same
@@ -391,9 +394,10 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
        * Falling through to the full inline return would report truncated: false on a
        * multi-decade, multi-model pull.
        *
-       * The disclosure is composed into `notice` as well as rendered by format(), for
-       * the reason the canvas pointer is: a structuredContent-only client reads one
-       * surface, and on this branch the omitted rows are behind no canvas at all.
+       * The full disclosure is composed into `notice`, for the reason the canvas pointer
+       * is: a structuredContent-only client reads one surface, and on this branch the
+       * omitted rows are behind no canvas at all. The notice trailer carries it into
+       * content[] as well, so format() renders only the short line.
        */
       notice.add(noCanvasNotice(PAYLOAD_NARROWING));
       return {
@@ -401,7 +405,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
         longitude: data.longitude,
         elevation: data.elevation,
         timezone: data.timezone,
-        models,
+        models: input.models,
         date_range: dateRange,
         record_count: dailyRecords.length,
         daily: boundedPreview(dailyRecords, rowBudget),
@@ -417,7 +421,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       longitude: data.longitude,
       elevation: data.elevation,
       timezone: data.timezone,
-      models,
+      models: input.models,
       date_range: dateRange,
       record_count: dailyRecords.length,
       daily: dailyRecords,
@@ -439,7 +443,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     if (result.truncated && result.canvas_id) {
       lines.push(`\n${canvasPointerLine(result.canvas_id, result.table_name ?? '')}`);
     } else if (result.truncated) {
-      lines.push(`\n${noCanvasNotice(PAYLOAD_NARROWING)}`);
+      lines.push(`\n${noCanvasLine(PAYLOAD_NARROWING)}`);
     }
 
     if (result.daily_units) lines.push(`\n**Daily units:** ${formatUnits(result.daily_units)}`);

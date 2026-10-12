@@ -14,14 +14,22 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
+import { cleanNames } from '../name-input.js';
 import { formatCurrent, formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
-import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
+import {
+  composeNotice,
+  describeCoverageGaps,
+  describeCurrentGaps,
+  findCoverageGaps,
+  findCurrentGaps,
+} from '../response-notice.js';
 import {
   boundedPreviewByCadence,
   canvasPointerLine,
   canvasPointerNotice,
   exceedsInlineBudget,
   inlineBudget,
+  noCanvasLine,
   noCanvasNotice,
   stageSpill,
   unitsTrimmedNotice,
@@ -35,6 +43,7 @@ import {
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
   isRequestTooLargeReason,
+  RATE_LIMITED_ERROR,
 } from '../upstream-error.js';
 import {
   describeCadenceMismatches,
@@ -95,7 +104,7 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'None of current_variables, hourly_variables, or daily_variables was provided.',
+      when: 'None of current_variables, hourly_variables, or daily_variables named a variable — blank or whitespace-only entries do not count.',
       recovery:
         'Provide at least one of current_variables (conditions right now), hourly_variables, or daily_variables.',
       retryable: false,
@@ -115,6 +124,7 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid — the size of the request is what was rejected, so re-checking spelling will not help.`,
       retryable: false,
     },
+    RATE_LIMITED_ERROR,
   ],
 
   input: z.object({
@@ -211,7 +221,7 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
         interval: z
           .number()
           .describe(
-            'Update cadence of the current-conditions data, in seconds (900 = 15 minutes) — metadata, not a requested variable',
+            'Aggregation interval of the current block, in seconds (900 = 15 minutes) — metadata, not a requested variable. Summed or averaged values such as precipitation and sunshine_duration cover the preceding interval seconds ending at current.time; instantaneous values such as temperature_2m are valid at current.time',
           ),
       })
       .catchall(z.union([z.string(), z.number(), z.null()]))
@@ -273,18 +283,24 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve in the requested cadence); recognized variables whose requested window falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve in the requested cadence); current values that are null under a real unit (no coverage at this location and time); recognized variables whose requested window or location falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
 
-  async handler(input, ctx) {
+  async handler(args, ctx) {
+    const input = {
+      ...args,
+      current_variables: cleanNames(args.current_variables),
+      hourly_variables: cleanNames(args.hourly_variables),
+      daily_variables: cleanNames(args.daily_variables),
+    };
     const hasCurrent = (input.current_variables?.length ?? 0) > 0;
     const hasHourly = (input.hourly_variables?.length ?? 0) > 0;
     const hasDaily = (input.daily_variables?.length ?? 0) > 0;
     if (!hasCurrent && !hasHourly && !hasDaily) {
       throw ctx.fail(
         'no_variables_requested',
-        'Provide at least one of current_variables, hourly_variables, or daily_variables.',
+        'Provide at least one of current_variables, hourly_variables, or daily_variables — blank or whitespace-only entries do not count.',
       );
     }
 
@@ -382,11 +398,12 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
     }
 
     /*
-     * Temporal coverage, the case the check above cannot see: a recognized variable
-     * whose window reaches past what the API serves comes back with a real unit and
-     * null values — a past_days longer than the forecast archive holds opens with a
+     * Coverage, the case the check above cannot see: a recognized variable comes back
+     * with a real unit and null values — lightning_potential where the model carries
+     * none, or a past_days longer than the forecast archive holds, which opens with a
      * null head that is otherwise indistinguishable from a populated response.
      */
+    notice.add(describeCurrentGaps(findCurrentGaps(data.current, rawCurrentUnits)));
     notice.add(
       describeCoverageGaps(
         findCoverageGaps('hourly', data.hourly, rawHourlyUnits),
@@ -446,9 +463,10 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
        * 108-day hourly window. Same per-cadence selection the canvas branch uses, so
        * both paths return the same rows for the same records.
        *
-       * The disclosure is composed into `notice` as well as rendered by format(), for
-       * the reason the canvas pointer is: a structuredContent-only client reads one
-       * surface, and on this branch the omitted rows are behind no canvas at all.
+       * The full disclosure is composed into `notice`, for the reason the canvas pointer
+       * is: a structuredContent-only client reads one surface, and on this branch the
+       * omitted rows are behind no canvas at all. The notice trailer carries it into
+       * content[] as well, so format() renders only the short line.
        */
       notice.add(noCanvasNotice(PAYLOAD_NARROWING));
       const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
@@ -502,7 +520,7 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
     if (result.truncated && result.canvas_id) {
       lines.push(canvasPointerLine(result.canvas_id, result.table_name ?? ''), '');
     } else if (result.truncated) {
-      lines.push(noCanvasNotice(PAYLOAD_NARROWING), '');
+      lines.push(noCanvasLine(PAYLOAD_NARROWING), '');
     }
 
     if (result.current_units) {
@@ -521,7 +539,7 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
 
     if (result.current) {
       // Its own section, and its own renderer: the block is one instant rather than a
-      // series, and `interval` is the model's cadence rather than a requested variable.
+      // series, and `interval` is its aggregation interval rather than a requested variable.
       lines.push('', '### Current conditions', formatCurrent(result.current));
     }
 

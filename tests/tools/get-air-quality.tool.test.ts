@@ -4,12 +4,13 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetAirQualityTool } from '@/mcp-server/tools/definitions/get-air-quality.tool.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
 import { wireError } from '../helpers/wire-error.js';
 
 const mockGetAirQuality = vi.fn();
@@ -853,9 +854,7 @@ describe('openmeteoGetAirQualityTool', () => {
     expect(result.record_count).toBe(time.length);
   });
 
-  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
-    // The disclosure reached content[] through format() alone, so a structuredContent-only
-    // client saw truncated: true with no canvas_id and nothing explaining either.
+  it('discloses the disabled canvas in the notice and once across content[] (#51, #55)', async () => {
     const time = hourlyTimes(2232);
     mockGetAirQuality.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -867,24 +866,14 @@ describe('openmeteoGetAirQualityTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
-    const result = await openmeteoGetAirQualityTool.handler(
-      openmeteoGetAirQualityTool.input.parse({
-        latitude: 47.6062,
-        longitude: -122.3321,
-        hourly_variables: ['pm2_5', 'european_aqi'],
-        past_days: 92,
-      }),
-      ctx,
-    );
+    const result = await runToolContract(openmeteoGetAirQualityTool, {
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['pm2_5', 'european_aqi'],
+      past_days: 92,
+    });
 
-    const notice = String(getEnrichment(ctx).notice);
-    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
-    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
-    expect(notice).toContain('fewer current_variables / hourly_variables');
-    expect(firstText(openmeteoGetAirQualityTool.format!(result))).toContain(
-      'CANVAS_PROVIDER_TYPE=none',
-    );
+    expectNoCanvasDisclosureOnce(result, 'fewer current_variables / hourly_variables');
   });
 
   // --- format() --------------------------------------------------------------
@@ -941,8 +930,9 @@ describe('openmeteoGetAirQualityTool', () => {
         truncated: true,
       }),
     );
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    // The short line only (#55) — the full disclosure reaches content[] via the notice trailer.
+    expect(text).toContain('bounded preview only; no canvas_id (DataCanvas disabled)');
+    expect(text).not.toContain('CANVAS_PROVIDER_TYPE');
     expect(text).toContain('past_days');
     expect(text).toContain('start_date–end_date');
     // Heading reports the upstream total and does not claim a canvas holds it.
@@ -1093,6 +1083,81 @@ describe('openmeteoGetAirQualityTool current conditions (#42)', () => {
     expect(String(getEnrichment(ctx).notice)).toContain('temperature_2m_max returned no data');
   });
 
+  // --- null current values under a real unit (#63) ----------------------------
+
+  it('names a null current pollen value on both surfaces beside a real pm2_5 (#63)', async () => {
+    // Live at 46.6021,-120.5059: pollen is modeled for Europe only, so grass_pollen comes
+    // back null under its real unit while pm2_5 carries a value.
+    const current = { time: '2026-10-12T10:00', interval: 3600, grass_pollen: null, pm2_5: 3.9 };
+    mockGetAirQuality.mockResolvedValue({
+      latitude: 46.600006,
+      longitude: -120.5,
+      elevation: 325,
+      utc_offset_seconds: -25200,
+      timezone: 'America/Los_Angeles',
+      timezone_abbreviation: 'GMT-7',
+      generationtime_ms: 0.2,
+      current_units: {
+        time: 'iso8601',
+        interval: 'seconds',
+        grass_pollen: 'grains/m³',
+        pm2_5: 'μg/m³',
+      },
+      current,
+    });
+
+    const result = await runToolContract(openmeteoGetAirQualityTool, {
+      latitude: 46.6021,
+      longitude: -120.5059,
+      current_variables: ['grass_pollen', 'pm2_5'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      current: Record<string, unknown>;
+      notice?: string;
+      record_count: number;
+    };
+    expect(structured.notice).toContain('No current value for grass_pollen');
+    expect(structured.notice).not.toContain('pm2_5');
+    expect(structured.notice).not.toContain('interval');
+    expect(structured.current).toEqual(current);
+    expect(structured.record_count).toBe(0);
+    const allText = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(allText).toContain('No current value for grass_pollen');
+  });
+
+  it('adds no current-gap sentence for a fully populated current block (#63)', async () => {
+    const { ctx } = await run(
+      { current_variables: ['pm2_5', 'european_aqi'] },
+      { ...MOCK_RESPONSE, ...CURRENT_BLOCK },
+    );
+    expect(String(getEnrichment(ctx).notice ?? '')).not.toContain('No current value');
+  });
+
+  it('reports an "undefined"-unit current name once, through its own notice only (#63)', async () => {
+    const { ctx } = await run(
+      { current_variables: ['pm2_5', 'temperature_2m_max'] },
+      {
+        ...MOCK_RESPONSE,
+        current_units: {
+          time: 'iso8601',
+          interval: 'seconds',
+          pm2_5: 'μg/m³',
+          temperature_2m_max: 'undefined',
+        },
+        current: { time: '2026-05-30T14:00', interval: 3600, pm2_5: 4.1, temperature_2m_max: null },
+      },
+    );
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice.match(/temperature_2m_max/g)).toHaveLength(1);
+    expect(notice).not.toContain('No current value');
+  });
+
+  it('says pollen is modeled for Europe only (#63)', () => {
+    expect(openmeteoGetAirQualityTool.description).toMatch(/pollen[^.]*Europe only/i);
+  });
+
   it('keeps a wide current block inside the inline ceiling', async () => {
     const names = Array.from({ length: 50 }, (_, i) => `pollutant_variable_number_${i}`);
     const wideCurrent: Record<string, number | string> = {
@@ -1125,8 +1190,8 @@ describe('openmeteoGetAirQualityTool current conditions (#42)', () => {
   });
 });
 
-describe('openmeteoGetAirQualityTool current cadence wording (#42)', () => {
-  /** Every caller-facing string that describes how often the current block updates. */
+describe('openmeteoGetAirQualityTool current interval wording (#42, #67)', () => {
+  /** Every caller-facing string that describes the current block's interval. */
   const CADENCE_SURFACES: [string, () => string][] = [
     ['description', () => openmeteoGetAirQualityTool.description],
     [
@@ -1135,14 +1200,63 @@ describe('openmeteoGetAirQualityTool current cadence wording (#42)', () => {
     ],
   ];
 
-  it.each(CADENCE_SURFACES)('the %s never promises a 15-minute cadence', (_surface, read) => {
+  it.each(CADENCE_SURFACES)('the %s never claims 15-minute data', (_surface, read) => {
     // The air-quality endpoint answers current with interval 3600, not the forecast
-    // endpoint's 900 — a 15-minute claim here overstates how fresh the value is.
+    // endpoint's 900 — a 15-minute claim here describes the wrong endpoint.
     expect(read()).not.toMatch(/15-minute/);
   });
 
   it('names the endpoint’s real 3600-second interval', () => {
     expect(openmeteoGetAirQualityTool.description).toContain('3600');
     expect(openmeteoGetAirQualityTool.input.shape.current_variables.description).toContain('3600');
+  });
+
+  // --- interval is an aggregation interval, not an update cadence (#67) --------
+
+  const intervalDescription = () =>
+    openmeteoGetAirQualityTool.output.shape.current.unwrap().shape.interval.description ?? '';
+
+  it.each([
+    ...CADENCE_SURFACES,
+    ['current.interval', intervalDescription] as [string, () => string],
+  ])('the %s never calls interval an update cadence (#67)', (_surface, read) => {
+    expect(read()).not.toMatch(/cadence|how often|refresh|updates?\b/i);
+  });
+
+  it('describes current.interval as the aggregation interval in seconds (#67)', () => {
+    const text = intervalDescription();
+    expect(text).toMatch(/aggregation interval/i);
+    expect(text).toContain('3600');
+    expect(text).toMatch(/instantaneous at current\.time/);
+  });
+
+  it('never says the AQI indices average over interval (#67)', () => {
+    for (const text of [
+      openmeteoGetAirQualityTool.description,
+      openmeteoGetAirQualityTool.input.shape.current_variables.description ?? '',
+      intervalDescription(),
+    ]) {
+      expect(text).not.toMatch(/(european_aqi|us_aqi|AQI)[^.]*average[^.]*over (the )?interval/i);
+    }
+    expect(intervalDescription()).toMatch(/AQI indices[^.]*own/i);
+  });
+
+  it('forwards the provider’s interval verbatim (#67)', async () => {
+    mockGetAirQuality.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      current_units: { time: 'iso8601', interval: 'seconds', pm2_5: 'μg/m³' },
+      current: { time: '2026-10-12T10:00', interval: 3600, pm2_5: 3.9 },
+    });
+    const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
+    const result = await openmeteoGetAirQualityTool.handler(
+      openmeteoGetAirQualityTool.input.parse({
+        latitude: 47.6,
+        longitude: -122.3,
+        current_variables: ['pm2_5'],
+      }),
+      ctx,
+    );
+    expect(openmeteoGetAirQualityTool.output.parse(result).current?.interval).toBe(3600);
+    expect(firstText(openmeteoGetAirQualityTool.format!(result))).toContain('(interval: 3600s)');
   });
 });

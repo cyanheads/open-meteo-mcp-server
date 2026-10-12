@@ -4,12 +4,13 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetHistoricalTool } from '@/mcp-server/tools/definitions/get-historical.tool.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
 import { wireError } from '../helpers/wire-error.js';
 
 const mockGetHistorical = vi.fn();
@@ -864,8 +865,9 @@ describe('openmeteoGetHistoricalTool', () => {
         truncated: true,
       }),
     );
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    // The short line only (#55) — the full disclosure reaches content[] via the notice trailer.
+    expect(text).toContain('bounded preview only; no canvas_id (DataCanvas disabled)');
+    expect(text).not.toContain('CANVAS_PROVIDER_TYPE');
     expect(text).toContain('start_date–end_date');
     // Heading reports the upstream total and does not claim a canvas holds it.
     expect(text).toContain('1 shown of 43848 total rows)');
@@ -1169,7 +1171,7 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(firstText(openmeteoGetHistoricalTool.format!(result))).not.toContain('### Hourly');
   });
 
-  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
+  it('discloses the disabled canvas in the notice and once across content[] (#51, #55)', async () => {
     const { hourly, hourlyUnits, daily, dailyUnits } = wideArchive();
     mockGetHistorical.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -1180,16 +1182,9 @@ describe('openmeteoGetHistoricalTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
-    const result = await openmeteoGetHistoricalTool.handler(wideInput(), ctx);
+    const result = await runToolContract(openmeteoGetHistoricalTool, wideInput());
 
-    const notice = String(getEnrichment(ctx).notice);
-    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
-    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
-    expect(notice).toContain('a shorter start_date–end_date range');
-    expect(firstText(openmeteoGetHistoricalTool.format!(result))).toContain(
-      'CANVAS_PROVIDER_TYPE=none',
-    );
+    expectNoCanvasDisclosureOnce(result, 'a shorter start_date–end_date range');
   });
 });
 
@@ -1237,6 +1232,24 @@ describe('openmeteoGetHistoricalTool archive model selection (#37)', () => {
     const { result } = await call({ models: [] });
     expect(result.models).toBeUndefined();
   });
+
+  it('echoes padded model names trimmed and drops blank ones (#62)', async () => {
+    const { result, params } = await call({ models: [' era5 ', '', 'era5_land '] });
+    expect(params.models).toEqual(['era5', 'era5_land']);
+    expect(openmeteoGetHistoricalTool.output.parse(result).models).toEqual(['era5', 'era5_land']);
+    const text = firstText(openmeteoGetHistoricalTool.format!(result));
+    expect(text).toContain('era5, era5_land');
+    expect(text).not.toContain(' era5 ');
+  });
+
+  it.each([[['']], [[' ', '\t']]])(
+    'treats a blank-only models list %j as no selection (#62)',
+    async (models) => {
+      const { result, params } = await call({ models });
+      expect(params.models).toBeUndefined();
+      expect(openmeteoGetHistoricalTool.output.parse(result).models).toBeUndefined();
+    },
+  );
 
   it('sends an unadvertised model upstream rather than rejecting it locally', async () => {
     // Same posture as the ensemble and climate tools: Open-Meteo stays the authority.

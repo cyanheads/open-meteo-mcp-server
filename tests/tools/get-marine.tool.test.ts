@@ -4,12 +4,13 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetMarineTool } from '@/mcp-server/tools/definitions/get-marine.tool.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
 import { wireError } from '../helpers/wire-error.js';
 
 const mockGetMarine = vi.fn();
@@ -889,8 +890,9 @@ describe('openmeteoGetMarineTool', () => {
         truncated: true,
       }),
     );
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    // The short line only (#55) — the full disclosure reaches content[] via the notice trailer.
+    expect(text).toContain('bounded preview only; no canvas_id (DataCanvas disabled)');
+    expect(text).not.toContain('CANVAS_PROVIDER_TYPE');
     expect(text).toContain('past_days');
     expect(text).toContain('start_date–end_date');
     // Heading reports the upstream total and does not claim a canvas holds it.
@@ -1118,6 +1120,43 @@ describe('openmeteoGetMarineTool', () => {
     expect(result.record_count).toBe(48);
   });
 
+  it('names the location, not only the window, for an all-null land point (#63)', async () => {
+    // Live at 46.6021,-120.5059 (inland Washington): daily wave_height_max comes back
+    // as 7 nulls under the real unit m. The window is fine — the point is on land.
+    const time = Array.from({ length: 7 }, (_, i) => `2026-10-${String(12 + i).padStart(2, '0')}`);
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: undefined,
+      hourly_units: undefined,
+      daily_units: { time: 'iso8601', wave_height_max: 'm' },
+      daily: { time, wave_height_max: time.map(() => null) },
+    });
+
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const result = await openmeteoGetMarineTool.handler(
+      openmeteoGetMarineTool.input.parse({
+        latitude: 46.6021,
+        longitude: -120.5059,
+        daily_variables: ['wave_height_max'],
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('No daily data for wave_height_max');
+    expect(notice).toContain('this location or the requested window falls outside');
+    expect(result.daily?.every((row) => row.wave_height_max === null)).toBe(true);
+  });
+
+  it('tells sheltered water (near-zero waves) apart from a land point (null) (#63)', () => {
+    const latitude = openmeteoGetMarineTool.input.shape.latitude.description ?? '';
+    for (const text of [openmeteoGetMarineTool.description, latitude]) {
+      expect(text).toMatch(/sheltered water[^.]*near-zero/i);
+      expect(text).toMatch(/land point[^.]*null/i);
+      expect(text).not.toMatch(/inland points return near-zero/i);
+    }
+  });
+
   // --- no-canvas disclosure (#51), unrequested cadence (#53) -----------------
 
   const stageOnCanvas = (rowCount: number) => {
@@ -1211,7 +1250,7 @@ describe('openmeteoGetMarineTool', () => {
     expect(firstText(openmeteoGetMarineTool.format!(result))).not.toContain('### Hourly marine');
   });
 
-  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
+  it('discloses the disabled canvas in the notice and once across content[] (#51, #55)', async () => {
     const { hourly, hourlyUnits, daily, dailyUnits } = wideWindow();
     mockGetMarine.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -1222,15 +1261,8 @@ describe('openmeteoGetMarineTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
-    const result = await openmeteoGetMarineTool.handler(wideInput(), ctx);
+    const result = await runToolContract(openmeteoGetMarineTool, wideInput());
 
-    const notice = String(getEnrichment(ctx).notice);
-    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
-    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
-    expect(notice).toContain('fewer past_days / forecast_days');
-    expect(firstText(openmeteoGetMarineTool.format!(result))).toContain(
-      'CANVAS_PROVIDER_TYPE=none',
-    );
+    expectNoCanvasDisclosureOnce(result, 'fewer past_days / forecast_days');
   });
 });

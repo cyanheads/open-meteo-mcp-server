@@ -7,12 +7,14 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
+import { RATE_LIMITED_ERROR } from '../upstream-error.js';
 
 export const openmeteoGetElevationTool = tool('openmeteo_get_elevation', {
   description:
     'Terrain elevation from the Copernicus Digital Elevation Model (~90m resolution) for one ' +
     'or more coordinate pairs. Accepts up to 100 pairs per call. Useful for geographic context, ' +
-    'elevation-adjusted weather interpretation, or route planning.',
+    'elevation-adjusted weather interpretation, or route planning. A point the DEM has no value ' +
+    'for (latitude 90) returns elevation_m null; the other points in the call are unaffected.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -23,6 +25,7 @@ export const openmeteoGetElevationTool = tool('openmeteo_get_elevation', {
       recovery: 'Provide equal-length latitude and longitude arrays.',
       retryable: false,
     },
+    RATE_LIMITED_ERROR,
   ],
 
   input: z.object({
@@ -49,7 +52,12 @@ export const openmeteoGetElevationTool = tool('openmeteo_get_elevation', {
           .object({
             latitude: z.number().describe('Input latitude'),
             longitude: z.number().describe('Input longitude'),
-            elevation_m: z.number().describe('Terrain elevation in meters above sea level'),
+            elevation_m: z
+              .number()
+              .nullable()
+              .describe(
+                'Terrain elevation in meters above sea level; null when the DEM has no value for this point',
+              ),
           })
           .describe('Elevation for a single coordinate pair'),
       )
@@ -70,7 +78,7 @@ export const openmeteoGetElevationTool = tool('openmeteo_get_elevation', {
     const elevations = input.latitudes.map((lat, i) => ({
       latitude: lat,
       longitude: input.longitudes[i] as number,
-      elevation_m: response.elevation[i] ?? 0,
+      elevation_m: response.elevation[i] ?? null,
     }));
 
     ctx.log.info('Elevation fetched', { count: elevations.length });
@@ -80,7 +88,8 @@ export const openmeteoGetElevationTool = tool('openmeteo_get_elevation', {
   format: (result) => {
     const lines = ['## Terrain elevation'];
     for (const e of result.elevations) {
-      lines.push(`**${e.latitude}, ${e.longitude}** → ${e.elevation_m} m`);
+      const value = e.elevation_m === null ? 'unavailable (no DEM value)' : `${e.elevation_m} m`;
+      lines.push(`**${e.latitude}, ${e.longitude}** → ${value}`);
     }
     lines.push(
       `\n_${result.elevations.length} point${result.elevations.length === 1 ? '' : 's'} — Weather data by Open-Meteo.com_`,

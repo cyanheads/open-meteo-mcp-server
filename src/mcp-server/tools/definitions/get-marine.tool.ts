@@ -17,6 +17,8 @@ import {
   type MarineParams,
 } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
+import { CalendarDateSchema } from '../date-input.js';
+import { cleanNames } from '../name-input.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
 import {
@@ -25,6 +27,7 @@ import {
   canvasPointerNotice,
   exceedsInlineBudget,
   inlineBudget,
+  noCanvasLine,
   noCanvasNotice,
   stageSpill,
   unitsTrimmedNotice,
@@ -38,6 +41,7 @@ import {
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
   isRequestTooLargeReason,
+  RATE_LIMITED_ERROR,
 } from '../upstream-error.js';
 import {
   describeCadenceMismatches,
@@ -63,7 +67,8 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     'per call: a date range is mutually exclusive with forecast_days and past_days, and needs both ' +
     'ends — a lone start_date or end_date is rejected. ' +
     'Returns per-timestamp records — each entry contains a "time" field plus one key per requested variable. Best for open-ocean ' +
-    'and coastal exposed points — sheltered inland waters return near-zero wave values. ' +
+    'and coastal exposed points — sheltered water such as a sound or bay returns near-zero wave ' +
+    'values, and a land point returns null values, which the notice reports. ' +
     'Common hourly variables: wave_height, wave_direction, wave_period, wind_wave_height, ' +
     'wind_wave_direction, wind_wave_period, swell_wave_height, swell_wave_direction, ' +
     'swell_wave_period. Common daily: wave_height_max, wave_direction_dominant, wave_period_max. ' +
@@ -95,7 +100,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Neither hourly_variables nor daily_variables was provided.',
+      when: 'Neither hourly_variables nor daily_variables named a variable — blank or whitespace-only entries do not count.',
       recovery: 'Provide at least one of hourly_variables or daily_variables.',
       retryable: false,
     },
@@ -137,6 +142,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid — the size of the request is what was rejected, so re-checking spelling will not help.`,
       retryable: false,
     },
+    RATE_LIMITED_ERROR,
   ],
 
   input: z.object({
@@ -145,7 +151,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .min(-90)
       .max(90)
       .describe(
-        'Latitude of a coastal or ocean point. Use openmeteo_search_locations to resolve a place name. Inland points return near-zero wave values.',
+        'Latitude of a coastal or ocean point. Use openmeteo_search_locations to resolve a place name. Sheltered water returns near-zero wave values; a land point returns null values, which the notice reports.',
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
     hourly_variables: z
@@ -180,20 +186,12 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .describe(
         'Include this many days of past data before today (0–92). Use for recent history instead of a start_date/end_date range. Default 0. Must stay 0 when start_date/end_date are used.',
       ),
-    start_date: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .optional()
-      .describe(
-        'Start date for the archive range (YYYY-MM-DD, e.g., "2024-07-01"). Real wave values go back to at least 2022. Requires end_date — the pair must be sent together, and neither combines with forecast_days or past_days.',
-      ),
-    end_date: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .optional()
-      .describe(
-        'End date for the archive range (YYYY-MM-DD, inclusive). Must be on or after start_date. Requires start_date — the pair must be sent together, and neither combines with forecast_days or past_days.',
-      ),
+    start_date: CalendarDateSchema.optional().describe(
+      'Start date for the archive range (YYYY-MM-DD, e.g., "2024-07-01"). Real wave values go back to at least 2022. Requires end_date — the pair must be sent together, and neither combines with forecast_days or past_days.',
+    ),
+    end_date: CalendarDateSchema.optional().describe(
+      'End date for the archive range (YYYY-MM-DD, inclusive). Must be on or after start_date. Requires start_date — the pair must be sent together, and neither combines with forecast_days or past_days.',
+    ),
     timezone: z.string().default('auto').describe('IANA timezone or "auto". Default "auto".'),
     canvas_id: CanvasIdSchema.optional().describe(
       'DataCanvas token for wide past_days, archive-range, or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
@@ -257,17 +255,22 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); recognized variables whose requested window falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); recognized variables whose requested window or location falls outside the data\'s coverage (a land point returns nulls), with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
 
-  async handler(input, ctx) {
+  async handler(args, ctx) {
+    const input = {
+      ...args,
+      hourly_variables: cleanNames(args.hourly_variables),
+      daily_variables: cleanNames(args.daily_variables),
+    };
     const hasHourly = (input.hourly_variables?.length ?? 0) > 0;
     const hasDaily = (input.daily_variables?.length ?? 0) > 0;
     if (!hasHourly && !hasDaily) {
       throw ctx.fail(
         'no_variables_requested',
-        'Provide at least one of hourly_variables or daily_variables.',
+        'Provide at least one of hourly_variables or daily_variables — blank or whitespace-only entries do not count.',
       );
     }
 
@@ -404,9 +407,10 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     }
 
     /*
-     * Temporal coverage, the case the check above cannot see: a served variable the
-     * wave model carries nothing for at this coordinate — ocean_current_velocity away
-     * from open ocean — comes back null with its real unit intact.
+     * Coverage, the case the check above cannot see: a served variable the wave model
+     * carries nothing for at this coordinate — every wave variable at a land point,
+     * ocean_current_velocity away from open ocean — comes back null with its real unit
+     * intact.
      */
     notice.add(
       describeCoverageGaps(
@@ -458,9 +462,10 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
        * 92-day hourly window. Same per-cadence selection the canvas branch uses, so
        * both paths return the same rows for the same records.
        *
-       * The disclosure is composed into `notice` as well as rendered by format(), for
-       * the reason the canvas pointer is: a structuredContent-only client reads one
-       * surface, and on this branch the omitted rows are behind no canvas at all.
+       * The full disclosure is composed into `notice`, for the reason the canvas pointer
+       * is: a structuredContent-only client reads one surface, and on this branch the
+       * omitted rows are behind no canvas at all. The notice trailer carries it into
+       * content[] as well, so format() renders only the short line.
        */
       notice.add(noCanvasNotice(PAYLOAD_NARROWING));
       const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
@@ -505,7 +510,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     if (result.truncated && result.canvas_id) {
       lines.push(canvasPointerLine(result.canvas_id, result.table_name ?? ''), '');
     } else if (result.truncated) {
-      lines.push(noCanvasNotice(PAYLOAD_NARROWING), '');
+      lines.push(noCanvasLine(PAYLOAD_NARROWING), '');
     }
 
     if (result.hourly_units) lines.push(`**Hourly units:** ${formatUnits(result.hourly_units)}`);

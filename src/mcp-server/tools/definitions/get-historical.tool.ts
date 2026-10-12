@@ -13,7 +13,9 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
+import { CalendarDateSchema } from '../date-input.js';
 import { ARCHIVE_MODEL_LIST, ARCHIVE_MODEL_NAMES } from '../model-catalog.js';
+import { cleanNames } from '../name-input.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
 import {
@@ -22,6 +24,7 @@ import {
   canvasPointerNotice,
   exceedsInlineBudget,
   inlineBudget,
+  noCanvasLine,
   noCanvasNotice,
   stageSpill,
   unitsTrimmedNotice,
@@ -35,6 +38,7 @@ import {
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
   isRequestTooLargeReason,
+  RATE_LIMITED_ERROR,
 } from '../upstream-error.js';
 import {
   describeCadenceMismatches,
@@ -87,7 +91,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Neither hourly_variables nor daily_variables was provided.',
+      when: 'Neither hourly_variables nor daily_variables named a variable — blank or whitespace-only entries do not count.',
       recovery: 'Provide at least one of hourly_variables or daily_variables.',
       retryable: false,
     },
@@ -121,6 +125,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid and the dates are in range — the size of the request is what was rejected.`,
       retryable: false,
     },
+    RATE_LIMITED_ERROR,
   ],
 
   input: z.object({
@@ -132,18 +137,12 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
         'Latitude in decimal degrees. Use openmeteo_search_locations to resolve a place name to coordinates.',
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
-    start_date: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .describe(
-        'Start date (YYYY-MM-DD, e.g., "2024-07-01"). The archive covers from 1940-01-01; how close to today it reaches depends on the model — the ERA5 family runs about 5 days behind, IFS HRES is current.',
-      ),
-    end_date: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .describe(
-        'End date (YYYY-MM-DD, inclusive). Must be on or after start_date. For the last few days, either request models: ["ecmwf_ifs"] or use openmeteo_get_forecast with past_days.',
-      ),
+    start_date: CalendarDateSchema.describe(
+      'Start date (YYYY-MM-DD, e.g., "2024-07-01"). The archive covers from 1940-01-01; how close to today it reaches depends on the model — the ERA5 family runs about 5 days behind, IFS HRES is current.',
+    ),
+    end_date: CalendarDateSchema.describe(
+      'End date (YYYY-MM-DD, inclusive). Must be on or after start_date. For the last few days, either request models: ["ecmwf_ifs"] or use openmeteo_get_forecast with past_days.',
+    ),
     hourly_variables: z
       .array(z.string())
       .max(50)
@@ -257,13 +256,19 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       ),
   },
 
-  async handler(input, ctx) {
+  async handler(args, ctx) {
+    const input = {
+      ...args,
+      hourly_variables: cleanNames(args.hourly_variables),
+      daily_variables: cleanNames(args.daily_variables),
+      models: cleanNames(args.models),
+    };
     const hasHourly = (input.hourly_variables?.length ?? 0) > 0;
     const hasDaily = (input.daily_variables?.length ?? 0) > 0;
     if (!hasHourly && !hasDaily) {
       throw ctx.fail(
         'no_variables_requested',
-        'Provide at least one of hourly_variables or daily_variables.',
+        'Provide at least one of hourly_variables or daily_variables — blank or whitespace-only entries do not count.',
       );
     }
 
@@ -399,7 +404,6 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
 
     const hourlyRecords = data.hourly ? reshapeColumnar(data.hourly) : undefined;
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : undefined;
-    const models = input.models && input.models.length > 0 ? input.models : undefined;
 
     const records = hourlyRecords ?? dailyRecords;
     const allRecords = [...(hourlyRecords ?? []), ...(dailyRecords ?? [])];
@@ -430,7 +434,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
           longitude: data.longitude,
           elevation: data.elevation,
           timezone: data.timezone,
-          models,
+          models: input.models,
           date_range: dateRange,
           record_count: handle.rowCount,
           hourly: preview.hourly,
@@ -449,9 +453,10 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
        * multi-megabyte payload. Same per-cadence selection the canvas branch uses, so
        * both paths return the same rows for the same records.
        *
-       * The disclosure is composed into `notice` as well as rendered by format(), for
-       * the reason the canvas pointer is: a structuredContent-only client reads one
-       * surface, and on this branch the omitted rows are behind no canvas at all.
+       * The full disclosure is composed into `notice`, for the reason the canvas pointer
+       * is: a structuredContent-only client reads one surface, and on this branch the
+       * omitted rows are behind no canvas at all. The notice trailer carries it into
+       * content[] as well, so format() renders only the short line.
        */
       notice.add(noCanvasNotice(PAYLOAD_NARROWING));
       const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
@@ -460,7 +465,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
         longitude: data.longitude,
         elevation: data.elevation,
         timezone: data.timezone,
-        models,
+        models: input.models,
         date_range: dateRange,
         record_count: allRecords.length,
         hourly: preview.hourly,
@@ -478,7 +483,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       longitude: data.longitude,
       elevation: data.elevation,
       timezone: data.timezone,
-      models,
+      models: input.models,
       date_range: dateRange,
       record_count: allRecords.length,
       hourly: hourlyRecords,
@@ -504,7 +509,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     if (result.truncated && result.canvas_id) {
       lines.push(`\n${canvasPointerLine(result.canvas_id, result.table_name ?? '')}`);
     } else if (result.truncated) {
-      lines.push(`\n${noCanvasNotice(PAYLOAD_NARROWING)}`);
+      lines.push(`\n${noCanvasLine(PAYLOAD_NARROWING)}`);
     }
 
     if (result.hourly_units) lines.push(`\n**Hourly units:** ${formatUnits(result.hourly_units)}`);

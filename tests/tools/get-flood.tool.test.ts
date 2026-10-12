@@ -4,12 +4,13 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetFloodTool } from '@/mcp-server/tools/definitions/get-flood.tool.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
 import { wireError } from '../helpers/wire-error.js';
 
 const mockGetFlood = vi.fn();
@@ -683,9 +684,7 @@ describe('openmeteoGetFloodTool', () => {
     expect(result.record_count).toBe(time.length);
   });
 
-  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
-    // The disclosure reached content[] through format() alone, so a structuredContent-only
-    // client saw truncated: true with no canvas_id and nothing explaining either.
+  it('discloses the disabled canvas in the notice and once across content[] (#51, #55)', async () => {
     const time = dailyDates(15_000);
     mockGetFlood.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -693,23 +692,15 @@ describe('openmeteoGetFloodTool', () => {
     });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
-    const result = await openmeteoGetFloodTool.handler(
-      openmeteoGetFloodTool.input.parse({
-        latitude: 47.6,
-        longitude: -122.3,
-        daily_variables: ['river_discharge'],
-        start_date: '1984-01-01',
-        end_date: '2026-07-15',
-      }),
-      ctx,
-    );
+    const result = await runToolContract(openmeteoGetFloodTool, {
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: ['river_discharge'],
+      start_date: '1984-01-01',
+      end_date: '2026-07-15',
+    });
 
-    const notice = String(getEnrichment(ctx).notice);
-    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
-    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
-    expect(notice).toContain('fewer daily_variables');
-    expect(firstText(openmeteoGetFloodTool.format!(result))).toContain('CANVAS_PROVIDER_TYPE=none');
+    expectNoCanvasDisclosureOnce(result, 'fewer daily_variables');
   });
 
   it('names the disabled canvas and the narrowing levers in the truncated no-canvas format()', () => {
@@ -726,8 +717,9 @@ describe('openmeteoGetFloodTool', () => {
         truncated: true,
       }),
     );
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    // The short line only (#55) — the full disclosure reaches content[] via the notice trailer.
+    expect(text).toContain('bounded preview only; no canvas_id (DataCanvas disabled)');
+    expect(text).not.toContain('CANVAS_PROVIDER_TYPE');
     expect(text).toContain('fewer daily_variables');
     // Heading reports the upstream total and does not claim a canvas holds it.
     expect(text).toContain('1 shown of 15000 total rows)');
@@ -1088,6 +1080,75 @@ describe('openmeteoGetFloodTool river-selection wording (#43)', () => {
       'invalid_variable',
       'invalid_timezone',
       'request_too_large',
+      'rate_limited',
+    ]);
+  });
+});
+
+describe('openmeteoGetFloodTool discharge-variable wording (#64)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+  });
+
+  it('describes river_discharge as the daily value, not the ensemble mean (#64)', () => {
+    const text = openmeteoGetFloodTool.description;
+    expect(text).not.toMatch(/ensemble mean/i);
+    expect(text).not.toMatch(/ensemble river discharge/i);
+    expect(text).toContain('"river_discharge" (the daily discharge value');
+    expect(text).toContain('the mean across ensemble members is "river_discharge_mean"');
+  });
+
+  it.each([
+    ['tool description', () => openmeteoGetFloodTool.description],
+    [
+      'daily_variables input',
+      () => openmeteoGetFloodTool.input.shape.daily_variables.description ?? '',
+    ],
+  ])(
+    'the %s says the statistics are forecast-only and repeat river_discharge in reanalysis (#64)',
+    (_surface, read) => {
+      const text = read();
+      expect(text).toMatch(/forecast mode only/i);
+      expect(text).toMatch(/repeat river_discharge/i);
+      expect(text).toMatch(/not uncertainty estimates/i);
+    },
+  );
+
+  it('forwards every statistic in reanalysis mode unchanged rather than rejecting it (#64)', async () => {
+    // Live shape: a reanalysis range returns the consolidated discharge in every column.
+    mockGetFlood.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      daily_units: {
+        time: 'iso8601',
+        river_discharge: 'm³/s',
+        river_discharge_mean: 'm³/s',
+        river_discharge_p25: 'm³/s',
+      },
+      daily: {
+        time: ['2020-01-01'],
+        river_discharge: [1.16],
+        river_discharge_mean: [1.16],
+        river_discharge_p25: [1.16],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetFloodTool, {
+      latitude: 48.85,
+      longitude: 2.35,
+      daily_variables: ['river_discharge', 'river_discharge_mean', 'river_discharge_p25'],
+      start_date: '2020-01-01',
+      end_date: '2020-01-01',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as { daily: unknown[] }).daily).toEqual([
+      {
+        time: '2020-01-01',
+        river_discharge: 1.16,
+        river_discharge_mean: 1.16,
+        river_discharge_p25: 1.16,
+      },
     ]);
   });
 });

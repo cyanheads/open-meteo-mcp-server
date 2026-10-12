@@ -4,12 +4,13 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetEnsembleTool } from '@/mcp-server/tools/definitions/get-ensemble.tool.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
 import { wireError } from '../helpers/wire-error.js';
 
 const mockGetEnsemble = vi.fn();
@@ -188,8 +189,8 @@ describe('openmeteoGetEnsembleTool', () => {
 
     // Distinct suffixes are 01, 02, 03 — the same member across variables/blocks counts once
     expect(result.member_count).toBe(3);
-    // models omitted from input → no provenance to echo
-    expect(result.model).toBeUndefined();
+    // models omitted from input → the default model is what was requested (#73)
+    expect(result.model).toBe('ecmwf_ifs025_ensemble');
   });
 
   it('echoes the requested model and leaves member_count absent when no member columns exist', async () => {
@@ -211,6 +212,66 @@ describe('openmeteoGetEnsembleTool', () => {
 
     expect(result.model).toBe('gfs025');
     expect(result.member_count).toBeUndefined();
+  });
+
+  it.each([
+    { models: ' gem_global_ensemble', echoed: 'gem_global_ensemble' },
+    { models: 'ncep_gefs05', echoed: 'ncep_gefs05' },
+    { models: ' ', echoed: 'ecmwf_ifs025_ensemble' },
+    { models: '', echoed: 'ecmwf_ifs025_ensemble' },
+  ])('sends and echoes models "$models" as $echoed (#62, #73)', async ({ models, echoed }) => {
+    mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models,
+    });
+    const result = await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    const params = mockGetEnsemble.mock.calls[0]?.[2] as { models?: string };
+    expect(params.models).toBe(echoed);
+    expect(openmeteoGetEnsembleTool.output.parse(result).model).toBe(echoed);
+    const text = firstText(openmeteoGetEnsembleTool.format!(result));
+    expect(text).toContain(`**Model:** ${echoed}`);
+  });
+
+  it('never calls the Ensemble API without a model, and reports the default on both surfaces (#73)', async () => {
+    // The Ensemble API rejects a request with no models parameter (HTTP 400 "Model
+    // 'best_match' is not supported by the Ensemble API"), so an omitted models must
+    // reach the service as the documented default.
+    mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      forecast_days: 1,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const params = mockGetEnsemble.mock.calls[0]?.[2] as { models?: string };
+    expect(params.models).toBe('ecmwf_ifs025_ensemble');
+    expect((result.structuredContent as { model?: string }).model).toBe('ecmwf_ifs025_ensemble');
+    expect(firstText(result.content)).toContain('**Model:** ecmwf_ifs025_ensemble');
+    expect(firstText(result.content)).not.toContain('default blend');
+  });
+
+  it('names the default model, not an API default blend, on every advertised surface (#73)', () => {
+    const shape = openmeteoGetEnsembleTool.input.shape;
+    const modelOutput = openmeteoGetEnsembleTool.output.shape.model;
+    for (const text of [
+      openmeteoGetEnsembleTool.description,
+      shape.models.description ?? '',
+      modelOutput.description ?? '',
+    ]) {
+      expect(text).toContain('ecmwf_ifs025_ensemble');
+      expect(text).not.toMatch(/default blend/i);
+    }
+    expect(openmeteoGetEnsembleTool.description).toContain(
+      'Omit models to use ecmwf_ifs025_ensemble.',
+    );
   });
 
   it('sends an undocumented model name upstream unrejected (#31)', async () => {
@@ -339,6 +400,26 @@ describe('openmeteoGetEnsembleTool', () => {
     expect(notice).toContain('temperature_2m_max returned no data on any member');
     expect(notice).toContain('gfs025');
     expect(notice).not.toContain('member01');
+  });
+
+  it('names the default model in the unserved-variable notice when models was omitted (#73)', async () => {
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', snowfall_member01: 'undefined' },
+      hourly: { time: ['2026-06-03T00:00'], snowfall_member01: [null] },
+    });
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const input = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['snowfall'],
+    });
+
+    await openmeteoGetEnsembleTool.handler(input, ctx);
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('which means ecmwf_ifs025_ensemble does not carry that name');
+    expect(notice).not.toContain('default blend');
   });
 
   it('stays quiet when every requested column carries a real unit', async () => {
@@ -900,20 +981,19 @@ describe('openmeteoGetEnsembleTool', () => {
     },
   );
 
-  it('formats member count for the default blend (no model)', () => {
+  it('formats the model line even when no member columns came back', () => {
     const blocks = openmeteoGetEnsembleTool.format!({
       latitude: 47.6,
       longitude: -122.3,
       elevation: 59,
       timezone: 'America/Los_Angeles',
-      member_count: 30,
+      model: 'ecmwf_ifs025_ensemble',
       record_count: 2,
       truncated: false,
-      daily: [{ time: '2026-06-03', temperature_2m_max_member01: 18.5 }],
-      daily_units: { temperature_2m_max_member01: '°C' },
+      daily: [{ time: '2026-06-03', temperature_2m_max: 18.5 }],
+      daily_units: { temperature_2m_max: '°C' },
     });
-    expect(firstText(blocks)).toContain('default blend');
-    expect(firstText(blocks)).toContain('**Members:** 30');
+    expect(firstText(blocks)).toContain('**Model:** ecmwf_ifs025_ensemble | **Members:** unknown');
   });
 
   it('renders every hourly row (non-truncated) with no cap or "…and N more" (format parity)', () => {
@@ -1022,8 +1102,9 @@ describe('openmeteoGetEnsembleTool', () => {
         hourly_units: { temperature_2m_member01: '°C' },
       }),
     );
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    // The short line only (#55) — the full disclosure reaches content[] via the notice trailer.
+    expect(text).toContain('bounded preview only; no canvas_id (DataCanvas disabled)');
+    expect(text).not.toContain('CANVAS_PROVIDER_TYPE');
     // models takes one model, so the lever is a lighter model — not a shorter list.
     expect(text).toContain('a models value with fewer members');
     // Heading reports the upstream total and does not claim a canvas holds it.
@@ -1302,20 +1383,13 @@ describe('openmeteoGetEnsembleTool', () => {
     );
   });
 
-  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
+  it('discloses the disabled canvas in the notice and once across content[] (#51, #55)', async () => {
     mockGetEnsemble.mockResolvedValue(caseAResponse());
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
-    const result = await openmeteoGetEnsembleTool.handler(caseAInput(), ctx);
+    const result = await runToolContract(openmeteoGetEnsembleTool, caseAInput());
 
-    const notice = String(getEnrichment(ctx).notice);
-    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
-    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
-    expect(notice).toContain('a models value with fewer members');
-    expect(firstText(openmeteoGetEnsembleTool.format!(result))).toContain(
-      'CANVAS_PROVIDER_TYPE=none',
-    );
+    expectNoCanvasDisclosureOnce(result, 'a models value with fewer members');
   });
 
   it('says nothing about a disabled canvas when the spill actually staged (#51)', async () => {
@@ -1328,5 +1402,285 @@ describe('openmeteoGetEnsembleTool', () => {
     const notice = String(getEnrichment(ctx).notice);
     expect(notice).toContain('spilled_ens51');
     expect(notice).not.toContain('DataCanvas is disabled');
+  });
+
+  // --- 35-day horizon (#68) ----------------------------------------------------
+
+  const parseDays = (forecastDays: number) =>
+    openmeteoGetEnsembleTool.input.safeParse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m'],
+      forecast_days: forecastDays,
+    });
+
+  it('accepts forecast_days up to the 35-day ensemble range and rejects 0 and 36 (#68)', () => {
+    expect(parseDays(35).success).toBe(true);
+    expect(parseDays(17).success).toBe(true);
+    expect(parseDays(1).success).toBe(true);
+    expect(parseDays(36).success).toBe(false);
+    expect(parseDays(0).success).toBe(false);
+  });
+
+  it('keeps 7 as the forecast_days default (#68)', () => {
+    const parsed = openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m'],
+    });
+    expect(parsed.forecast_days).toBe(7);
+  });
+
+  /**
+   * Live shape at forecast_days=35, hourly temperature_2m (2026-10-12): 840 hourly rows.
+   * ncep_gefs05 carries values through hour 794 (2026-11-15T02:00, day 34), well past
+   * day 16; ecmwf_ifs025_ensemble ends at hour 314 (2026-10-25T02:00) and fills the
+   * rest with nulls under a real unit.
+   */
+  const thirtyFiveDayResponse = (lastRowWithData: number) => {
+    const time = hourlyTimes(840, '2026-10-12T00:00');
+    return {
+      time,
+      response: {
+        ...MOCK_RESPONSE,
+        hourly_units: memberUnits(['temperature_2m'], '°C'),
+        hourly: memberColumns(time, ['temperature_2m'], (row, m) =>
+          row <= lastRowWithData ? 8 + m / 10 + (row % 9) / 3 : null,
+        ),
+      },
+    };
+  };
+
+  const thirtyFiveDayInput = (models: string) =>
+    openmeteoGetEnsembleTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['temperature_2m'],
+      models,
+      forecast_days: 35,
+    });
+
+  it('forwards forecast_days 35 and returns values past day 16 (#68)', async () => {
+    const { time, response } = thirtyFiveDayResponse(794);
+    mockGetEnsemble.mockResolvedValue(response);
+    stageOnCanvas('spilled_ens68', 'canvas-ens-68', 840);
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const result = await openmeteoGetEnsembleTool.handler(thirtyFiveDayInput('ncep_gefs05'), ctx);
+
+    const params = mockGetEnsemble.mock.calls[0]?.[2] as { forecast_days?: number };
+    expect(params.forecast_days).toBe(35);
+    // Every one of the 840 rows is staged; the ones past day 16 carry values.
+    const [opts] = mockSpillover.mock.calls[0] as [{ source: Record<string, unknown>[] }];
+    expect(opts.source).toHaveLength(840);
+    expect(opts.source[16 * 24 + 1]?.temperature_2m_member01).toEqual(expect.any(Number));
+    expect(result.record_count).toBe(840);
+    expect(result.truncated).toBe(true);
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain(`data runs ${time[0]} to ${time[794]}`);
+  });
+
+  it.each([
+    ['canvas enabled', true],
+    ['canvas disabled', false],
+  ])(
+    'keeps both inline surfaces inside the ceiling for a 35-day pull — %s (#68)',
+    async (_label, canvasEnabled) => {
+      mockGetEnsemble.mockResolvedValue(thirtyFiveDayResponse(794).response);
+      if (canvasEnabled) stageOnCanvas('spilled_ens68', 'canvas-ens-68', 840);
+      else mockCanvasInstance = undefined;
+
+      const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+      const result = await openmeteoGetEnsembleTool.handler(thirtyFiveDayInput('ncep_gefs05'), ctx);
+
+      expect(result.truncated).toBe(true);
+      expect(result.canvas_id === undefined).toBe(!canvasEnabled);
+      expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+      expect(firstText(openmeteoGetEnsembleTool.format!(result)).length).toBeLessThanOrEqual(
+        INLINE_CHARS,
+      );
+    },
+  );
+
+  it('succeeds for a model that ends before a 35-day window and names where its data ends (#68)', async () => {
+    const { time, response } = thirtyFiveDayResponse(314);
+    mockGetEnsemble.mockResolvedValue(response);
+    mockCanvasInstance = undefined;
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    const result = await openmeteoGetEnsembleTool.handler(
+      thirtyFiveDayInput('ecmwf_ifs025_ensemble'),
+      ctx,
+    );
+
+    expect(result.record_count).toBe(840);
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('Partial hourly coverage for temperature_2m');
+    expect(notice).toContain(`data runs ${time[0]} to ${time[314]}`);
+    expect(notice).toContain('525 of 840 rows are null');
+  });
+
+  // --- the models lever names only smaller models (#74) ---
+
+  const TOO_MUCH_DATA =
+    'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.';
+
+  const tooLargeError = (models: string | undefined) => {
+    mockGetEnsemble.mockResolvedValue({ ...MOCK_RESPONSE, error: true, reason: TOO_MUCH_DATA });
+    return wireError(
+      openmeteoGetEnsembleTool,
+      openmeteoGetEnsembleTool.input.parse({
+        latitude: 47.6,
+        longitude: -122.3,
+        hourly_variables: ['temperature_2m'],
+        models,
+        forecast_days: 16,
+      }),
+    );
+  };
+
+  /** The narrowing text with no models lever — what a model nothing undercuts gets. */
+  const NO_MODELS_LEVER =
+    'fewer forecast_days / past_days, or fewer hourly_variables / daily_variables';
+
+  it.each([
+    {
+      models: 'google_weathernext2_ensemble',
+      lever: '(ecmwf_ifs025_ensemble has 51, bom_access_global_ensemble 18)',
+    },
+    {
+      models: 'ecmwf_ifs025_ensemble',
+      lever: '(icon_seamless_eps has 40, bom_access_global_ensemble 18)',
+    },
+    { models: undefined, lever: '(icon_seamless_eps has 40, bom_access_global_ensemble 18)' },
+    { models: 'ncep_gefs05', lever: '(gem_global_ensemble has 21, bom_access_global_ensemble 18)' },
+    { models: 'icon_eu_eps', lever: '(ncep_gefs_seamless has 31, bom_access_global_ensemble 18)' },
+    { models: 'gem_global_ensemble', lever: '(bom_access_global_ensemble has 18)' },
+  ])(
+    'names only global models with fewer members than $models in the request_too_large message (#74)',
+    async ({ models, lever }) => {
+      const error = await tooLargeError(models);
+
+      expect(error.data).toMatchObject({ reason: 'request_too_large' });
+      expect(error.message).toContain(
+        `fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or a models value with fewer members ${lever}.`,
+      );
+    },
+  );
+
+  it.each([
+    'bom_access_global_ensemble',
+    'ukmo_global_ensemble_20km',
+    'meteoswiss_icon_ch1_ensemble',
+    'ukmo_uk_ensemble_2km',
+    'a_model_open_meteo_added_later',
+  ])(
+    'omits the models lever from the request_too_large message when none is known to be smaller — %s (#74)',
+    async (models) => {
+      const error = await tooLargeError(models);
+
+      expect(error.message).toContain(`narrow the request and retry: ${NO_MODELS_LEVER}.`);
+      expect(error.message).not.toContain('models value');
+    },
+  );
+
+  it('keeps the declared request_too_large recovery free of model suggestions it cannot tailor (#74)', () => {
+    const recovery = openmeteoGetEnsembleTool.errors?.find(
+      (entry) => entry.reason === 'request_too_large',
+    )?.recovery;
+    expect(recovery).toContain('a models value with fewer members where the message names one');
+    expect(recovery).not.toMatch(/ has \d+/);
+  });
+
+  it('builds the no-canvas notice and format() line from the requested model (#74)', async () => {
+    mockGetEnsemble.mockResolvedValue(thirtyFiveDayResponse(794).response);
+    mockCanvasInstance = undefined;
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'ncep_gefs05',
+      forecast_days: 16,
+    });
+
+    const lever =
+      'a models value with fewer members (gem_global_ensemble has 21, bom_access_global_ensemble 18)';
+    expectNoCanvasDisclosureOnce(result, lever);
+    const structured = result.structuredContent as { notice?: string };
+    const allText = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(allText).not.toContain('ecmwf_ifs025_ensemble 51');
+    expect(structured.notice).not.toContain('ecmwf_ifs025_ensemble 51');
+  });
+
+  it('drops the models lever from both no-canvas surfaces when no global model is smaller (#74)', async () => {
+    mockGetEnsemble.mockResolvedValue(thirtyFiveDayResponse(794).response);
+    mockCanvasInstance = undefined;
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'bom_access_global_ensemble',
+      forecast_days: 16,
+    });
+
+    expectNoCanvasDisclosureOnce(result, NO_MODELS_LEVER);
+    expect(firstText(result.content)).toContain(
+      `Narrow the request to see the rest: ${NO_MODELS_LEVER}.`,
+    );
+    const structured = result.structuredContent as { notice?: string };
+    expect(structured.notice).toContain(`or narrow the request: ${NO_MODELS_LEVER}.`);
+    const allText = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(allText).not.toContain('models value');
+  });
+
+  it('ranks an uncatalogued model by the members it returned, control run included (#74)', async () => {
+    // 31 _memberNN columns + the control run = 32: ncep_gefs_seamless (31) is smaller.
+    mockGetEnsemble.mockResolvedValue(thirtyFiveDayResponse(794).response);
+    mockCanvasInstance = undefined;
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['temperature_2m'],
+      models: 'gfs025',
+      forecast_days: 16,
+    });
+
+    expectNoCanvasDisclosureOnce(
+      result,
+      'a models value with fewer members (ncep_gefs_seamless has 31, bom_access_global_ensemble 18)',
+    );
+  });
+
+  it('names the smaller models in the units-trimmed notice too (#74)', async () => {
+    // 50 variables × 51 members: a unit map big enough to crowd the rows below their floor.
+    const variables = Array.from({ length: 50 }, (_, i) => `variable_number_${i}`);
+    const columns = variables.flatMap((v) =>
+      Array.from({ length: 51 }, (_, m) => `${v}_member${String(m + 1).padStart(2, '0')}`),
+    );
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: Object.fromEntries([['time', 'iso8601'], ...columns.map((c) => [c, '°C'])]),
+      hourly: Object.fromEntries([['time', ['2026-06-03T00:00']], ...columns.map((c) => [c, [1]])]),
+    });
+
+    const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
+    await openmeteoGetEnsembleTool.handler(
+      openmeteoGetEnsembleTool.input.parse({
+        latitude: 47.6,
+        longitude: -122.3,
+        hourly_variables: variables,
+        models: 'ecmwf_ifs025_ensemble',
+      }),
+      ctx,
+    );
+
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('unit entries were omitted');
+    expect(notice).toContain(
+      'fewer hourly_variables / daily_variables, or a models value with fewer members (icon_seamless_eps has 40, bom_access_global_ensemble 18).',
+    );
   });
 });

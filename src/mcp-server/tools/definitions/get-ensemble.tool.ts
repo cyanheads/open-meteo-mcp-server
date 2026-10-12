@@ -1,8 +1,9 @@
 /**
  * @fileoverview Tool: openmeteo_get_ensemble — probabilistic ensemble weather forecast.
  * Returns per-member hourly/daily time series from NWP ensemble models (up to 64 members,
- * 16 days ahead). Large multi-member pulls spill to DataCanvas when canvas is enabled,
- * and return a bounded preview with truncated: true when it is not.
+ * up to 35 days ahead — most models end within 16, and the coverage notice names where a
+ * model's data stops). Large multi-member pulls spill to DataCanvas when canvas is
+ * enabled, and return a bounded preview with truncated: true when it is not.
  * @module mcp-server/tools/definitions/get-ensemble
  */
 
@@ -12,7 +13,13 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { type ColumnarBlock, toUnitsMap } from '@/services/open-meteo/types.js';
-import { ENSEMBLE_MODEL_LIST, ENSEMBLE_MODEL_NAMES } from '../model-catalog.js';
+import {
+  DEFAULT_ENSEMBLE_MODEL,
+  ENSEMBLE_MODEL_LIST,
+  ENSEMBLE_MODEL_NAMES,
+  ENSEMBLE_MODELS,
+} from '../model-catalog.js';
+import { cleanName, cleanNames } from '../name-input.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
   byEnsembleVariable,
@@ -26,6 +33,7 @@ import {
   canvasPointerNotice,
   exceedsInlineBudget,
   inlineBudget,
+  noCanvasLine,
   noCanvasNotice,
   stageSpill,
   unitsTrimmedNotice,
@@ -39,6 +47,7 @@ import {
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
   isRequestTooLargeReason,
+  RATE_LIMITED_ERROR,
 } from '../upstream-error.js';
 import {
   describeCadenceMismatches,
@@ -48,13 +57,40 @@ import {
 } from '../variable-cadence.js';
 
 /**
+ * The `models` lever for a response that has to tell the caller how to ask for less.
+ * `models` takes one model, so the lever is a lighter model rather than a shorter list:
+ * it names the nearest smaller global model in the catalog and the smallest one, ranked
+ * against the requested model's catalog member count — or, for a model the catalog does
+ * not carry, against the members the response returned plus the control run. Regional
+ * models are never offered, since one fails outside its domain. Returns undefined when no
+ * global model is smaller, or the requested model's size is unknown.
+ */
+function fewerMembersLever(model: string, memberCount: number | undefined): string | undefined {
+  const members =
+    ENSEMBLE_MODELS.find((m) => m.name === model)?.members ??
+    (memberCount === undefined ? undefined : memberCount + 1);
+  if (members === undefined) return undefined;
+  const smaller = ENSEMBLE_MODELS.filter((m) => !m.regional && m.members < members);
+  if (smaller.length === 0) return undefined;
+  const nearest = smaller.reduce((a, b) => (b.members > a.members ? b : a));
+  const smallest = smaller.reduce((a, b) => (b.members < a.members ? b : a));
+  const named =
+    nearest === smallest
+      ? `${nearest.name} has ${nearest.members}`
+      : `${nearest.name} has ${nearest.members}, ${smallest.name} ${smallest.members}`;
+  return `a models value with fewer members (${named})`;
+}
+
+/**
  * The inputs that shrink this tool's payload, named wherever a response has to tell the
  * caller how to ask for less: the upstream too-much-data rejection, and the no-canvas
- * preview notice on both response surfaces. `models` takes one model, so the lever is a
- * lighter model rather than a shorter list.
+ * preview notice on both response surfaces.
  */
-const PAYLOAD_NARROWING =
-  'fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or a models value with fewer members (gem_global_ensemble has 21, ecmwf_ifs025_ensemble 51)';
+function payloadNarrowing(modelsLever: string | undefined): string {
+  return modelsLever
+    ? `fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or ${modelsLever}`
+    : 'fewer forecast_days / past_days, or fewer hourly_variables / daily_variables';
+}
 
 /**
  * Variable names behind the columns upstream reported with unit `"undefined"`, with the
@@ -86,12 +122,14 @@ function countMembers(...blocks: (ColumnarBlock | undefined)[]): number | undefi
 
 export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
   description:
-    'Probabilistic ensemble weather forecast — up to 64 ensemble members, up to 16 days ahead ' +
-    "with optional past_days (0–92). Each member's values appear as separate columns named " +
+    'Probabilistic ensemble weather forecast — up to 64 ensemble members, up to 35 days ahead ' +
+    "with optional past_days (0–92). Most models end within 16 days; a model's columns are null " +
+    'past its horizon, and the response notice names where its data ends. ' +
+    "Each member's values appear as separate columns named " +
     'with a member suffix (e.g. temperature_2m_member01, temperature_2m_member02). Use the spread ' +
     'across members to compute exceedance probabilities, quantify forecast uncertainty, and build ' +
-    `decision thresholds. Available models: ${ENSEMBLE_MODEL_LIST}. Omit models to use the API ` +
-    'default blend. A regional model returns no data outside the area it covers; that comes back ' +
+    `decision thresholds. Available models: ${ENSEMBLE_MODEL_LIST}. Omit models to use ` +
+    `${DEFAULT_ENSEMBLE_MODEL}. A regional model returns no data outside the area it covers; that comes back ` +
     'as an input error naming the coverage gap, not a transient failure, so pick a global model ' +
     'or move the coordinate inside the region rather than retrying. A model name this list does ' +
     'not carry is still sent upstream, so a newly added one keeps working. ' +
@@ -106,7 +144,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     {
       reason: 'no_variables_requested',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Neither hourly_variables nor daily_variables was provided.',
+      when: 'Neither hourly_variables nor daily_variables named a variable — blank or whitespace-only entries do not count.',
       recovery: 'Provide at least one of hourly_variables or daily_variables.',
       retryable: false,
     },
@@ -137,9 +175,11 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       reason: 'request_too_large',
       code: JsonRpcErrorCode.ValidationError,
       when: 'Open-Meteo refused the request as asking for too much data in one call.',
-      recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name and the model are valid — the size of the request is what was rejected.`,
+      recovery:
+        'Narrow the request and retry: fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or a models value with fewer members where the message names one. Every requested name and the model are valid — the size of the request is what was rejected.',
       retryable: false,
     },
+    RATE_LIMITED_ERROR,
   ],
 
   input: z.object({
@@ -169,15 +209,17 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       .string()
       .optional()
       .describe(
-        `Ensemble model to use, one name: ${ENSEMBLE_MODEL_LIST}. Member counts include the control run. Omit to use the API default blend. A name outside this list is sent upstream rather than rejected here, so a model Open-Meteo adds later still works.`,
+        `Ensemble model to use, one name: ${ENSEMBLE_MODEL_LIST}. Member counts include the control run. Omit or leave blank to use ${DEFAULT_ENSEMBLE_MODEL}. A name outside this list is sent upstream rather than rejected here, so a model Open-Meteo adds later still works.`,
       ),
     forecast_days: z
       .number()
       .int()
       .min(1)
-      .max(16)
+      .max(35)
       .default(7)
-      .describe('Forecast horizon in days (1–16). Default 7.'),
+      .describe(
+        "Forecast horizon in days (1–35). Default 7. Most ensemble models end within 16 days; past a model's horizon its columns come back null and the response notice names where its data ends.",
+      ),
     past_days: z
       .number()
       .int()
@@ -215,9 +257,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     timezone: z.string().describe('Resolved IANA timezone'),
     model: z
       .string()
-      .optional()
       .describe(
-        'Ensemble model used (e.g. "ecmwf_ifs025_ensemble") — echoes the requested models parameter. Absent when models was omitted (API default blend; the API reports no provenance).',
+        `Ensemble model used — echoes the requested models parameter, or ${DEFAULT_ENSEMBLE_MODEL} when models was omitted or blank.`,
       ),
     member_count: z
       .number()
@@ -282,13 +323,19 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       ),
   },
 
-  async handler(input, ctx) {
+  async handler(args, ctx) {
+    const input = {
+      ...args,
+      hourly_variables: cleanNames(args.hourly_variables),
+      daily_variables: cleanNames(args.daily_variables),
+      models: cleanName(args.models) ?? DEFAULT_ENSEMBLE_MODEL,
+    };
     const hasHourly = (input.hourly_variables?.length ?? 0) > 0;
     const hasDaily = (input.daily_variables?.length ?? 0) > 0;
     if (!hasHourly && !hasDaily) {
       throw ctx.fail(
         'no_variables_requested',
-        'Provide at least one of hourly_variables or daily_variables.',
+        'Provide at least one of hourly_variables or daily_variables — blank or whitespace-only entries do not count.',
       );
     }
 
@@ -347,7 +394,10 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       if (isRequestTooLargeReason(data.reason)) {
         throw ctx.fail(
           'request_too_large',
-          frameRequestTooLargeMessage(data.reason, PAYLOAD_NARROWING),
+          frameRequestTooLargeMessage(
+            data.reason,
+            payloadNarrowing(fewerMembersLever(input.models, undefined)),
+          ),
         );
       }
       throw ctx.fail(
@@ -387,7 +437,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     const emptyVariables = unservedVariables(rawHourlyUnits, rawDailyUnits);
     if (emptyVariables.length > 0) {
       notice.add(
-        `${emptyVariables.join(', ')} returned no data on any member — Open-Meteo reported the unit as "undefined", which means ${input.models ?? 'the default blend'} does not carry that name in the cadence it was requested under. Try another models value, move it to the other cadence field, or drop it.`,
+        `${emptyVariables.join(', ')} returned no data on any member — Open-Meteo reported the unit as "undefined", which means ${input.models} does not carry that name in the cadence it was requested under. Try another models value, move it to the other cadence field, or drop it.`,
       );
     }
 
@@ -404,23 +454,28 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         findCoverageGaps('daily', data.daily, rawDailyUnits, byEnsembleVariable),
       ),
     );
+
+    /*
+     * The API envelope has no top-level model/member metadata: echo the requested
+     * model (the default when models was omitted) and derive the member count from the
+     * per-member column names.
+     */
+    const model = input.models;
+    const memberCount = countMembers(data.hourly, data.daily);
+    const modelsLever = fewerMembersLever(model, memberCount);
+
     notice.add(
       unitsTrimmedNotice(
         omittedUnits,
-        'fewer hourly_variables / daily_variables, or a models value with fewer members',
+        modelsLever
+          ? `fewer hourly_variables / daily_variables, or ${modelsLever}`
+          : 'fewer hourly_variables / daily_variables',
       ),
     );
 
     const hourlyRecords = data.hourly ? reshapeColumnar(data.hourly) : undefined;
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : undefined;
     const allRecords = [...(hourlyRecords ?? []), ...(dailyRecords ?? [])];
-
-    /*
-     * The API envelope has no top-level model/member metadata: echo the requested
-     * model and derive the member count from the per-member column names.
-     */
-    const model = input.models;
-    const memberCount = countMembers(data.hourly, data.daily);
 
     // DataCanvas spillover for payloads too large to return inline
     if (exceedsInlineBudget(allRecords, rowBudget)) {
@@ -467,11 +522,12 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
        * multi-megabyte member fan-out. Same per-cadence preview selection the canvas
        * branch uses, so both paths return the same rows for the same records.
        *
-       * The disclosure is composed into `notice` as well as rendered by format(), for
-       * the reason the canvas pointer is: a structuredContent-only client reads one
-       * surface, and on this branch the omitted rows are behind no canvas at all.
+       * The full disclosure is composed into `notice`, for the reason the canvas pointer
+       * is: a structuredContent-only client reads one surface, and on this branch the
+       * omitted rows are behind no canvas at all. The notice trailer carries it into
+       * content[] as well, so format() renders only the short line.
        */
-      notice.add(noCanvasNotice(PAYLOAD_NARROWING));
+      notice.add(noCanvasNotice(payloadNarrowing(modelsLever)));
       const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
       return {
         latitude: data.latitude,
@@ -513,13 +569,9 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     const lines = [
       '## Ensemble weather forecast',
       `**Location:** ${result.latitude}, ${result.longitude} | **Elevation:** ${result.elevation}m | **Timezone:** ${result.timezone}`,
+      `**Model:** ${result.model} | **Members:** ${result.member_count ?? 'unknown'}`,
+      `**Records:** ${result.record_count} | **Truncated:** ${result.truncated}`,
     ];
-    if (result.model || result.member_count != null) {
-      lines.push(
-        `**Model:** ${result.model ?? 'default blend'} | **Members:** ${result.member_count ?? 'unknown'}`,
-      );
-    }
-    lines.push(`**Records:** ${result.record_count} | **Truncated:** ${result.truncated}`);
 
     if (result.truncated && result.canvas_id) {
       lines.push(
@@ -527,7 +579,9 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         `_Preview favors rows with data: any leading all-null rows (e.g. past_days placeholders the models don't hindcast) are omitted here but staged in full chronological order on the canvas._`,
       );
     } else if (result.truncated) {
-      lines.push(`\n${noCanvasNotice(PAYLOAD_NARROWING)}`);
+      lines.push(
+        `\n${noCanvasLine(payloadNarrowing(fewerMembersLever(result.model, result.member_count)))}`,
+      );
     }
 
     if (result.hourly_units) lines.push(`\n**Hourly units:** ${formatUnits(result.hourly_units)}`);

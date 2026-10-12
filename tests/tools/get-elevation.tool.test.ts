@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetElevationTool } from '@/mcp-server/tools/definitions/get-elevation.tool.js';
 import { firstText } from '../helpers/content.js';
@@ -64,6 +64,69 @@ describe('openmeteoGetElevationTool', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'coordinate_count_mismatch' },
     });
+  });
+
+  // --- missing DEM values (#61) ------------------------------------------------
+
+  it('reports a point with no DEM value as null on both surfaces, never 0 m', async () => {
+    mockGetElevation.mockResolvedValue({ elevation: [325, 59, 0, null] });
+
+    const result = await runToolContract(openmeteoGetElevationTool, {
+      latitudes: [46.6021, 47.6062, 0, 90],
+      longitudes: [-120.5059, -122.3321, 0, 0],
+    });
+
+    expect(result.isError).toBeFalsy();
+    const { elevations } = result.structuredContent as {
+      elevations: { latitude: number; longitude: number; elevation_m: number | null }[];
+    };
+    expect(elevations.map((e) => e.elevation_m)).toEqual([325, 59, 0, null]);
+    const text = firstText(result.content);
+    expect(text).toContain('**90, 0** → unavailable (no DEM value)');
+    expect(text).not.toContain('**90, 0** → 0 m');
+    // A real sea-level reading still renders as 0 m.
+    expect(text).toContain('**0, 0** → 0 m');
+    expect(text).toContain('**47.6062, -122.3321** → 59 m');
+  });
+
+  it('maps a missing index (a response shorter than the input) to null, not 0', async () => {
+    mockGetElevation.mockResolvedValue({ elevation: [59] });
+
+    const result = await runToolContract(openmeteoGetElevationTool, {
+      latitudes: [47.6062, 46.853],
+      longitudes: [-122.3321, -121.734],
+    });
+
+    const { elevations } = result.structuredContent as {
+      elevations: { elevation_m: number | null }[];
+    };
+    expect(elevations.map((e) => e.elevation_m)).toEqual([59, null]);
+    expect(firstText(result.content)).toContain('**46.853, -121.734** → unavailable');
+  });
+
+  it('keeps negative elevations and echoes the caller’s longitude 180', async () => {
+    mockGetElevation.mockResolvedValue({ elevation: [-427, 128] });
+
+    const result = await runToolContract(openmeteoGetElevationTool, {
+      latitudes: [31.5, 66],
+      longitudes: [35.5, 180],
+    });
+
+    expect(result.structuredContent).toEqual({
+      elevations: [
+        { latitude: 31.5, longitude: 35.5, elevation_m: -427 },
+        { latitude: 66, longitude: 180, elevation_m: 128 },
+      ],
+    });
+    // The service receives the caller's value; it owns the 180 → -180 wire mapping.
+    expect(mockGetElevation).toHaveBeenCalledWith([31.5, 66], [35.5, 180], expect.anything());
+    expect(firstText(result.content)).toContain('**66, 180** → 128 m');
+  });
+
+  it('describes null in the output schema', () => {
+    const point = openmeteoGetElevationTool.output.shape.elevations.element;
+    expect(point.shape.elevation_m.description).toMatch(/null.*no value/i);
+    expect(point.shape.elevation_m.safeParse(null).success).toBe(true);
   });
 
   it('formats output as markdown', () => {

@@ -4,12 +4,13 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetForecastTool } from '@/mcp-server/tools/definitions/get-forecast.tool.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
+import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
 import { wireError } from '../helpers/wire-error.js';
 
 const mockGetForecast = vi.fn();
@@ -821,8 +822,9 @@ describe('openmeteoGetForecastTool', () => {
         truncated: true,
       }),
     );
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=none');
-    expect(text).toContain('CANVAS_PROVIDER_TYPE=duckdb');
+    // The short line only (#55) — the full disclosure reaches content[] via the notice trailer.
+    expect(text).toContain('bounded preview only; no canvas_id (DataCanvas disabled)');
+    expect(text).not.toContain('CANVAS_PROVIDER_TYPE');
     expect(text).toContain('fewer past_days / forecast_days');
     // Heading reports the upstream total and does not claim a canvas holds it.
     expect(text).toContain('1 shown of 2592 total rows)');
@@ -1069,33 +1071,22 @@ describe('openmeteoGetForecastTool', () => {
     expect(firstText(openmeteoGetForecastTool.format!(result))).not.toContain('### Hourly');
   });
 
-  it('composes the no-canvas disclosure into the notice, not only into content[] (#51)', async () => {
-    // The disclosure reached content[] through format() alone, so a structuredContent-only
-    // client saw truncated: true with no canvas_id and nothing explaining either.
-    const time = hourlyTimes(2592);
-    mockGetForecast.mockResolvedValue({ ...MOCK_RESPONSE, hourly: wideHourlyBlock(time) });
+  it('discloses the disabled canvas in the notice and once across content[] (#51, #55)', async () => {
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: wideHourlyBlock(hourlyTimes(2592)),
+    });
     mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
 
-    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
-    const result = await openmeteoGetForecastTool.handler(
-      openmeteoGetForecastTool.input.parse({
-        latitude: 47.6062,
-        longitude: -122.3321,
-        forecast_days: 16,
-        past_days: 92,
-        hourly_variables: ['temperature_2m', 'precipitation'],
-      }),
-      ctx,
-    );
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      latitude: 47.6062,
+      longitude: -122.3321,
+      forecast_days: 16,
+      past_days: 92,
+      hourly_variables: ['temperature_2m', 'precipitation'],
+    });
 
-    const notice = String(getEnrichment(ctx).notice);
-    expect(notice).toContain('There is no canvas_id because DataCanvas is disabled');
-    expect(notice).toContain('CANVAS_PROVIDER_TYPE=duckdb');
-    expect(notice).toContain('fewer past_days / forecast_days');
-    // content[] still carries the same text — both surfaces, one wording.
-    expect(firstText(openmeteoGetForecastTool.format!(result))).toContain(
-      'CANVAS_PROVIDER_TYPE=none',
-    );
+    expectNoCanvasDisclosureOnce(result, 'fewer past_days / forecast_days');
   });
 
   it('keeps the coverage-gap sentence alongside the no-canvas disclosure (#51)', async () => {
@@ -1268,7 +1259,7 @@ describe('openmeteoGetForecastTool current conditions (#42)', () => {
     expect(text).toMatch(/### Current conditions/);
     expect(text).toContain('2026-05-30T14:15');
     expect(text).toContain('temperature_2m: 16.3');
-    // interval is the model's update cadence, not a requested variable — it must not
+    // interval is the block's aggregation interval, not a requested variable — it must not
     // appear in the per-variable list the way formatRecord would put it there.
     expect(text).not.toContain('| interval: 900');
     expect(text).toMatch(/interval/);
@@ -1334,6 +1325,106 @@ describe('openmeteoGetForecastTool current conditions (#42)', () => {
       },
     );
     expect(String(getEnrichment(ctx).notice)).toContain('temperature_2m_max returned no data');
+  });
+
+  // --- null current values under a real unit (#63) ----------------------------
+
+  /** Live at 47.6062,-122.3321: lightning_potential comes back null under J/kg. */
+  const NULL_LIGHTNING = {
+    current_units: {
+      time: 'iso8601',
+      interval: 'seconds',
+      temperature_2m: '°C',
+      lightning_potential: 'J/kg',
+    },
+    current: {
+      time: '2026-10-12T10:15',
+      interval: 900,
+      temperature_2m: 8.6,
+      lightning_potential: null,
+    },
+  };
+
+  it('names a null current value under a real unit on both surfaces, keeping the null (#63)', async () => {
+    const { hourly: _hourly, hourly_units: _hourlyUnits, ...envelope } = MOCK_RESPONSE;
+    mockGetForecast.mockResolvedValue({ ...envelope, ...NULL_LIGHTNING });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      latitude: 47.6062,
+      longitude: -122.3321,
+      current_variables: ['temperature_2m', 'lightning_potential'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      current: Record<string, unknown>;
+      notice?: string;
+      record_count: number;
+    };
+    expect(structured.notice).toContain('No current value for lightning_potential');
+    expect(structured.notice).not.toContain('interval');
+    // The null is preserved, never coerced to zero, and the row count is untouched.
+    expect(structured.current).toEqual(NULL_LIGHTNING.current);
+    expect(structured.record_count).toBe(0);
+    const allText = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(allText).toContain('No current value for lightning_potential');
+  });
+
+  it('adds no current-gap sentence for a fully populated current block (#63)', async () => {
+    const { ctx } = await run(
+      { current_variables: ['temperature_2m', 'precipitation', 'wind_speed_10m'] },
+      { ...MOCK_RESPONSE, ...CURRENT_BLOCK },
+    );
+    expect(String(getEnrichment(ctx).notice ?? '')).not.toContain('No current value');
+  });
+
+  it('reports an "undefined"-unit current name once, through its own notice only (#63)', async () => {
+    const { ctx } = await run(
+      { current_variables: ['temperature_2m', 'temperature_2m_max'] },
+      {
+        ...MOCK_RESPONSE,
+        current_units: {
+          time: 'iso8601',
+          interval: 'seconds',
+          temperature_2m: '°C',
+          temperature_2m_max: 'undefined',
+        },
+        current: {
+          time: '2026-05-30T14:15',
+          interval: 900,
+          temperature_2m: 16.3,
+          temperature_2m_max: null,
+        },
+      },
+    );
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice.match(/temperature_2m_max/g)).toHaveLength(1);
+    expect(notice).not.toContain('No current value');
+  });
+
+  // --- interval is an aggregation interval, not an update cadence (#67) --------
+
+  const intervalDescription = () =>
+    openmeteoGetForecastTool.output.shape.current.unwrap().shape.interval.description ?? '';
+
+  it('describes current.interval as the aggregation interval ending at current.time (#67)', () => {
+    const text = intervalDescription();
+    expect(text).not.toMatch(/cadence|how often|refresh|updates?\b/i);
+    expect(text).toMatch(/aggregation interval/i);
+    expect(text).toContain('900');
+    expect(text).toMatch(/preceding interval seconds ending at current\.time/);
+    expect(text).toMatch(/instantaneous[^.]*valid at current\.time/);
+  });
+
+  it('forwards the provider’s interval verbatim and renders it as metadata (#67)', async () => {
+    const { result } = await run(
+      { current_variables: ['temperature_2m', 'precipitation', 'wind_speed_10m'] },
+      { ...MOCK_RESPONSE, ...CURRENT_BLOCK },
+    );
+    expect(openmeteoGetForecastTool.output.parse(result).current?.interval).toBe(900);
+    const text = firstText(openmeteoGetForecastTool.format!(result));
+    expect(text).toContain('(interval: 900s)');
+    expect(text).not.toContain('| interval: 900');
   });
 
   it('routes an unrecognized current name through the existing invalid_variable path', async () => {

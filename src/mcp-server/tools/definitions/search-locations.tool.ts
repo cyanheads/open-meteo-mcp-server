@@ -8,6 +8,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import type { GeocodingResult } from '@/services/open-meteo/types.js';
+import { RATE_LIMITED_ERROR } from '../upstream-error.js';
 
 /**
  * Infer a geocoding language from the dominant script of the query. The API
@@ -90,6 +91,7 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
         'If a region or country qualifier was folded into name, drop it and search the bare place name ("Baoding", not "Baoding Hebei") — use the country input or read admin1 on the results to disambiguate. A one- or two-character native-script name ("서울", "大阪", "東京") is matched only against an index entry of exactly that length, so retry with the full administrative name ("서울특별시", "大阪市", "東京都") or the romanized name ("Seoul", "Osaka", "Tokyo") — setting language alone will not resolve it. The index covers populated places only: a physical feature or landmark ("Sahara Desert") often will not resolve, so search the nearest town or city instead. Otherwise check the spelling.',
       retryable: false,
     },
+    RATE_LIMITED_ERROR,
   ],
 
   input: z.object({
@@ -120,7 +122,7 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
       .string()
       .default('en')
       .describe(
-        'Language for matching and returning place names (ISO 639-1, e.g., "en", "de", "zh"). The API matches name against the localized index for this language, so set it to match the script of name — e.g. language "zh" for "上海", "ru" for "Москва". This resolves a native-script name of three or more characters, which is matched by normalized prefix; a one- or two-character name must equal an index entry exactly, so setting language alone will not find "서울" or "大阪" — retry those with the full administrative name ("서울특별시", "大阪市") or the romanized name ("Seoul", "Osaka"). Default "en"; a query in a recognized non-Latin script (CJK, Hangul, Cyrillic, Arabic, Greek, Hebrew, Thai, Devanagari) that misses under "en" is retried once with the language inferred from its script.',
+        'Language for matching and returning place names (ISO 639-1, e.g., "en", "de", "zh"). The API matches name against the localized index for this language, so set it to match the script of name — e.g. language "zh" for "上海", "ru" for "Москва". This resolves a native-script name of three or more characters, which is matched by normalized prefix; a one- or two-character name must equal an index entry exactly, so setting language alone will not find "서울" or "大阪" — retry those with the full administrative name ("서울특별시", "大阪市") or the romanized name ("Seoul", "Osaka"). Default "en"; a query in a recognized non-Latin script (CJK, Hangul, Cyrillic, Arabic, Greek, Hebrew, Thai, Devanagari) that misses under "en" is retried once with the language inferred from its script, and effective_language on the response names that language when the retry supplied the results.',
       ),
   }),
 
@@ -179,6 +181,16 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
       .describe(
         'Advisory on the confidence of the top match, present only when its population is null or under 100,000 — the shape a historic or colonial exonym returns, where the upstream index answers with an unrelated small feature and never surfaces the modern city. Names the returned place, country, and feature_code, and asks the caller to verify the coordinates or retry with the place’s current official name. Never changes results or count.',
       ),
+    effective_language: z
+      .string()
+      .optional()
+      .describe(
+        'ISO 639-1 language the results were matched in, present only when the query missed under the default "en" and the retry with a language inferred from its script found them. The results’ name, country, admin1, and admin2 are localized in that language. Absent when the results were matched in the requested language.',
+      ),
+  },
+
+  enrichmentTrailer: {
+    effective_language: { label: 'Effective language' },
   },
 
   async handler(input, ctx) {
@@ -205,6 +217,8 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
         });
         const retry = await service.getGeocode(input.name, input.count, inferred, country, ctx);
         results = normalizeResults(retry.results);
+        // Names in the results are now localized in `inferred`, not the requested "en".
+        if (results.length > 0) ctx.enrich({ effective_language: inferred });
       }
     }
 
