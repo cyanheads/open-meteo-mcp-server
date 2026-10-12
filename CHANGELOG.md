@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-10-12
+
+Upstream rate limits fail as a declared rate_limited error on all nine upstream tools, ensemble forecasts default to ecmwf_ifs025_ensemble and reach 35 days, impossible dates and blank names are rejected before the request, and dataframe_query returns an exact row_count under a size-bounded preview.
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-03
 
 New opt-in openmeteo_dataframe_drop tool removes a staged DataCanvas table or view, enabled with OPENMETEO_DATAFRAME_DROP_ENABLED=true. mcp-ts-core ^0.13.11 adds a request id to every tool error result and fills each tool's declared recovery hint from its contract.

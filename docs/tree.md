@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-10-04 06:03:36
+Generated on: 2026-10-12 18:59:41
 
 ```text
 open-meteo-mcp-server/
@@ -160,7 +160,9 @@ open-meteo-mcp-server/
 │   │       │   ├── get-marine.tool.ts
 │   │       │   ├── index.ts
 │   │       │   └── search-locations.tool.ts
+│   │       ├── date-input.ts
 │   │       ├── model-catalog.ts
+│   │       ├── name-input.ts
 │   │       ├── reshape-utils.ts
 │   │       ├── response-notice.ts
 │   │       ├── spill-utils.ts
@@ -181,6 +183,9 @@ open-meteo-mcp-server/
 │   ├── helpers/
 │   │   ├── content.ts
 │   │   ├── inline-surface.ts
+│   │   ├── marker-config.ts
+│   │   ├── no-canvas.ts
+│   │   ├── upstream-spy.ts
 │   │   └── wire-error.ts
 │   ├── integration/
 │   │   └── search-locations-contract.int.test.ts
@@ -189,6 +194,7 @@ open-meteo-mcp-server/
 │   ├── scripts/
 │   │   └── packaging-entry-regex-sync.test.ts
 │   ├── services/
+│   │   ├── open-meteo-service-redaction.test.ts
 │   │   └── open-meteo-service.test.ts
 │   ├── smoke/
 │   │   └── definitions.smoke.test.ts
@@ -197,6 +203,7 @@ open-meteo-mcp-server/
 │       ├── dataframe-describe.tool.test.ts
 │       ├── dataframe-drop.tool.test.ts
 │       ├── dataframe-query.tool.test.ts
+│       ├── date-input.test.ts
 │       ├── error-contract.test.ts
 │       ├── get-air-quality.tool.test.ts
 │       ├── get-climate.tool.test.ts
@@ -207,6 +214,8 @@ open-meteo-mcp-server/
 │       ├── get-historical.tool.test.ts
 │       ├── get-marine.tool.test.ts
 │       ├── model-catalog.test.ts
+│       ├── name-input.test.ts
+│       ├── rate-limit-contract.test.ts
 │       ├── response-notice.test.ts
 │       ├── search-locations.tool.test.ts
 │       ├── spill-utils.test.ts
