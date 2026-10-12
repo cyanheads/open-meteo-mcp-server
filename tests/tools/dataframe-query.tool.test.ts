@@ -668,6 +668,18 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
       });
     });
 
+    it('reserves room for the size notice when a result under 100 rows does not fit whole', async () => {
+      // Eight rows fill the ceiling with less slack than the notice takes, and the exact
+      // row_count (50) is under the row cap, so only the size-ceiling notice can appear.
+      const width = Math.floor((INLINE_CHARS - 200) / 8) - 12;
+      const s = surfaces(await run(`SELECT repeat('x', ${width}) AS note FROM hist LIMIT 50`));
+      expect(s.structured.row_count).toBe(50);
+      expect(s.structured.rows.length).toBeLessThan(50);
+      expect(s.text).toContain(`Showing first ${s.structured.rows.length} of 50 rows`);
+      expect(s.textChars).toBeLessThanOrEqual(INLINE_CHARS);
+      expect(s.contentTotal).toBeLessThanOrEqual(INLINE_CHARS);
+    });
+
     it('charges a row its rendered line when escaping makes it wider than its JSON', async () => {
       // 30,000 pipes: ~30,000 characters of JSON but ~60,000 rendered (`\|` each), so a
       // JSON-only charge would admit both rows and render ~120,000 characters.

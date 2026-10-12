@@ -139,16 +139,21 @@ function renderText(
  * notice this result can carry — and each row is charged the larger of its JSON length
  * and its rendered table line, plus the comma or newline joining it to the next. Values
  * are never cut, so the preview stops before the first row that does not fit.
+ *
+ * The size-ceiling notice appears whenever fewer rows fit than the result holds, so it
+ * is measured at the widest such count — one short of the row cap or of `row_count`,
+ * whichever is lower — including for a result under the row cap.
  */
 function selectPreview(
   rows: readonly Record<string, unknown>[],
   meta: QueryMeta,
 ): { kept: Record<string, unknown>[]; firstRowChars: number; room: number } {
   const headers = Object.keys(rows[0] ?? {});
+  const widestSizeBound = Math.max(Math.min(meta.row_count, PREVIEW_ROW_LIMIT) - 1, 1);
   const fixed = Math.max(
     JSON.stringify({ rows: [], ...meta }).length,
     renderText(meta, headers, [], PREVIEW_ROW_LIMIT).length,
-    renderText(meta, headers, [], PREVIEW_ROW_LIMIT - 1).length,
+    renderText(meta, headers, [], widestSizeBound).length,
   );
   const room = INLINE_CHARS - fixed;
   const kept: Record<string, unknown>[] = [];
