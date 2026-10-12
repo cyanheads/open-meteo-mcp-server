@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CLIMATE_MODEL_LIST,
   CLIMATE_MODELS,
+  DEFAULT_ENSEMBLE_MODEL,
   ENSEMBLE_MODEL_LIST,
   ENSEMBLE_MODEL_NAMES,
   ENSEMBLE_MODELS,
@@ -26,6 +27,21 @@ describe('catalog contents', () => {
     expect(names).toContain('ukmo_global_ensemble_20km');
     expect(names).toContain('google_weathernext2_ensemble');
     expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('keeps each ensemble member count and coverage flag in step with its advertised note (#74)', () => {
+    for (const model of ENSEMBLE_MODELS) {
+      // The note leads with the count, or a range whose upper bound is the count.
+      const [, low, high] = /^(\d+)(?:–(\d+))?/.exec(model.note) ?? [];
+      expect(Number(high ?? low), model.name).toBe(model.members);
+      expect(model.regional === true, model.name).toBe(!model.note.includes('global'));
+    }
+  });
+
+  it('defaults the ensemble tool to a documented global model (#73)', () => {
+    const model = ENSEMBLE_MODELS.find((m) => m.name === DEFAULT_ENSEMBLE_MODEL);
+    expect(model).toMatchObject({ name: 'ecmwf_ifs025_ensemble', members: 51 });
+    expect(model?.regional).toBeUndefined();
   });
 
   it('renders the advertised lists the tool descriptions splice in', () => {

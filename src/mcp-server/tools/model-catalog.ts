@@ -5,10 +5,12 @@
  * These are NOT allowlists. Nothing here is checked, before a request or after: a model
  * name the catalog does not carry goes upstream untouched, so a model Open-Meteo adds
  * after this file was written keeps working, and a rejection is reported in the terms
- * upstream used. Open-Meteo stays the authority on which models exist. The catalog's one
+ * upstream used. Open-Meteo stays the authority on which models exist. The catalog's main
  * job is keeping the advertised lists honest — the tool description, the `models` field
  * description, and the `invalid_variable` recovery hint all render from here, so they
- * cannot drift apart.
+ * cannot drift apart. The ensemble member counts also rank the lighter models the
+ * ensemble tool's narrowing hint offers, and `DEFAULT_ENSEMBLE_MODEL` is the model an
+ * omitted ensemble `models` selects.
  *
  * The climate tool also used to reconstruct the offending model locally, because a
  * percent-encoded comma made upstream echo the whole requested list. The service now
@@ -40,6 +42,17 @@ export interface CatalogModel {
   readonly note: string;
 }
 
+/** One ensemble model, with the member count and coverage the narrowing hint ranks by. */
+export interface EnsembleModel extends CatalogModel {
+  /**
+   * Members including the control run, as the note states it. A blend whose count varies
+   * by region (`icon_seamless_eps`, 20–40) carries its upper bound — the most it can return.
+   */
+  readonly members: number;
+  /** Covers a region only, so it is never offered as a lighter alternative. */
+  readonly regional?: true;
+}
+
 /**
  * Documented ensemble models (19). A regional model queried outside its domain never
  * fails as a name error, and upstream does not report it uniformly either: the
@@ -48,26 +61,36 @@ export interface CatalogModel {
  * matches both shapes and throws the same non-retryable coverage-gap rejection for each —
  * see its `NO_DATA_REASON` and `NAN_COORDINATE_BODY`.
  */
-export const ENSEMBLE_MODELS: readonly CatalogModel[] = [
-  { name: 'ecmwf_ifs025_ensemble', note: '51 members, global 0.25°' },
-  { name: 'ecmwf_aifs025_ensemble', note: '51, global 0.25°' },
-  { name: 'ecmwf_ifs_europe_ensemble', note: '51, Europe 9 km' },
-  { name: 'ecmwf_aifs_europe_ensemble', note: '51, Europe 31 km' },
-  { name: 'google_weathernext2_ensemble', note: '64, global 0.25°' },
-  { name: 'ncep_gefs_seamless', note: '31, global blend' },
-  { name: 'ncep_gefs025', note: '31, global 0.25°' },
-  { name: 'ncep_gefs05', note: '31, global 50 km, 35 days' },
-  { name: 'ncep_aigefs025', note: '31, global 0.25°' },
-  { name: 'icon_seamless_eps', note: '20–40, global/Europe blend' },
-  { name: 'icon_global_eps', note: '40, global 26 km' },
-  { name: 'icon_eu_eps', note: '40, Europe 13 km' },
-  { name: 'icon_d2_eps', note: '20, Central Europe 2 km' },
-  { name: 'gem_global_ensemble', note: '21, global 0.25°' },
-  { name: 'bom_access_global_ensemble', note: '18, global 40 km' },
-  { name: 'ukmo_global_ensemble_20km', note: '18, global 20 km' },
-  { name: 'ukmo_uk_ensemble_2km', note: '3, UK 2 km' },
-  { name: 'meteoswiss_icon_ch1_ensemble', note: '11, Central Europe 1 km' },
-  { name: 'meteoswiss_icon_ch2_ensemble', note: '21, Central Europe 2 km' },
+export const ENSEMBLE_MODELS: readonly EnsembleModel[] = [
+  { name: 'ecmwf_ifs025_ensemble', members: 51, note: '51 members, global 0.25°' },
+  { name: 'ecmwf_aifs025_ensemble', members: 51, note: '51, global 0.25°' },
+  { name: 'ecmwf_ifs_europe_ensemble', members: 51, regional: true, note: '51, Europe 9 km' },
+  { name: 'ecmwf_aifs_europe_ensemble', members: 51, regional: true, note: '51, Europe 31 km' },
+  { name: 'google_weathernext2_ensemble', members: 64, note: '64, global 0.25°' },
+  { name: 'ncep_gefs_seamless', members: 31, note: '31, global blend' },
+  { name: 'ncep_gefs025', members: 31, note: '31, global 0.25°' },
+  { name: 'ncep_gefs05', members: 31, note: '31, global 50 km, 35 days' },
+  { name: 'ncep_aigefs025', members: 31, note: '31, global 0.25°' },
+  { name: 'icon_seamless_eps', members: 40, note: '20–40, global/Europe blend' },
+  { name: 'icon_global_eps', members: 40, note: '40, global 26 km' },
+  { name: 'icon_eu_eps', members: 40, regional: true, note: '40, Europe 13 km' },
+  { name: 'icon_d2_eps', members: 20, regional: true, note: '20, Central Europe 2 km' },
+  { name: 'gem_global_ensemble', members: 21, note: '21, global 0.25°' },
+  { name: 'bom_access_global_ensemble', members: 18, note: '18, global 40 km' },
+  { name: 'ukmo_global_ensemble_20km', members: 18, note: '18, global 20 km' },
+  { name: 'ukmo_uk_ensemble_2km', members: 3, regional: true, note: '3, UK 2 km' },
+  {
+    name: 'meteoswiss_icon_ch1_ensemble',
+    members: 11,
+    regional: true,
+    note: '11, Central Europe 1 km',
+  },
+  {
+    name: 'meteoswiss_icon_ch2_ensemble',
+    members: 21,
+    regional: true,
+    note: '21, Central Europe 2 km',
+  },
 ];
 
 /**
@@ -106,6 +129,13 @@ export const CLIMATE_MODELS: readonly string[] = [
   'MPI_ESM1_2_XR',
   'NICAM16_8S',
 ];
+
+/**
+ * The model an omitted or blank `models` selects on openmeteo_get_ensemble. The Ensemble
+ * API has no default of its own: a request without `models` is rejected with HTTP 400
+ * ("Model 'best_match' is not supported by the Ensemble API"), so the tool always sends one.
+ */
+export const DEFAULT_ENSEMBLE_MODEL = 'ecmwf_ifs025_ensemble';
 
 /** The advertised ensemble list — `name (members, coverage)`, comma-joined. */
 export const ENSEMBLE_MODEL_LIST = ENSEMBLE_MODELS.map((m) => `${m.name} (${m.note})`).join(', ');
