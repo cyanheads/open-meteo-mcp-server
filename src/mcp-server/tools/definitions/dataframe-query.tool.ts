@@ -6,50 +6,166 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
 /**
- * Inline row cap for both response surfaces. The full result stays on the canvas —
- * rows beyond this are reached by re-issuing the SQL with LIMIT / OFFSET. Capping in
- * the handler keeps content[] (format) and structuredContent (rows) carrying the
- * identical preview.
+ * Most rows either response surface carries. The data query asks the canvas for no
+ * more than this, so a large result is never materialized just to be sliced; the
+ * exact total comes from a separate `COUNT(*)` over the caller's SQL.
  */
 const PREVIEW_ROW_LIMIT = 100;
 
 /**
- * Render one SQL result cell for the markdown table in `format()`.
- *
- * Structs and lists reach here as real objects and arrays — DuckDB's
- * `getRowObjectsJson()` marshals them into `structuredContent.rows` intact — and
- * `String()` flattens both (`[object Object]`, or a list's brackets and types lost
- * to a bare comma join). Serializing them keeps `content[]` carrying the same value
- * `structuredContent` does. Primitives stay on the `String()` path: BIGINT, DATE, and
- * TIMESTAMP all arrive pre-marshaled as strings, so no `bigint` — the one type
- * `JSON.stringify` throws on — ever reaches this function.
- *
- * Pipes are escaped last, over the rendered text: `|` isn't JSON-significant, so
- * `JSON.stringify` passes a struct's `{"note":"pipe|test"}` straight through, and a
- * verbatim pipe would end the cell early and misalign the row's column count. Plain
- * string cells carry the same hazard, hence escaping every cell rather than only the
- * serialized ones.
+ * Longest the `COUNT(*)` behind an exact `row_count` may run. The count re-executes the
+ * caller's SQL in full, where the data query stops after its preview rows, so a result
+ * that streams its first rows instantly can take minutes to count. Past this budget the
+ * response keeps its rows and reports the lower bound with `count_error: count_timeout`.
  */
-function formatCell(value: unknown): string {
+const COUNT_BUDGET_MS = 5_000;
+
+const INLINE_CHARS_LABEL = INLINE_CHARS.toLocaleString('en-US');
+
+/** Paging advice both the notice and the `rows` description carry. */
+const PAGE_ORDER =
+  'Page under an ORDER BY: without one, DuckDB guarantees no row order between calls.';
+
+/** The response fields that are not rows — what the preview's fixed cost is measured from. */
+interface QueryMeta {
+  canvas_id: string;
+  count_error?: string | undefined;
+  row_count: number;
+}
+
+/**
+ * Render one header or cell for the markdown table in `format()`, so each table row
+ * stays one line with the header's column count.
+ *
+ * Strings take JSON string escaping without the surrounding quotes, which turns
+ * newlines, tabs, backslashes, and quotes into visible escapes (`\n`, `\t`, `\\`,
+ * `\"`); the empty string renders as `""` so it stays distinct from null, which is an
+ * empty cell. Structs and lists arrive as real objects and arrays from DuckDB's
+ * `getRowObjectsJson()` and render as compact JSON. Numbers and booleans render bare,
+ * as do BIGINT, DATE, and TIMESTAMP, which arrive pre-marshaled as strings with
+ * nothing to escape — so no `bigint` ever reaches `JSON.stringify`.
+ *
+ * Every `|` is escaped last, over the rendered text: it is not JSON-significant, so
+ * the steps above pass it through, and a bare pipe would end the cell early. Escaping
+ * backslashes first is what keeps a value's own `\|` from reading back as `\|` → `|`.
+ */
+function renderCell(value: unknown): string {
   const text =
     value === null || value === undefined
       ? ''
-      : typeof value === 'object'
-        ? JSON.stringify(value)
-        : String(value);
-  return text.replaceAll('|', '\\|');
+      : typeof value === 'string'
+        ? value === ''
+          ? '""'
+          : JSON.stringify(value).slice(1, -1)
+        : typeof value === 'object'
+          ? JSON.stringify(value)
+          : String(value);
+  return text.replace(EDGE_OR_INVISIBLE_BREAK, toUnicodeEscapes).replaceAll('|', '\\|');
+}
+
+/**
+ * Characters JSON escaping leaves bare that still split or erase a cell: U+2028 and
+ * U+2029 end a line for JavaScript-based markdown parsers, a no-break space alone reads
+ * as a blank row to some of them, and GFM trims leading and trailing spaces from every
+ * cell, so `' '` would read back as null. Each becomes its `\uXXXX` JSON escape.
+ */
+const EDGE_OR_INVISIBLE_BREAK = /^ +| +$|[\p{Zl}\p{Zp}\xA0]/gu;
+
+function toUnicodeEscapes(match: string): string {
+  return match
+    .split('')
+    .map((ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    .join('');
+}
+
+function tableLine(cells: readonly string[]): string {
+  return `| ${cells.join(' | ')} |`;
+}
+
+function rowLine(headers: readonly string[], row: Record<string, unknown>): string {
+  return tableLine(headers.map((h) => renderCell(row[h])));
+}
+
+function totalLabel(meta: QueryMeta): string {
+  return meta.count_error === undefined ? String(meta.row_count) : `at least ${meta.row_count}`;
+}
+
+/**
+ * The notice for a preview of `shown` rows, or undefined when the preview is the whole
+ * result. Which bound stopped it is read from `shown`: a full preview hit the row cap,
+ * anything shorter hit the size ceiling.
+ */
+function previewNotice(meta: QueryMeta, shown: number): string | undefined {
+  if (meta.count_error === undefined && meta.row_count <= shown) return;
+  const bound =
+    shown >= PREVIEW_ROW_LIMIT
+      ? `the ${PREVIEW_ROW_LIMIT}-row inline cap`
+      : `the next row would take this response past its ${INLINE_CHARS_LABEL}-character inline ceiling; select fewer or narrower columns to fit more rows per call`;
+  return `_Showing first ${shown} of ${totalLabel(meta)} rows (${bound}). Continue at OFFSET ${shown}: re-issue the SQL with LIMIT / OFFSET, adding ${shown} to any OFFSET it already applies and subtracting it from any LIMIT. ${PAGE_ORDER}_`;
+}
+
+/** `content[0].text` for a non-empty result: the handler's size accounting renders through this too. */
+function renderText(
+  meta: QueryMeta,
+  headers: readonly string[],
+  rowLines: readonly string[],
+  shown: number,
+): string {
+  const rows =
+    meta.count_error === undefined
+      ? totalLabel(meta)
+      : `${totalLabel(meta)} (the full result could not be counted: ${meta.count_error})`;
+  const lines = [
+    '## DataCanvas query result',
+    `**Canvas:** \`${meta.canvas_id}\` | **Rows:** ${rows}`,
+    '',
+    tableLine(headers.map(renderCell)),
+    tableLine(headers.map(() => '---')),
+    ...rowLines,
+  ];
+  const notice = previewNotice(meta, shown);
+  if (notice) lines.push('', notice);
+  return lines.join('\n');
+}
+
+/**
+ * Take whole leading rows, up to the row cap, while both surfaces stay within
+ * {@link INLINE_CHARS}. The fixed cost is the larger of the two surfaces with no rows —
+ * the JSON envelope, or the rendered header, column row, separator, and the longest
+ * notice this result can carry — and each row is charged the larger of its JSON length
+ * and its rendered table line, plus the comma or newline joining it to the next. Values
+ * are never cut, so the preview stops before the first row that does not fit.
+ */
+function selectPreview(
+  rows: readonly Record<string, unknown>[],
+  meta: QueryMeta,
+): { kept: Record<string, unknown>[]; firstRowChars: number; room: number } {
+  const headers = Object.keys(rows[0] ?? {});
+  const fixed = Math.max(
+    JSON.stringify({ rows: [], ...meta }).length,
+    renderText(meta, headers, [], PREVIEW_ROW_LIMIT).length,
+    renderText(meta, headers, [], PREVIEW_ROW_LIMIT - 1).length,
+  );
+  const room = INLINE_CHARS - fixed;
+  const kept: Record<string, unknown>[] = [];
+  let used = 0;
+  let firstRowChars = 0;
+  for (const row of rows.slice(0, PREVIEW_ROW_LIMIT)) {
+    const chars = 1 + Math.max(JSON.stringify(row).length, rowLine(headers, row).length);
+    if (kept.length === 0) firstRowChars = chars;
+    if (used + chars > room) break;
+    used += chars;
+    kept.push(row);
+  }
+  return { kept, firstRowChars, room };
 }
 
 export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
-  description:
-    'Run a read-only SQL SELECT against tables staged on a DataCanvas by ' +
-    'openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate. ' +
-    'Pass the canvas_id returned when any of those tools spills (truncated: true), and ' +
-    'reference the exact table_name those tools return alongside it. Call ' +
-    'openmeteo_dataframe_describe to list staged tables and their columns when you need to discover names.',
+  description: `Run a read-only SQL SELECT against tables staged on a DataCanvas by openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate. Pass the canvas_id returned when any of those tools spills (truncated: true), and reference the exact table_name those tools return alongside it. Call openmeteo_dataframe_describe to list staged tables and their columns when you need to discover names. Returns up to ${PREVIEW_ROW_LIMIT} leading rows — fewer when wide rows would pass the ${INLINE_CHARS_LABEL}-character inline ceiling — plus row_count — exact, or a lower bound flagged by count_error when counting fails or runs past 5 seconds; page the rest with LIMIT / OFFSET.`,
   annotations: { readOnlyHint: true },
 
   errors: [
@@ -84,6 +200,14 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
         'List the staged tables and columns with openmeteo_dataframe_describe, then reference an existing name — or re-run openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate to stage a fresh canvas.',
       retryable: false,
     },
+    {
+      reason: 'row_too_large',
+      code: JsonRpcErrorCode.ValidationError,
+      when: `The first result row alone cannot fit the ${INLINE_CHARS_LABEL}-character inline ceiling, and values are never cut.`,
+      recovery:
+        'Return less per row: select fewer columns, shorten wide strings with left() or substr(), trim long lists with list_slice(), or aggregate before returning.',
+      retryable: false,
+    },
   ],
 
   input: z.object({
@@ -93,8 +217,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     sql: z
       .string()
       .describe(
-        'Read-only SELECT statement. Reference table names from openmeteo_dataframe_describe. ' +
-          "Example: SELECT AVG(temperature_2m) AS avg_temp, strftime(time, '%Y-%m') AS month FROM spilled_abc123 GROUP BY month ORDER BY month",
+        "Read-only SELECT statement. Reference table names from openmeteo_dataframe_describe. Example: SELECT AVG(temperature_2m) AS avg_temp, strftime(time, '%Y-%m') AS month FROM spilled_abc123 GROUP BY month ORDER BY month",
       ),
   }),
 
@@ -102,9 +225,19 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     rows: z
       .array(z.record(z.string(), z.unknown()))
       .describe(
-        'Result rows — a preview capped at 100. When row_count exceeds this, page the rest by re-issuing the SQL with LIMIT / OFFSET.',
+        `Leading result rows: at most ${PREVIEW_ROW_LIMIT}, and fewer when the next row would take the response past its ${INLINE_CHARS_LABEL}-character inline ceiling. Values are never cut. When row_count exceeds rows.length, continue by re-issuing the SQL with OFFSET <rows.length>, added to any OFFSET it already applies, with any LIMIT reduced by the same amount. ${PAGE_ORDER}`,
       ),
-    row_count: z.number().describe('Total rows in the full result before any cap.'),
+    row_count: z
+      .number()
+      .describe(
+        'Exact number of rows in the full result. When count_error is present, the total could not be counted and this is a lower bound: the rows the query confirmed exist.',
+      ),
+    count_error: z
+      .string()
+      .optional()
+      .describe(
+        'Present only when counting the full result failed after its rows were read — the failure reason (e.g. sql_execution_error, or count_timeout when counting ran past 5 seconds). The rows are still valid; row_count is then a lower bound.',
+      ),
     canvas_id: z.string().describe('Canvas ID that was queried.'),
   }),
 
@@ -131,15 +264,16 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
       }
       throw err;
     });
+    const queryOptions = { signal: ctx.signal, denySystemCatalogs: true };
     // Rewrap the framework's query-level errors under this tool's own contracts so
     // the declared recovery hints reach the wire. The framework's system_catalog_access
     // throw carries no recovery of its own, and its missing_table recovery names
     // framework methods (registerTable()/describe()) instead of this server's tools.
-    // Every other McpError (invalid_sql, non_select_statement, a TTL-expired
+    // Every other McpError (invalid_sql, sql_read_only, denied_function, a TTL-expired
     // canvas_not_found, …) passes through unchanged so consumers keep the original
     // code and data.reason.
     const result = await instance
-      .query(input.sql, { signal: ctx.signal, denySystemCatalogs: true })
+      .query(input.sql, { ...queryOptions, rowLimit: PREVIEW_ROW_LIMIT })
       .catch((err: unknown) => {
         if (err instanceof McpError && err.data?.reason === 'system_catalog_access') {
           throw ctx.fail('system_catalog_access', err.message, undefined, { cause: err });
@@ -158,42 +292,63 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
         throw err;
       });
 
+    // A truncated read means more rows exist than the preview fetched; count them with
+    // the caller's SQL as a subquery, through the same gate. The data query already
+    // succeeded, so a count failure (only cancellation excepted) leaves its rows in
+    // place and reports the lower bound the read established — rowLimit + 1 rows exist.
+    const meta: QueryMeta = { canvas_id: instance.canvasId, row_count: result.rowCount };
+    if (result.truncated) {
+      const countSql = `SELECT COUNT(*) AS n FROM (\n${input.sql.replace(/[\s;]+$/, '')}\n)`;
+      const countSignal = AbortSignal.any([ctx.signal, AbortSignal.timeout(COUNT_BUDGET_MS)]);
+      await instance.query(countSql, { ...queryOptions, signal: countSignal }).then(
+        (count) => {
+          meta.row_count = Number(count.rows[0]?.n);
+        },
+        (err: unknown) => {
+          if (ctx.signal.aborted) throw err;
+          meta.row_count = result.rowCount + 1;
+          meta.count_error = countSignal.aborted
+            ? 'count_timeout'
+            : err instanceof McpError && typeof err.data?.reason === 'string'
+              ? err.data.reason
+              : 'count_failed';
+          ctx.log.warning('Dataframe row count failed; reporting a lower bound', {
+            canvas_id: instance.canvasId,
+            reason: meta.count_error,
+          });
+        },
+      );
+    }
+
+    const { kept, firstRowChars, room } = selectPreview(result.rows, meta);
+    if (kept.length === 0 && result.rows.length > 0) {
+      throw ctx.fail(
+        'row_too_large',
+        `The first result row needs ${firstRowChars.toLocaleString('en-US')} characters inline, but this response has room for ${Math.max(room, 0).toLocaleString('en-US')} under its ${INLINE_CHARS_LABEL}-character ceiling.`,
+      );
+    }
+
     ctx.log.info('Dataframe query executed', {
       canvas_id: instance.canvasId,
-      row_count: result.rowCount,
+      row_count: meta.row_count,
+      preview_rows: kept.length,
     });
 
-    return {
-      rows: result.rows.slice(0, PREVIEW_ROW_LIMIT),
-      row_count: result.rowCount,
-      canvas_id: instance.canvasId,
-    };
+    return { rows: kept, ...meta };
   },
 
   format: (result) => {
-    const lines = [
-      `## DataCanvas query result`,
-      `**Canvas:** \`${result.canvas_id}\` | **Rows:** ${result.row_count}`,
-    ];
-
-    if (result.rows.length === 0) {
-      lines.push('', '_No rows returned._');
-    } else {
-      const firstRow = result.rows[0] ?? {};
-      const headers = Object.keys(firstRow);
-      lines.push('', `| ${headers.join(' | ')} |`);
-      lines.push(`| ${headers.map(() => '---').join(' | ')} |`);
-      for (const row of result.rows) {
-        lines.push(`| ${headers.map((h) => formatCell(row[h])).join(' | ')} |`);
-      }
-      if (result.row_count > result.rows.length) {
-        lines.push(
-          ``,
-          `_Showing first ${result.rows.length} of ${result.row_count} rows — add LIMIT / OFFSET to your SQL to page further._`,
-        );
-      }
+    const firstRow = result.rows[0];
+    if (!firstRow) {
+      return [
+        {
+          type: 'text',
+          text: `## DataCanvas query result\n**Canvas:** \`${result.canvas_id}\` | **Rows:** ${result.row_count}\n\n_No rows returned._`,
+        },
+      ];
     }
-
-    return [{ type: 'text', text: lines.join('\n') }];
+    const headers = Object.keys(firstRow);
+    const rowLines = result.rows.map((row) => rowLine(headers, row));
+    return [{ type: 'text', text: renderText(result, headers, rowLines, result.rows.length) }];
   },
 });
