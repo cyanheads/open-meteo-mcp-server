@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-10-12
 
-Upstream rate limits fail as a declared rate_limited error on all nine upstream tools, ensemble forecasts default to ecmwf_ifs025_ensemble and reach 35 days, impossible dates and blank names are rejected before the request, and dataframe_query returns an exact row_count under a size-bounded preview.
+Upstream rate limits fail as a declared rate_limited error on all nine upstream tools, ensemble forecasts default to ecmwf_ifs025_ensemble and reach 35 days, impossible dates are rejected and blank names dropped before the request, and dataframe_query returns an exact row_count under a size-bounded preview.
 
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-10-03
 
