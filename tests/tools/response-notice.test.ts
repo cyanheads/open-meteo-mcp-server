@@ -12,7 +12,9 @@ import {
   type CoverageGap,
   composeNotice,
   describeCoverageGaps,
+  describeCurrentGaps,
   findCoverageGaps,
+  findCurrentGaps,
 } from '@/mcp-server/tools/response-notice.js';
 import type { ColumnarBlock } from '@/services/open-meteo/types.js';
 
@@ -265,6 +267,16 @@ describe('describeCoverageGaps', () => {
     expect(text).toContain('units are real');
   });
 
+  it('names the location or the window as the cause of an all-null gap, not the window alone (#63)', () => {
+    // Live: hourly grass_pollen at 46.6021,-120.5059 (pollen is modeled for Europe only)
+    // and marine wave_height_max at that land point both come back all null under a
+    // real unit — the window is fine; the location is what is outside coverage.
+    const text = describeCoverageGaps([gap({ variables: ['grass_pollen'] })]);
+
+    expect(text).toContain('this location or the requested window falls outside');
+    expect(text).not.toContain('so the window falls outside');
+  });
+
   it('gives the first and last timestamp with data for a partial run', () => {
     const text = describeCoverageGaps([
       gap({
@@ -371,5 +383,88 @@ describe('describeCoverageGaps', () => {
     expect(gaps).toHaveLength(1);
     expect(gaps[0]).toMatchObject({ kind: 'partial', nullRows: 1, variables: ['pm2_5', 'pm10'] });
     expect(describeCoverageGaps(gaps)).toBeUndefined();
+  });
+});
+
+describe('findCurrentGaps (#63)', () => {
+  const units = {
+    time: 'iso8601',
+    interval: 'seconds',
+    grass_pollen: 'grains/m³',
+    pm2_5: 'μg/m³',
+  };
+
+  it('returns each requested variable that is null under a real unit', () => {
+    // Live at 46.6021,-120.5059: grass_pollen null (grains/m³) beside a real pm2_5.
+    const current = { time: '2026-10-12T10:00', interval: 3600, grass_pollen: null, pm2_5: 3.9 };
+    expect(findCurrentGaps(current, units)).toEqual(['grass_pollen']);
+  });
+
+  it('never names time or interval, even when null', () => {
+    const current = { time: null, interval: null, pm2_5: 3.9 };
+    expect(findCurrentGaps(current, units)).toEqual([]);
+  });
+
+  it('skips a key whose unit is "undefined" — its own notice already names it', () => {
+    const current = { time: 't', interval: 900, temperature_2m: 8.6, temperature_2m_max: null };
+    expect(
+      findCurrentGaps(current, {
+        time: 'iso8601',
+        interval: 'seconds',
+        temperature_2m: '°C',
+        temperature_2m_max: 'undefined',
+      }),
+    ).toEqual([]);
+  });
+
+  it('treats zero as data and reports nothing for a fully populated block', () => {
+    const current = { time: 't', interval: 3600, grass_pollen: 0, pm2_5: 3.9 };
+    expect(findCurrentGaps(current, units)).toEqual([]);
+  });
+
+  it('reports nothing when no current block was returned', () => {
+    expect(findCurrentGaps(undefined, undefined)).toEqual([]);
+  });
+
+  it('keeps upstream key order across several null variables', () => {
+    const current = {
+      time: 't',
+      interval: 900,
+      lightning_potential: null,
+      cape: 1,
+      freezing_level_height: null,
+    };
+    expect(findCurrentGaps(current, undefined)).toEqual([
+      'lightning_potential',
+      'freezing_level_height',
+    ]);
+  });
+});
+
+describe('describeCurrentGaps (#63)', () => {
+  it('names a single variable and says the null is a coverage gap, not an unserved name', () => {
+    const text = describeCurrentGaps(['lightning_potential']);
+    expect(text).toBe(
+      'No current value for lightning_potential — the value is null even though the unit is ' +
+        'real, so it has no coverage at this location and time rather than the name being unserved.',
+    );
+  });
+
+  it('agrees in number when several variables are null', () => {
+    const text = describeCurrentGaps(['grass_pollen', 'birch_pollen']);
+    expect(text).toContain('No current value for grass_pollen, birch_pollen');
+    expect(text).toContain('the values are null even though the units are real');
+    expect(text).toContain('they have no coverage');
+    expect(text).toContain('rather than the names being unserved');
+  });
+
+  it('caps the names it lists and counts the rest', () => {
+    const text = describeCurrentGaps(['a', 'b', 'c', 'd', 'e', 'f']);
+    expect(text).toContain('a, b, c, d, and 2 more');
+    expect(text).not.toContain(', e');
+  });
+
+  it('returns undefined when there is nothing to report', () => {
+    expect(describeCurrentGaps([])).toBeUndefined();
   });
 });

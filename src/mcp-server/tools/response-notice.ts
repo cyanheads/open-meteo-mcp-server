@@ -1,17 +1,17 @@
 /**
- * @fileoverview One `notice` per response, and the temporal-coverage analysis that
- * feeds it.
+ * @fileoverview One `notice` per response, and the coverage analysis that feeds it.
  *
  * `ctx.enrich.notice()` writes a single `notice` key and is last-write-wins, so the
- * three things a weather response can need to say — a requested variable came back
- * with the unit `"undefined"`, a recognized variable's window falls outside the
- * dataset's coverage, and the full row set was staged on a canvas — cannot each call
- * it. {@link composeNotice} collects the parts and writes the whole string every time
- * one arrives, so no source silently drops another and no handler has to remember an
- * emit step before each of its return paths.
+ * things a weather response can need to say — a requested variable came back with the
+ * unit `"undefined"`, a recognized variable has no data at this location or in this
+ * window, and the full row set was staged on a canvas — cannot each call it.
+ * {@link composeNotice} collects the parts and writes the whole string every time one
+ * arrives, so no source silently drops another and no handler has to remember an emit
+ * step before each of its return paths.
  *
- * The coverage analysis here is the temporal counterpart to two neighbours it is
- * deliberately not:
+ * The coverage analysis here — over a series ({@link findCoverageGaps}) or a single
+ * `current` instant ({@link findCurrentGaps}) — is the counterpart to two neighbours it
+ * is deliberately not:
  *   - `undefinedUnitColumns` in `variable-cadence.ts` catches a name the endpoint
  *     parsed but does not serve, which it reports by setting the unit to the literal
  *     string `"undefined"`. Coverage gaps carry real units (`μg/m³`, `°C`) and only
@@ -19,8 +19,10 @@
  *     does catch are excluded here rather than reported twice.
  *   - `coverageGapError` in `open-meteo-service.ts` rejects an out-of-domain
  *     *coordinate* for a regional model before a response exists. This runs on a
- *     successful HTTP 200 for an in-domain coordinate whose requested *time window*
- *     predates a dataset's archive or exceeds a model's forecast horizon.
+ *     successful HTTP 200 whose values are null anyway: a requested *time window* that
+ *     predates a dataset's archive or exceeds a model's forecast horizon, or a
+ *     *location* the dataset carries nothing for — pollen outside Europe, waves at a
+ *     land point.
  *
  * @module mcp-server/tools/response-notice
  */
@@ -91,13 +93,14 @@ export type ColumnGrouping = (column: string) => string;
 export const byEnsembleVariable: ColumnGrouping = (column) => column.replace(/_member\d+$/, '');
 
 /**
- * Temporal coverage gaps among the recognized variables of one columnar block.
+ * Coverage gaps among the recognized variables of one columnar block.
  *
  * A gap is a variable whose values are null where the response has rows, with a real
- * unit — the shape Open-Meteo returns for a window outside a dataset's coverage: an
- * archive range before the product's first data, or a forecast horizon past what the
- * selected model runs. Columns upstream marked with the unit `"undefined"` are skipped;
- * those are unserved names, already named by their own notice.
+ * unit — the shape Open-Meteo returns for a window or location outside a dataset's
+ * coverage: an archive range before the product's first data, a forecast horizon past
+ * what the selected model runs, or a point the dataset carries nothing for (pollen
+ * outside Europe, waves at a land point). Columns upstream marked with the unit
+ * `"undefined"` are skipped; those are unserved names, already named by their own notice.
  *
  * Columns are grouped by `grouping` and a group is judged on its combined values, so a
  * variable is reported once however many members or models carry it, and is reported
@@ -210,10 +213,47 @@ export function describeCoverageGaps(...gaps: readonly CoverageGap[][]): string 
     .map((gap) =>
       gap.kind === 'all-null'
         ? `No ${gap.cadence} data for ${nameList(gap.variables)} anywhere in the requested window — ` +
-          `all ${gap.totalRows} values are null even though the units are real, so the window falls ` +
-          'outside this dataset’s coverage rather than the names being unserved.'
+          `all ${gap.totalRows} values are null even though the units are real, so this location or ` +
+          'the requested window falls outside this dataset’s coverage rather than the names being unserved.'
         : `Partial ${gap.cadence} coverage for ${nameList(gap.variables)}: data runs ${gap.first} to ` +
           `${gap.last}, and ${gap.nullRows} of ${gap.totalRows} rows are null.`,
     );
   return sentences.length > 0 ? sentences.join(' ') : undefined;
+}
+
+/**
+ * The requested `current` variables that came back `null` under a real unit — the
+ * single-instant counterpart to {@link findCoverageGaps}. `time` and `interval` are
+ * metadata rather than requested variables, and a key whose unit is `"undefined"` is an
+ * unserved name already reported by its own notice, so all three are skipped.
+ */
+export function findCurrentGaps(
+  current: Record<string, unknown> | undefined,
+  units: UnitsMap | undefined,
+): string[] {
+  if (!current) return [];
+  return Object.entries(current)
+    .filter(
+      ([key, value]) =>
+        key !== 'time' && key !== 'interval' && units?.[key] !== 'undefined' && value === null,
+    )
+    .map(([key]) => key);
+}
+
+/**
+ * One sentence naming the {@link findCurrentGaps} variables, or `undefined` when there
+ * are none, so it composes straight into {@link NoticeComposer.add}. The unit is real,
+ * so the name is served — what is missing is coverage at this location and time (pollen
+ * outside Europe, say), and the null is the answer rather than a zero.
+ */
+export function describeCurrentGaps(variables: readonly string[]): string | undefined {
+  if (variables.length === 0) return;
+  const [value, unit, it, name] =
+    variables.length === 1
+      ? ['value is', 'unit is', 'it has', 'name']
+      : ['values are', 'units are', 'they have', 'names'];
+  return (
+    `No current value for ${nameList(variables)} — the ${value} null even though the ${unit} ` +
+    `real, so ${it} no coverage at this location and time rather than the ${name} being unserved.`
+  );
 }
