@@ -47,7 +47,8 @@ describe('getServerConfig', () => {
       floodBaseUrl: 'https://flood-api.open-meteo.com',
       climateBaseUrl: 'https://climate-api.open-meteo.com',
     });
-  });
+    // The first test pays the cold framework import after vi.resetModules().
+  }, 20_000);
 
   it('reads a base URL override from its env var', async () => {
     vi.stubEnv('OPEN_METEO_ARCHIVE_BASE_URL', 'http://127.0.0.1:9999');
