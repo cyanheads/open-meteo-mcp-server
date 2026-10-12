@@ -1,6 +1,6 @@
 # open-meteo-mcp-server — Idea & Requirements
 
-Global weather, climate history, and marine conditions for any coordinates via Open-Meteo — forecast (≤16 days), ERA5 reanalysis back to 1940, marine, air quality, geocoding, and elevation. No API key for non-commercial use.
+Global weather, climate history, and marine conditions for any coordinates via Open-Meteo — forecast (≤16 days), historical reanalysis back to 1940 (Best Match blend of IFS HRES, ERA5, and ERA5-Land by default), marine, air quality, geocoding, and elevation. No API key for non-commercial use.
 
 | | |
 |---|---|
@@ -14,7 +14,7 @@ Global weather, climate history, and marine conditions for any coordinates via O
 
 ## Overview
 
-Global weather via Open-Meteo's open API — forecast up to 16 days, historical reanalysis back to 1940 (ERA5), marine/wave conditions, and elevation for any coordinates on Earth. No API key for non-commercial use, no rate-limit auth, a generous fair-use ceiling.
+Global weather via Open-Meteo's open API — forecast up to 16 days, historical reanalysis back to 1940 (Best Match blend of IFS HRES, ERA5, and ERA5-Land by default), marine/wave conditions, and elevation for any coordinates on Earth. No API key for non-commercial use, no rate-limit auth, a generous fair-use ceiling.
 
 It fills the **global** gap in keyless weather coverage: a single source for forecast and 80+ years of historical weather anywhere, with consistent variable names across both. It doesn't geocode free-text place names in the weather call itself, but ships a companion geocoding endpoint so the server is self-contained — no external geocoder dependency.
 
@@ -38,7 +38,7 @@ Multiple Open-Meteo endpoints under one provider, no key. Each weather call take
 | Endpoint | Host | Purpose |
 |:---|:---|:---|
 | Forecast | `api.open-meteo.com/v1/forecast` | Hourly + daily forecast (≤16 days), optional past days, 50+ variables |
-| Historical (archive) | `archive-api.open-meteo.com/v1/archive` | ERA5 reanalysis 1940→present (~5-day lag), hourly/daily |
+| Historical (archive) | `archive-api.open-meteo.com/v1/archive` | Reanalysis 1940→present, hourly/daily. Best Match (IFS HRES + ERA5 + ERA5-Land) by default, `models` pins one source; the ERA5 family lags ~5 days, IFS HRES does not |
 | Marine | `marine-api.open-meteo.com/v1/marine` | Wave height/period/direction, swell, sea-surface temp |
 | Air Quality | `air-quality-api.open-meteo.com/v1/air-quality` | Modeled PM2.5/PM10/O3/NO2/SO2/CO, dust, pollen, AQI (CAMS) |
 | Geocoding | `geocoding-api.open-meteo.com/v1/search` | Place name → coordinates, country, admin, elevation, timezone, population |
@@ -52,7 +52,7 @@ Variables are selected explicitly (`temperature_2m`, `precipitation`, `wind_spee
 |:---|:---|
 | `openmeteo_search_locations` | Resolve a place name to ranked coordinate matches: name, country, admin1/2, lat, lon, elevation, timezone, population, feature code. Required first step for name-based queries — weather tools take coordinates. Disambiguates duplicate names by country/population. |
 | `openmeteo_forecast` | Forecast for coordinates. Hourly and/or daily variables; horizon ≤16 days; optional `past_days`. `timezone=auto` default. Returns reshaped per-timestamp records + units. Temp, precip, wind, humidity, cloud, UV, pressure, more. |
-| `openmeteo_historical` | Historical weather from the ERA5 archive (1940→present, ~5-day lag). Coordinates, date range, hourly/daily variables — same vocabulary as forecast, so past vs. forecast compare on one schema. Large ranges spill to DataCanvas. |
+| `openmeteo_historical` | Historical weather from the reanalysis archive (1940→present) — Best Match (IFS HRES + ERA5 + ERA5-Land) by default, with `models` to pin one source; the ERA5 family lags ~5 days, IFS HRES does not. Coordinates, date range, hourly/daily variables — same vocabulary as forecast, so past vs. forecast compare on one schema. Large ranges spill to DataCanvas. |
 | `openmeteo_marine` | Marine forecast for a coastal/ocean coordinate: wave height/period/direction, wind-wave and swell components, sea-surface temp. Same reshaped time-series shape. |
 | `openmeteo_air_quality` | Modeled CAMS air quality: PM2.5, PM10, O3, NO2, SO2, CO, dust, pollen, European + US AQI. **Modeled** grid data, not a measurement — cross-reference `openaq-mcp-server` for measured station data. |
 | `openmeteo_elevation` | Terrain elevation for one or more coordinates (Copernicus DEM, ~90m). Cheap geo utility. |
@@ -63,7 +63,7 @@ Variables are selected explicitly (`temperature_2m`, `precipitation`, `wind_spee
 - **Reshape columnar responses** (`time: [...]`, `temperature_2m: [...]`) into per-timestamp objects in the handler — raw parallel arrays are error-prone for an LLM to index.
 - **Air quality overlaps `openaq` deliberately** — scope this server weather-first; keep `openmeteo_air_quality` as modeled-forecast and defer measured data to OpenAQ.
 - **`timezone=auto` default** so daily aggregates align to local midnight; expose an override.
-- **Document the ERA5 ~5-day lag** so agents don't query "yesterday" against the archive and get empty — recent past is covered by `forecast` with `past_days`.
+- **Document the archive's lag by source** so agents don't query "yesterday" against a pinned ERA5 model and get empty — the ERA5 family runs ~5 days behind and IFS HRES does not; recent past is covered by `forecast` with `past_days`, or by pinning `ecmwf_ifs`.
 - DataCanvas fits `openmeteo_historical` (multi-year hourly series) and multi-location comparisons.
 - (Moonshot) climate-projection over the CMIP6 endpoint (downscaled scenarios to 2100) and the flood/river-discharge API — turns a weather server into a climate-analysis server.
 
