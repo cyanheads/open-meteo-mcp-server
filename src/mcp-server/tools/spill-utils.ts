@@ -43,7 +43,7 @@ export const INLINE_CHARS = 80_000;
  * map, nor a caller-sized fixed payload: the scalar fields (coordinates, elevation,
  * timezone, `record_count`, `model`/`models`, `member_count`, `date_range`, `canvas_id`,
  * `table_name`, `truncated`), the composed `notice`, and `format()`'s own header lines,
- * spill or no-canvas notice, section headings, and attribution footer.
+ * spill pointer or no-canvas line, section headings, and attribution footer.
  *
  * Sized against the widest of those: a climate response echoing seven model names,
  * plus a notice carrying the unit warning, a coverage gap, and the canvas pointer
@@ -418,9 +418,11 @@ export function canvasPointerLine(canvasId: string, tableName: string): string {
 }
 
 /**
- * `format()` notice for a preview bounded by {@link boundedPreview} with no canvas
+ * `notice` disclosure for a preview bounded by {@link boundedPreview} with no canvas
  * behind it — states why the response carries no `canvas_id`, how the preview was
- * selected, and both ways to reach the rows it omits.
+ * selected, and both ways to reach the rows it omits. The framework renders `notice` as
+ * a `content[]` trailer too, so `format()` carries {@link noCanvasLine} instead of a
+ * second copy.
  *
  * @param narrowing - The tool's own inputs that shrink the payload, e.g.
  * `'a shorter start_date–end_date range, or fewer daily_variables'`. Named per tool
@@ -432,6 +434,18 @@ export function noCanvasNotice(narrowing: string): string {
     'There is no canvas_id because DataCanvas is disabled on this server (CANVAS_PROVIDER_TYPE=none). ' +
     'The preview starts at the first row carrying data, so any leading all-null rows are omitted. ' +
     `To reach the full dataset, set CANVAS_PROVIDER_TYPE=duckdb and re-run, or narrow the request: ${narrowing}.`
+  );
+}
+
+/**
+ * The short `format()` pointer for the same canvas-less preview, the counterpart to
+ * {@link canvasPointerLine}: the full {@link noCanvasNotice} already reaches `content[]`
+ * once, through the notice trailer.
+ */
+export function noCanvasLine(narrowing: string): string {
+  return (
+    '⚠️ Large result — bounded preview only; no canvas_id (DataCanvas disabled). ' +
+    `Narrow the request to see the rest: ${narrowing}.`
   );
 }
 

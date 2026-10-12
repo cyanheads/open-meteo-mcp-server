@@ -17,6 +17,7 @@ import {
   exceedsInlineBudget,
   INLINE_CHARS,
   inlineBudget,
+  noCanvasLine,
   noCanvasNotice,
   stageSpill,
   unitsTrimmedNotice,
@@ -696,5 +697,28 @@ describe('noCanvasNotice', () => {
     expect(text).toContain('a shorter start_date–end_date range, or fewer daily_variables');
     // … and how the preview was picked, since it is not the chronological head.
     expect(text).toContain('first row carrying data');
+  });
+});
+
+describe('noCanvasLine (#55)', () => {
+  const levers =
+    'fewer past_days / forecast_days, or fewer current_variables / hourly_variables / daily_variables';
+
+  it('names the bounded preview, the missing canvas_id, and the tool-specific levers', () => {
+    const text = noCanvasLine(levers);
+
+    expect(text).toContain('bounded preview only');
+    expect(text).toContain('no canvas_id (DataCanvas disabled)');
+    expect(text).toContain(levers);
+  });
+
+  it('is a short pointer, not a second copy of the full disclosure', () => {
+    // format() carries this line; the notice trailer carries noCanvasNotice() once.
+    const line = noCanvasLine(levers);
+    const full = noCanvasNotice(levers);
+
+    expect(line.length).toBeLessThan(full.length / 2);
+    expect(line).not.toContain('CANVAS_PROVIDER_TYPE');
+    expect(full).not.toContain(line);
   });
 });
