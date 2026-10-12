@@ -15,8 +15,9 @@ export type UnitsMap = Record<string, string>;
 /**
  * The `current` block the forecast and air-quality endpoints return: one value per
  * requested variable at a single instant, alongside the timestamp and `interval` — the
- * model's update cadence in seconds (900 = 15 minutes), which is metadata rather than a
- * requested variable and is rendered as such.
+ * aggregation interval in seconds (900 on forecast, 3600 on air quality) that summed or
+ * averaged values cover, ending at `time`. It is metadata rather than a requested
+ * variable and is rendered as such.
  */
 export interface CurrentBlock {
   interval: number;
@@ -82,7 +83,8 @@ export interface GeocodingResponse {
 
 /** Elevation API response. */
 export interface ElevationResponse {
-  elevation: number[];
+  /** Meters, in input order; `null` where the DEM has no value for the point (upstream `nan`). */
+  elevation: (number | null)[];
   error?: boolean;
   reason?: string;
 }

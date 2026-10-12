@@ -61,13 +61,23 @@ const NAN_COORDINATE_BODY = /^\s*\{\s*"latitude"\s*:\s*nan\b/;
 const NO_DATA_REASON = /^no data is available for this location/i;
 
 /**
+ * A bare `nan` standing as an array element. The elevation endpoint writes one, with
+ * HTTP 200, for a point the Copernicus DEM has no value for (latitude 90, longitude
+ * 180) — `{"elevation":[325.0, nan]}`. Left alone it fails `JSON.parse`, is classified
+ * as a transient unparseable response, and the retry loop discards every usable
+ * reading in the batch to report an outage. Read as `null` on the elevation response
+ * only; on the gridded endpoints a stray `nan` keeps its unparseable classification.
+ */
+const NAN_ARRAY_ELEMENT = /(?<=[[,]\s*)nan(?=\s*[\],])/g;
+
+/**
  * What a caller does about either shape when the calling tool exposes `models` —
  * `openmeteo_get_ensemble`, `openmeteo_get_climate`, and `openmeteo_get_historical`, the
  * three for which choosing a different model is a move the caller can actually make.
  */
 const COVERAGE_GAP_MODEL_RECOVERY =
   'Switch to a model whose domain includes this coordinate (any global model does), or omit ' +
-  'the model to use the default blend. Retrying returns the same response.';
+  "models to use the tool's global default. Retrying returns the same response.";
 
 /**
  * Identifies the call for a coverage-gap rejection. Both shape checks fire inside
@@ -117,7 +127,7 @@ const MODEL_CAPABLE_OPERATIONS: ReadonlySet<OpenMeteoOperation> = new Set([
  * different coordinate will. Non-retryable in both branches — the same request returns
  * the same body.
  */
-function coverageGapError(origin: RequestOrigin, url: string, fromNanBody: boolean): McpError {
+function coverageGapError(origin: RequestOrigin, fromNanBody: boolean): McpError {
   const modelCapable = MODEL_CAPABLE_OPERATIONS.has(origin.operation);
   const at = origin.coordinate
     ? ` (${origin.coordinate.latitude}, ${origin.coordinate.longitude})`
@@ -133,10 +143,7 @@ function coverageGapError(origin: RequestOrigin, url: string, fromNanBody: boole
     : `The ${origin.operation} dataset's grid does not cover this coordinate — request a ` +
       'point inside its coverage. Retrying returns the same response.';
 
-  return validationError(
-    `Open-Meteo returned no data for this location${at}${shape}. ${recovery}`,
-    { url },
-  );
+  return validationError(`Open-Meteo returned no data for this location${at}${shape}. ${recovery}`);
 }
 
 /**
@@ -148,8 +155,16 @@ const RATE_LIMIT_WINDOWS =
   'Open-Meteo enforces separate per-minute, per-hour, and per-day free-tier limits, so how ' +
   'long the wait is depends on which one was reached.';
 
-/** True of every rate-limit rejection: the window reopens on a clock, not on a retry. */
+/** True of every windowed rate-limit rejection: the window reopens on a clock, not on a retry. */
 const RATE_LIMIT_RETRY = 'Retrying immediately returns the same response.';
+
+/**
+ * Open-Meteo's per-address concurrency cap also answers 429, with the reason `Too many
+ * concurrent requests`, to a request that arrives while five from the same address are
+ * already running or queued. It names no window and clears as soon as those finish.
+ */
+const CONCURRENCY_REASON = /^too many concurrent requests/i;
+const CONCURRENCY_RETRY = 'Retry in a few seconds, once the requests already in flight finish.';
 
 /**
  * The rejection for HTTP 429, built from the body when it carries an envelope.
@@ -159,8 +174,11 @@ const RATE_LIMIT_RETRY = 'Retrying immediately returns the same response.';
  * accurate and more actionable than any fixed wording this module could assert. The
  * generic branch names all three windows rather than promising one, which is what the
  * hardcoded "Retry in a minute" it replaces got wrong on a daily quota.
+ *
+ * `data.reason` names the `rate_limited` entry every upstream-calling tool declares, so
+ * the handler boundary fills that entry's `recovery` onto the wire.
  */
-function rateLimitError(text: string, url: string): McpError {
+function rateLimitError(text: string): McpError {
   let reason: string | undefined;
   try {
     const reported = (JSON.parse(text) as Record<string, unknown> | null)?.reason;
@@ -169,31 +187,55 @@ function rateLimitError(text: string, url: string): McpError {
     /* An edge 429 answers with plain text or an HTML page — the status still classifies it. */
   }
 
-  return rateLimited(
-    reason
-      ? `Open-Meteo rate limit reached: ${reason} ${RATE_LIMIT_RETRY}`
-      : `Open-Meteo rate limit reached (HTTP 429). ${RATE_LIMIT_WINDOWS} ${RATE_LIMIT_RETRY}`,
-    { url },
+  let message = `Open-Meteo rate limit reached (HTTP 429). ${RATE_LIMIT_WINDOWS} ${RATE_LIMIT_RETRY}`;
+  if (reason) {
+    const sentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
+    const next = CONCURRENCY_REASON.test(reason) ? CONCURRENCY_RETRY : RATE_LIMIT_RETRY;
+    message = `Open-Meteo rate limit reached: ${sentence} ${next}`;
+  }
+  return rateLimited(message, { reason: 'rate_limited' });
+}
+
+/**
+ * A 429 from the per-address concurrency cap — the one rate limit a short backoff can
+ * clear. Matched on the message this module wrote, which `withRetry` keeps as the
+ * prefix of the error it rethrows once the attempts run out.
+ */
+function isConcurrencyLimit(error: unknown): error is McpError {
+  return (
+    error instanceof McpError &&
+    error.code === JsonRpcErrorCode.RateLimited &&
+    error.message.includes(CONCURRENCY_RETRY)
   );
 }
 
 /**
  * Which failures the retry loop is allowed to spend attempts on.
  *
- * `RateLimited` is deliberately absent. A rate-limit window reopens on a fixed
+ * A windowed `RateLimited` is deliberately absent. Its window reopens on a fixed
  * schedule — a minute, an hour, or a day — and the whole retry budget is 1.5s of
- * backoff across three attempts, so retrying one can only ever fail three times and
- * report the outcome as an outage: this predicate replaces the framework's default
- * entirely, so an error it admits is one `withRetry` will retry.
+ * backoff across three attempts, so retrying one can only ever fail three times: this
+ * predicate replaces the framework's default entirely, so an error it admits is one
+ * `withRetry` will retry. The concurrency 429 is the exception, since it clears as soon
+ * as the address's in-flight requests finish.
  */
 function isRetryable(error: unknown): boolean {
   if (error instanceof TypeError) return true;
   if (error instanceof McpError) {
-    return [JsonRpcErrorCode.ServiceUnavailable, JsonRpcErrorCode.Timeout].includes(error.code);
+    return (
+      [JsonRpcErrorCode.ServiceUnavailable, JsonRpcErrorCode.Timeout].includes(error.code) ||
+      isConcurrencyLimit(error)
+    );
   }
   return false;
 }
 
+/**
+ * One request and the classification of its response. Request URLs never appear in
+ * error data or logs: the URL is built on an operator-configured base and reaches only
+ * `fetch`, while every error carries the message alone or a field the caller can act
+ * on (`status`, `reason`, `retryAttempts`).
+ */
 async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigin): Promise<T> {
   const signal = AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), ctx.signal]);
   let response: Response;
@@ -206,11 +248,11 @@ async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigi
     if (name === 'AbortError' || name === 'TimeoutError') {
       throw timeout(
         `Open-Meteo request timed out after ${REQUEST_TIMEOUT_MS / 1000}s.`,
-        { url },
+        undefined,
         { cause: err },
       );
     }
-    throw serviceUnavailable('Open-Meteo API unreachable.', { url }, { cause: err });
+    throw serviceUnavailable('Open-Meteo API unreachable.', undefined, { cause: err });
   }
 
   const text = await response.text();
@@ -218,31 +260,28 @@ async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigi
   // Rate limit — classified by status ahead of every body-shape check, since an edge
   // 429 can answer with an HTML page the transient guard below would otherwise retry.
   if (response.status === 429) {
-    throw rateLimitError(text, url);
+    throw rateLimitError(text);
   }
 
   // CDN error page — treat as transient
   if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
-    throw serviceUnavailable('Open-Meteo API returned HTML instead of JSON. Retry shortly.', {
-      url,
-    });
+    throw serviceUnavailable('Open-Meteo API returned HTML instead of JSON. Retry shortly.');
   }
 
   // Out-of-domain regional model — an input error wearing an unparseable body.
   // See NAN_COORDINATE_BODY. Non-retryable: the same request returns the same body.
   if (NAN_COORDINATE_BODY.test(text)) {
-    throw coverageGapError(origin, url, true);
+    throw coverageGapError(origin, true);
   }
 
+  const json = origin.operation === 'elevation' ? text.replace(NAN_ARRAY_ELEMENT, 'null') : text;
   let body: T;
   try {
-    body = JSON.parse(text) as T;
+    body = JSON.parse(json) as T;
   } catch (err) {
-    throw serviceUnavailable(
-      'Open-Meteo API returned unparseable response.',
-      { url },
-      { cause: err },
-    );
+    throw serviceUnavailable('Open-Meteo API returned unparseable response.', undefined, {
+      cause: err,
+    });
   }
 
   // Open-Meteo error envelope: { "error": true, "reason": "..." }
@@ -252,22 +291,22 @@ async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigi
   const asRecord = body as Record<string, unknown>;
   if (asRecord.error === true && response.status >= 500) {
     const reason = typeof asRecord.reason === 'string' ? asRecord.reason : 'Unknown error';
-    throw serviceUnavailable(`Open-Meteo API error: ${reason}`, { url, status: response.status });
+    throw serviceUnavailable(`Open-Meteo API error: ${reason}`, { status: response.status });
   }
 
   // See NO_DATA_REASON — the envelope half of the out-of-domain regional-model shape.
   if (asRecord.error === true && NO_DATA_REASON.test(String(asRecord.reason ?? ''))) {
-    throw coverageGapError(origin, url, false);
+    throw coverageGapError(origin, false);
   }
 
   if (!response.ok) {
     if (response.status >= 500) {
-      throw serviceUnavailable(`Open-Meteo API returned ${response.status}.`, { url });
+      throw serviceUnavailable(`Open-Meteo API returned ${response.status}.`);
     }
     // 4xx without an error envelope — throw as validation error.
     // 4xx WITH an error envelope: body is returned above so handlers can attach the contract reason.
     if (!(asRecord.error === true)) {
-      throw validationError(`Open-Meteo API returned ${response.status}.`, { url });
+      throw validationError(`Open-Meteo API returned ${response.status}.`);
     }
   }
 
@@ -279,7 +318,12 @@ function withOpenMeteoRetry<T>(url: string, ctx: Context, origin: RequestOrigin)
   return withRetry(
     async () => {
       attempts += 1;
-      if (attempts > 1) ctx.log.info('Retrying Open-Meteo request', { url, attempt: attempts - 1 });
+      if (attempts > 1) {
+        ctx.log.info('Retrying Open-Meteo request', {
+          operation: origin.operation,
+          attempt: attempts - 1,
+        });
+      }
       return await openMeteoFetch<T>(url, ctx, origin);
     },
     {
@@ -293,10 +337,19 @@ function withOpenMeteoRetry<T>(url: string, ctx: Context, origin: RequestOrigin)
       isTransient: isRetryable,
     },
   ).catch((err) => {
+    // A concurrency 429 that outlasts the retries stays a rate limit, so the caller gets
+    // its own recovery rather than an outage; `data` keeps the attempt count only.
+    if (isConcurrencyLimit(err) && !ctx.signal.aborted) {
+      throw rateLimited(
+        err.message,
+        { reason: 'rate_limited', retryAttempts: attempts },
+        { cause: err },
+      );
+    }
     if (!isRetryable(err) || ctx.signal.aborted) throw err;
     throw serviceUnavailable(
       `Open-Meteo API unavailable after ${attempts} attempt${attempts === 1 ? '' : 's'}.`,
-      { url, retryAttempts: attempts },
+      { retryAttempts: attempts },
       { cause: err },
     );
   });
@@ -509,7 +562,7 @@ export class OpenMeteoService {
     });
   }
 
-  /** Ensemble forecast endpoint — per-member hourly/daily time series up to 16 days. */
+  /** Ensemble forecast endpoint — per-member hourly/daily time series up to 35 days. */
   getEnsemble(
     lat: number,
     lon: number,
@@ -608,7 +661,11 @@ export class OpenMeteoService {
     });
   }
 
-  /** Elevation endpoint — up to 100 coordinate pairs. */
+  /**
+   * Elevation endpoint — up to 100 coordinate pairs, answered in input order. A point the
+   * DEM has no value for comes back `null`. Longitude 180 is sent as -180: the same
+   * meridian, which the DEM answers where it has no value at 180.
+   */
   getElevation(
     latitudes: number[],
     longitudes: number[],
@@ -617,7 +674,7 @@ export class OpenMeteoService {
     const { apiBaseUrl } = getServerConfig();
     const url = openMeteoUrl(`${apiBaseUrl}/v1/elevation`, {
       latitude: latitudes.map(String),
-      longitude: longitudes.map(String),
+      longitude: longitudes.map((lon) => String(lon === 180 ? -180 : lon)),
     });
     ctx.log.info('Fetching elevation', { count: latitudes.length });
     return withOpenMeteoRetry<ElevationResponse>(url, ctx, { operation: 'elevation' });
@@ -663,7 +720,7 @@ type QueryValue = string | number | string[] | undefined;
  * An empty value is omitted rather than sent as a bare `key=`. No Open-Meteo parameter
  * reads an empty value as a default: `models=` on the ensemble endpoint is rejected with
  * `No data is available for this location`, pointing the caller at the coordinate for
- * what is an empty field, where omitting `models` selects the default blend. A schema
+ * what is an empty field. A schema
  * that admits an empty string (a form-based client sending a blank field) therefore has
  * to reach the wire as an absent parameter, not an empty one.
  */

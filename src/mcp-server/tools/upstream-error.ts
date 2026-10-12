@@ -15,6 +15,22 @@
  * @module mcp-server/tools/upstream-error
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+
+/**
+ * The `rate_limited` entry every upstream-calling tool declares in its `errors` contract.
+ * The service throws it (see `rateLimitError` in `open-meteo-service.ts`), so the handler
+ * boundary fills this `recovery` onto the wire.
+ */
+export const RATE_LIMITED_ERROR = {
+  reason: 'rate_limited',
+  code: JsonRpcErrorCode.RateLimited,
+  when: 'Open-Meteo answered HTTP 429 because a free-tier request limit was reached.',
+  recovery:
+    'Wait before calling again. A per-minute, per-hour, or per-day limit reopens only when its window does (the message names which when Open-Meteo reports it), so an immediate retry gets the same rejection; "Too many concurrent requests" clears within seconds, once the requests already in flight finish.',
+  thrownBy: 'service',
+} as const;
+
 /** The upstream type-init message shape: `… from invalid String value <value>.` */
 const INVALID_VALUE_PATTERN = /from invalid String value (.+?)\.?$/;
 

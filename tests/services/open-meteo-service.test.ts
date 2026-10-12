@@ -114,7 +114,11 @@ describe('OpenMeteoService upstream classification', () => {
       )
       .catch((e: Error) => e);
 
-    expect(error).toMatchObject({ code: JsonRpcErrorCode.RateLimited });
+    // The reason the tools' rate_limited contract entries match on (#56).
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited' },
+    });
     if (!(error instanceof Error)) throw new Error('Expected getHistorical to reject');
     expect(error.message).toContain('Daily API request limit exceeded');
     expect(error.message).not.toContain('unavailable after');
@@ -133,7 +137,11 @@ describe('OpenMeteoService upstream classification', () => {
       .getForecast(47.6, -122.3, { hourly: ['temperature_2m'] }, ctx)
       .catch((e: Error) => e);
 
-    expect(error).toMatchObject({ code: JsonRpcErrorCode.RateLimited });
+    // The reason the tools' rate_limited contract entries match on (#56).
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited' },
+    });
     if (!(error instanceof Error)) throw new Error('Expected getForecast to reject');
     expect(error.message).toContain('rate limit');
     expect(error.message).toMatch(/per-minute, per-hour, and per-day/);
@@ -151,7 +159,11 @@ describe('OpenMeteoService upstream classification', () => {
       .getForecast(47.6, -122.3, { hourly: ['temperature_2m'] }, ctx)
       .catch((e: Error) => e);
 
-    expect(error).toMatchObject({ code: JsonRpcErrorCode.RateLimited });
+    // The reason the tools' rate_limited contract entries match on (#56).
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited' },
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -302,7 +314,7 @@ describe('OpenMeteoService upstream classification', () => {
   ])(
     'gives the %s endpoint the same non-model wording by construction (#45)',
     async (operation, call) => {
-      // No live case triggers the gap on these three today — their default blend has
+      // No live case triggers the gap on these two today — their default blend has
       // global coverage — so the guarantee is structural: an endpoint with no models
       // input never draws the models wording.
       respondWith('{"error":true,"reason":"No data is available for this location"}', 400);
@@ -353,7 +365,7 @@ describe('OpenMeteoService upstream classification', () => {
       expect(error.message).toContain('no data for this location');
       expect(error.message).toContain('-90, 0');
       expect(error.message).toContain('global model');
-      expect(error.message).toContain('omit the model');
+      expect(error.message).toContain("omit models to use the tool's global default");
       expect(error.message).not.toContain('grid does not cover');
       expect(fetchMock).toHaveBeenCalledTimes(1);
     },
@@ -419,6 +431,156 @@ describe('OpenMeteoService upstream classification', () => {
 
     expect(body).toMatchObject({ error: true });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('OpenMeteoService HTTP 429 (#49, #56, #75)', () => {
+  /** Open-Meteo's own 429 reasons, verbatim from its rate limiter. */
+  const MINUTE = 'Minutely API request limit exceeded. Please try again in one minute.';
+  const HOUR = 'Hourly API request limit exceeded. Please try again in the next hour.';
+  const DAY = 'Daily API request limit exceeded. Please try again tomorrow.';
+  const CONCURRENT = 'Too many concurrent requests';
+
+  const envelope = (reason: string): string => JSON.stringify({ error: true, reason });
+  const RETRY_SAME = 'Retrying immediately returns the same response.';
+  const GENERIC = `Open-Meteo rate limit reached (HTTP 429). Open-Meteo enforces separate per-minute, per-hour, and per-day free-tier limits, so how long the wait is depends on which one was reached. ${RETRY_SAME}`;
+  const CONCURRENT_MESSAGE =
+    'Open-Meteo rate limit reached: Too many concurrent requests. Retry in a few seconds, once the requests already in flight finish.';
+
+  /** Answer each request with the next `[body, status]` in turn, the last one repeating. */
+  const respondInTurn = (...responses: [string, number][]): void => {
+    let call = 0;
+    fetchMock.mockImplementation(() => {
+      const [body, status] = responses[Math.min(call++, responses.length - 1)] ?? ['', 500];
+      return Promise.resolve(new Response(body, { status }));
+    });
+  };
+
+  /** Start a forecast call; its settlement is caught so a pending rejection is never unhandled. */
+  const startForecast = (ctx = createMockContext()) =>
+    getOpenMeteoService()
+      .getForecast(47.6, -122.3, { hourly: ['temperature_2m'] }, ctx)
+      .then(
+        (body) => ({ body }),
+        (error: unknown) => ({ error }),
+      );
+
+  /** Run a forecast call to settlement, with the clock moved well past the whole backoff. */
+  const settleForecast = async () => {
+    const pending = startForecast();
+    await vi.advanceTimersByTimeAsync(10_000);
+    return pending;
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', fetchMock);
+    initOpenMeteoService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    [
+      'the minute limit',
+      envelope(MINUTE),
+      `Open-Meteo rate limit reached: ${MINUTE} ${RETRY_SAME}`,
+    ],
+    ['the hour limit', envelope(HOUR), `Open-Meteo rate limit reached: ${HOUR} ${RETRY_SAME}`],
+    ['the day limit', envelope(DAY), `Open-Meteo rate limit reached: ${DAY} ${RETRY_SAME}`],
+    [
+      'a reason with no final period',
+      envelope('Quota exhausted'),
+      `Open-Meteo rate limit reached: Quota exhausted. ${RETRY_SAME}`,
+    ],
+    ['a plain-text body', 'Too Many Requests', GENERIC],
+    ['an HTML page', '<!DOCTYPE html><html><body>429 Too Many Requests</body></html>', GENERIC],
+    ['an empty body', '', GENERIC],
+    ['an envelope with no reason', '{"error":true}', GENERIC],
+  ])(
+    'answers %s with its exact message, after one upstream call',
+    async (_label, body, message) => {
+      respondInTurn([body, 429]);
+      const outcome = await settleForecast();
+      expect(outcome).toEqual({ error: expect.any(Error) });
+      const error = (outcome as { error: Error & { code?: number; data?: unknown } }).error;
+      expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(error.message).toBe(message);
+      expect(error.data).toEqual({ reason: 'rate_limited' });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('retries the concurrency 429 on the existing backoff and returns the success', async () => {
+    respondInTurn([envelope(CONCURRENT), 429], [OK_ENSEMBLE_BODY, 200]);
+    const pending = startForecast();
+
+    await vi.advanceTimersByTimeAsync(499);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    const outcome = await pending;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(outcome).toMatchObject({ body: { hourly: { temperature_2m: [15.2] } } });
+  });
+
+  it('spends the full retry budget on a persistent concurrency 429, then reports it as RateLimited', async () => {
+    respondInTurn([envelope(CONCURRENT), 429]);
+    const pending = startForecast();
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    const { error } = (await pending) as { error: Error & { code?: number; data?: unknown } };
+    expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(error.message).toBe(`${CONCURRENT_MESSAGE} (failed after 3 attempts)`);
+    expect(error.data).toEqual({ reason: 'rate_limited', retryAttempts: 3 });
+  });
+
+  it('stops retrying a concurrency 429 once the caller cancels during the backoff', async () => {
+    respondInTurn([envelope(CONCURRENT), 429]);
+    const controller = new AbortController();
+    const pending = startForecast(createMockContext({ signal: controller.signal }));
+
+    await vi.advanceTimersByTimeAsync(100);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(10_000);
+    const outcome = await pending;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The caller's own abort reason, neither rewrapped as a rate limit nor as an outage.
+    expect(outcome).toEqual({ error: controller.signal.reason });
+  });
+
+  it('stops at a windowed 429 that follows a concurrency 429, without retrying it', async () => {
+    respondInTurn([envelope(CONCURRENT), 429], [envelope(MINUTE), 429], [OK_ENSEMBLE_BODY, 200]);
+    const outcome = await settleForecast();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const error = (outcome as { error: Error & { code?: number } }).error;
+    expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+    expect(error.message).toBe(`Open-Meteo rate limit reached: ${MINUTE} ${RETRY_SAME}`);
+  });
+
+  it('still wraps a 5xx that follows a concurrency 429 as the exhausted outage', async () => {
+    respondInTurn([envelope(CONCURRENT), 429], ['{"error":true,"reason":"upstream down"}', 503]);
+    const outcome = await settleForecast();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const error = (outcome as { error: Error & { code?: number; data?: unknown } }).error;
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.message).toBe('Open-Meteo API unavailable after 3 attempts.');
+    expect(error.data).toEqual({ retryAttempts: 3 });
   });
 });
 
@@ -670,7 +832,7 @@ describe('OpenMeteoService request encoding', () => {
      * `models` is a free-form optional string, so a form-based client can send it
      * blank. `models=` is not "no model" upstream — it draws
      * `No data is available for this location`, pointing the caller at the coordinate
-     * for what is an empty field, where an absent models selects the default blend.
+     * for what is an empty field.
      */
     const ctx = createMockContext();
     await getOpenMeteoService().getEnsemble(
@@ -695,6 +857,81 @@ describe('OpenMeteoService request encoding', () => {
     );
 
     expect(requestedUrls()[0] ?? '').toContain('past_days=0');
+  });
+});
+
+describe('OpenMeteoService elevation (#61)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('fetch', fetchMock);
+    initOpenMeteoService();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('reads a bare nan element as null, from one request with no retry', async () => {
+    // Live body for (46.6021,-120.5059) (47.6062,-122.3321) (0,0) (90,0): the DEM has no
+    // value at the pole and Open-Meteo writes a bare nan, which is not valid JSON.
+    respondWith('{"elevation":[325.0, 59.0, 0.0, nan]}');
+
+    const body = await getOpenMeteoService().getElevation(
+      [46.6021, 47.6062, 0, 90],
+      [-120.5059, -122.3321, 0, 0],
+      createMockContext(),
+    );
+
+    expect(body.elevation).toEqual([325, 59, 0, null]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads nan in any array position, including the first and a lone element', async () => {
+    respondWith('{"elevation":[nan,nan, 12.5,nan]}');
+    const body = await getOpenMeteoService().getElevation(
+      [90, 90, 1, 90],
+      [0, 1, 1, 2],
+      createMockContext(),
+    );
+    expect(body.elevation).toEqual([null, null, 12.5, null]);
+
+    respondWith('{"elevation":[nan]}');
+    const lone = await getOpenMeteoService().getElevation([90], [0], createMockContext());
+    expect(lone.elevation).toEqual([null]);
+  });
+
+  it('parses a body with no nan unchanged — real zeros and negatives included', async () => {
+    respondWith('{"elevation":[0.0, 0.0, -427.0, 128.0]}');
+    const body = await getOpenMeteoService().getElevation(
+      [0, 89.9, 31.5, 66],
+      [0, 0, 35.5, -180],
+      createMockContext(),
+    );
+    expect(body.elevation).toEqual([0, 0, -427, 128]);
+  });
+
+  it('sends longitude 180 upstream as -180, the same meridian the DEM answers', async () => {
+    respondWith('{"elevation":[128.0, 128.0, 59.0]}');
+    await getOpenMeteoService().getElevation(
+      [66, 66, 47.6062],
+      [180, -180, -122.3321],
+      createMockContext(),
+    );
+    expect(requestedUrls()[0]).toContain('longitude=-180,-180,-122.3321');
+    expect(requestedUrls()[0]).toContain('latitude=66,66,47.6062');
+  });
+
+  it('leaves nan alone on every other endpoint — an unparseable forecast body still retries', async () => {
+    // The nan read is scoped to the elevation response; a gridded endpoint's nan
+    // elsewhere in the body stays an unparseable, transient response.
+    respondWith('{"latitude":47.6,"hourly":{"time":["2026-07-30T00:00"],"temperature_2m":[nan]}}');
+
+    const error = await getOpenMeteoService()
+      .getForecast(47.6, -122.3, { hourly: ['temperature_2m'] }, createMockContext())
+      .catch((e: Error) => e);
+
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 
