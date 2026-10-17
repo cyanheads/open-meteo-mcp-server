@@ -29,7 +29,7 @@
 
 ## Overview
 
-Global weather from Open-Meteo: forecasts, the historical archive, marine conditions, air quality, probabilistic ensembles, river discharge, and CMIP6 climate projections. Geocode a place name, pull hourly and daily variables for its coordinates, and run SQL over large results staged to DataCanvas. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+Global weather from Open-Meteo: forecasts, history back to 1940, marine conditions, air quality, probabilistic ensembles, river discharge, and climate projections. Look up any place by name, pull hourly and daily variables, and run SQL over large results. No API key required.
 
 ### Tools
 
@@ -54,8 +54,8 @@ Global weather from Open-Meteo: forecasts, the historical archive, marine condit
 
 - A bare place `name` ("Paris", not "Paris, France"), with optional `country` (ISO 3166-1 alpha-2) and `language` (default `en`); `count` 1–10, default 5
 - Each result carries coordinates, an IANA `timezone`, `country` / `country_code`, `admin1` / `admin2`, `population`, and `feature_code`; no match fails as `no_results`
-- A `notice` flags a top match with null or sub-100,000 population, which is what a historic exonym ("Bangalore", "Calcutta") often resolves to
-- A native-script query that misses under `en` is retried once in the language its script implies; when that retry finds the results, `effective_language` names it (`上海` → `zh`), since their `name`, `country`, `admin1`, and `admin2` come back localized in it
+- A `notice` flags a top match with null or sub-100,000 population, which often means a historic exonym ("Bangalore", "Calcutta")
+- A native-script query that misses under `en` is retried once in the language its script implies; `effective_language` names it when the retry succeeds (`上海` → `zh`), and results come back localized
 
 ---
 
@@ -99,15 +99,15 @@ Global weather from Open-Meteo: forecasts, the historical archive, marine condit
 
 ### `openmeteo_get_ensemble` <sub>tool</sub>
 
-- At least one of `hourly_variables` / `daily_variables`; `forecast_days` 1–35 (default 7), `past_days` 0–92. Most models end within 16 days (`ncep_gefs05` runs to about day 34); past a model's horizon its columns are null and the `notice` names where its data ends. `models` takes one ensemble name (e.g. `ecmwf_ifs025_ensemble`, 51 members; `gem_global_ensemble`, 21); omitted or blank, it selects `ecmwf_ifs025_ensemble`, which the `model` field echoes
-- Each variable returns as per-member columns (`temperature_2m_member01`, …) across up to 64 members; `member_count` counts the perturbed members, not the control run
-- A regional model queried outside its coverage fails as a non-retryable input error naming the gap; switch to a global model
+- At least one of `hourly_variables` / `daily_variables`; `forecast_days` 1–35 (default 7), `past_days` 0–92. Most models end within 16 days (`ncep_gefs05` runs to about day 34); past that, columns are null and the `notice` says where data ends
+- `models` takes one ensemble name (e.g. `ecmwf_ifs025_ensemble`, 51 members; `gem_global_ensemble`, 21); omitted or blank selects `ecmwf_ifs025_ensemble`, echoed in `model`
+- Each variable returns per-member columns (`temperature_2m_member01`, …) across up to 64 members; `member_count` excludes the control run. A regional model queried outside its coverage fails as a non-retryable input error; switch to a global model
 
 ---
 
 ### `openmeteo_get_flood` <sub>tool</sub>
 
-- `daily_variables` required (up to 20), all in m³/s: `river_discharge`, the daily discharge value, and the ensemble statistics `river_discharge_mean` / `_median` / `_min` / `_max` / `_p25` / `_p75`. The statistics exist in forecast mode only; in reanalysis mode they repeat `river_discharge` and carry no spread
+- `daily_variables` required (up to 20), all in m³/s: `river_discharge` plus the statistics `river_discharge_mean` / `_median` / `_min` / `_max` / `_p25` / `_p75`, which carry spread in forecast mode only (in reanalysis they repeat `river_discharge`)
 - One mode per call: `forecast_days` 1–210, or a `start_date` / `end_date` reanalysis range from 1984-01-01. Mixing them fails as `forecast_days_conflict`, a lone date as `date_range_incomplete`
 - Discharge comes from the largest modeled river within 5 km, not always the closest; vary the coordinate by ~0.1° when a value looks off. Null outside GloFAS coverage
 
@@ -129,8 +129,8 @@ Global weather from Open-Meteo: forecasts, the historical archive, marine condit
 
 ### `openmeteo_dataframe_query` <sub>tool</sub>
 
-- `canvas_id` plus a read-only `SELECT` against the staged `table_name`; `rows` holds up to 100 leading rows, fewer when wide rows would take the response past its 80,000-character inline ceiling (values are never cut). `row_count` is the exact total, so continue at `OFFSET <rows.length>`, under an `ORDER BY` for a stable order
-- If counting the full result fails or runs past 5 seconds, the rows still return, `row_count` is a lower bound, and `count_error` names the reason (e.g. `count_timeout`)
+- `canvas_id` plus a read-only `SELECT` against the staged `table_name`; `rows` holds up to 100 rows, fewer when wide rows would pass the 80,000-character inline ceiling (values are never cut). `row_count` is the exact total; page with `OFFSET <rows.length>` under an `ORDER BY`
+- If the count fails or runs past 5 seconds, rows still return, `row_count` is a lower bound, and `count_error` names the reason (e.g. `count_timeout`)
 - Fails as `canvas_not_enabled`, `canvas_not_found`, `missing_table`, `system_catalog_access` (system catalogs are blocked), or `row_too_large` (the first row alone exceeds the ceiling: select fewer columns, or shorten values with `left()`, `substr()`, or `list_slice()`)
 
 ---
@@ -149,15 +149,15 @@ Open-Meteo-specific:
 
 - No API key for non-commercial use; commercial use requires Open-Meteo's paid API tier
 - Columnar API responses reshaped into per-timestamp records with `*_units` maps, on the same variable names across forecast and archive
-- DataCanvas spillover on the seven weather tools (forecast, historical, marine, air quality, ensemble, flood, climate): with `CANVAS_PROVIDER_TYPE=duckdb` an over-budget result is staged as a DuckDB table and the response carries `canvas_id`, `table_name`, and `truncated: true`; with the default `none` it returns a bounded preview and `truncated: true`
+- DataCanvas spillover on the seven weather tools: with `CANVAS_PROVIDER_TYPE=duckdb` an over-budget result is staged as a DuckDB table (response carries `canvas_id`, `table_name`, `truncated: true`); with the default `none` it returns a bounded preview and `truncated: true`
 - `models` on the historical, ensemble, and climate tools is not an allowlist, so a model Open-Meteo adds later works without a server update
 
 Agent-friendly output:
 
 - Location-first workflow: `openmeteo_search_locations` returns the IANA `timezone` alongside coordinates, ready for any weather tool's `timezone` input (default `auto`)
-- Typed rejections: a variable passed under the wrong cadence fails as `variable_wrong_cadence` before the upstream call, naming the field it belongs in; an over-wide request fails as `request_too_large`, naming the inputs to narrow; an upstream rate limit fails as `rate_limited` on every upstream-calling tool, and only `Too many concurrent requests`, which clears within seconds, is retried first
-- Request URLs never appear in error data or in the log records the client receives
-- One `notice` per response for what the data alone won't show: variable names the endpoint doesn't serve, null values from a location or window outside a dataset's coverage, and where spilled rows went
+- Typed rejections: `variable_wrong_cadence` (names the correct field), `request_too_large` (names the inputs to narrow), and `rate_limited`; only `Too many concurrent requests` is retried first
+- Request URLs never appear in error data or client-visible logs
+- One `notice` per response for what the data alone won't show: unserved variable names, nulls outside a dataset's coverage, and where spilled rows went
 
 ## Getting started
 
