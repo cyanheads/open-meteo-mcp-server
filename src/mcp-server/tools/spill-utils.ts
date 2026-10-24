@@ -330,7 +330,7 @@ export function boundedPreview<T extends Record<string, unknown>>(
   const firstUseful = records.findIndex(hasNonNullValue);
   const rows: T[] = [];
   let chars = 0;
-  for (const row of records.slice(firstUseful < 0 ? 0 : firstUseful)) {
+  for (const row of records.slice(Math.max(firstUseful, 0))) {
     chars += recordCost(row);
     if (chars > budget && rows.length > 0) break;
     rows.push(row);
