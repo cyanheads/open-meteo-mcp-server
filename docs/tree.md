@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-10-12 18:59:41
+Generated on: 2026-10-24 09:34:28
 
 ```text
 open-meteo-mcp-server/
@@ -171,6 +171,7 @@ open-meteo-mcp-server/
 │   │       └── variable-cadence.ts
 │   ├── services/
 │   │   ├── open-meteo/
+│   │   │   ├── coverage-gap.ts
 │   │   │   ├── open-meteo-service.ts
 │   │   │   └── types.ts
 │   │   └── canvas-accessor.ts
@@ -185,9 +186,11 @@ open-meteo-mcp-server/
 │   │   ├── inline-surface.ts
 │   │   ├── marker-config.ts
 │   │   ├── no-canvas.ts
+│   │   ├── upstream-calls.ts
 │   │   ├── upstream-spy.ts
 │   │   └── wire-error.ts
 │   ├── integration/
+│   │   ├── index-canvas-default.int.test.ts
 │   │   └── search-locations-contract.int.test.ts
 │   ├── prompts/
 │   ├── resources/
@@ -221,6 +224,7 @@ open-meteo-mcp-server/
 │       ├── spill-utils.test.ts
 │       ├── tool-surface.test.ts
 │       ├── upstream-error.test.ts
+│       ├── upstream-failure-contract.test.ts
 │       └── variable-cadence.test.ts
 ├── .dockerignore
 ├── .env.example

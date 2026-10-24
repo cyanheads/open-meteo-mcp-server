@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-10-24
+
+openmeteo_get_forecast and openmeteo_get_flood take a models input, openmeteo_get_marine adds current_variables and unit inputs, openmeteo_get_elevation accepts up to 1,000 pairs, and DataCanvas is on by default (CANVAS_PROVIDER_TYPE=none disables it).
+
 ## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-10-12
 
 Upstream rate limits fail as a declared rate_limited error on all nine upstream tools, ensemble forecasts default to ecmwf_ifs025_ensemble and reach 35 days, impossible dates are rejected and blank names dropped before the request, and dataframe_query returns an exact row_count under a size-bounded preview.
