@@ -11,6 +11,11 @@ import {
   ENSEMBLE_MODEL_LIST,
   ENSEMBLE_MODEL_NAMES,
   ENSEMBLE_MODELS,
+  FLOOD_MODEL_LIST,
+  FLOOD_MODEL_NAMES,
+  FLOOD_MODELS,
+  FORECAST_MODEL_NAMES,
+  FORECAST_MODELS,
 } from '@/mcp-server/tools/model-catalog.js';
 
 describe('catalog contents', () => {
@@ -49,5 +54,37 @@ describe('catalog contents', () => {
     expect(ENSEMBLE_MODEL_NAMES).toContain('gem_global_ensemble');
     expect(ENSEMBLE_MODEL_NAMES).not.toContain('(');
     expect(CLIMATE_MODEL_LIST.split(', ')).toEqual([...CLIMATE_MODELS]);
+    expect(FORECAST_MODEL_NAMES.split(', ')).toEqual([...FORECAST_MODELS]);
+  });
+
+  it('publishes the 57 deterministic models the forecast docs page emits (#80)', () => {
+    expect(FORECAST_MODELS).toHaveLength(57);
+    expect(new Set(FORECAST_MODELS).size).toBe(FORECAST_MODELS.length);
+    expect(FORECAST_MODELS[0]).toBe('best_match');
+    // The published, provider-prefixed spellings — the older short ones still resolve upstream.
+    for (const name of [
+      'ncep_gfs_seamless',
+      'dwd_icon_seamless',
+      'cmc_gem_seamless',
+      'ecmwf_ifs025',
+    ]) {
+      expect(FORECAST_MODELS).toContain(name);
+    }
+    expect(FORECAST_MODELS).not.toContain('gfs_seamless');
+  });
+
+  it('publishes the three GloFAS v4 models with their spans, seamless_v4 first as the default (#79)', () => {
+    expect(FLOOD_MODELS.map((m) => m.name)).toEqual([
+      'seamless_v4',
+      'consolidated_v4',
+      'forecast_v4',
+    ]);
+    // The frozen v3 dataset passes through upstream but is not advertised.
+    expect(FLOOD_MODEL_NAMES).toBe('seamless_v4, consolidated_v4, forecast_v4');
+    expect(FLOOD_MODEL_LIST).toContain(
+      'seamless_v4 (default — consolidated_v4 reanalysis before 2023-08-05, forecast_v4 runs from 2023-08-05 into the live forecast)',
+    );
+    expect(FLOOD_MODEL_LIST).toContain('consolidated_v4 (reanalysis from 1984 through 2025-05-31');
+    expect(FLOOD_MODEL_LIST).toContain('forecast_v4 (forecast runs from 2023-06-01');
   });
 });

@@ -8,7 +8,11 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import type { GeocodingResult } from '@/services/open-meteo/types.js';
-import { RATE_LIMITED_ERROR } from '../upstream-error.js';
+import {
+  RATE_LIMITED_ERROR,
+  UPSTREAM_TIMEOUT_ERROR,
+  UPSTREAM_UNAVAILABLE_ERROR,
+} from '../upstream-error.js';
 
 /**
  * Infer a geocoding language from the dominant script of the query. The API
@@ -92,6 +96,8 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
       retryable: false,
     },
     RATE_LIMITED_ERROR,
+    UPSTREAM_UNAVAILABLE_ERROR,
+    UPSTREAM_TIMEOUT_ERROR,
   ],
 
   input: z.object({

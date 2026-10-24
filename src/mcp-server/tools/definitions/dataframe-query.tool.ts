@@ -222,7 +222,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     sql: z
       .string()
       .describe(
-        "Read-only SELECT statement. Reference table names from openmeteo_dataframe_describe. Example: SELECT AVG(temperature_2m) AS avg_temp, strftime(time, '%Y-%m') AS month FROM spilled_abc123 GROUP BY month ORDER BY month",
+        "Read-only SELECT statement. Reference table names from openmeteo_dataframe_describe; in the examples below, replace <table_name> with a staged table and <column> with one of its columns. time is ISO 8601 text — YYYY-MM-DDTHH:MM on hourly rows, YYYY-MM-DD on daily rows — as are daily sunrise and sunset, so date functions need a cast: CAST(time AS TIMESTAMP). WHERE time LIKE '%T%' selects the hourly rows of a table that holds both cadences. Monthly means: `SELECT strftime(CAST(time AS TIMESTAMP), '%Y-%m') AS month, AVG(<column>) AS mean FROM <table_name> GROUP BY month ORDER BY month`. An openmeteo_get_ensemble table carries one column per member (precipitation_member01, precipitation_member02, …) beside the unsuffixed control run; count members per row with `SELECT time, list_count(list_filter([*COLUMNS('^precipitation_member\\d+$')], lambda x: x > 0.5)) AS members_over, list_count([*COLUMNS('^precipitation_member\\d+$')]) AS members_reporting FROM <table_name> ORDER BY time` — the anchored pattern leaves out the control column, and members_reporting is the per-row denominator, since rows past a model's last forecast hour carry no member values. Write lambdas with the lambda x: syntax.",
       ),
   }),
 

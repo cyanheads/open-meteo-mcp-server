@@ -51,16 +51,20 @@ const forecast = (ctx: Context) =>
 type ChainLink = ReturnType<typeof mcpChain>[number];
 
 /**
- * The chain a retried failure ends as: the service's exhaustion error, wrapping the
- * framework `withRetry` exhaustion error (which spreads the last attempt's `data`),
- * wrapping the last attempt's own error.
+ * The chain a retried failure ends as: the service's exhaustion error (its reason named
+ * by the last attempt's code), wrapping the framework `withRetry` exhaustion error (which
+ * spreads the last attempt's `data`), wrapping the last attempt's own error.
  */
 function exhausted(last: ChainLink): ChainLink[] {
   return [
     {
       code: JsonRpcErrorCode.ServiceUnavailable,
       message: 'Open-Meteo API unavailable after 3 attempts.',
-      data: { retryAttempts: 3 },
+      data: {
+        reason:
+          last.code === JsonRpcErrorCode.Timeout ? 'upstream_timeout' : 'upstream_unavailable',
+        retryAttempts: 3,
+      },
     },
     {
       code: last.code,
@@ -135,7 +139,7 @@ describe('OpenMeteoService keeps request URLs out of error data and logs (#59)',
           code: JsonRpcErrorCode.ValidationError,
           message:
             "Open-Meteo returned no data for this location (47.6, -122.3) — the response carried nan coordinates and no data blocks, which is how a regional model reports a coordinate outside the area it covers. Switch to a model whose domain includes this coordinate (any global model does), or omit models to use the tool's global default. Retrying returns the same response.",
-          data: {},
+          data: { reason: 'coverage_gap' },
         },
       ],
     },
@@ -151,7 +155,7 @@ describe('OpenMeteoService keeps request URLs out of error data and logs (#59)',
           code: JsonRpcErrorCode.ValidationError,
           message:
             "Open-Meteo returned no data for this location (-90, 0). The marine dataset's grid does not cover this coordinate — request a point inside its coverage. Retrying returns the same response.",
-          data: {},
+          data: { reason: 'coverage_gap' },
         },
       ],
     },
@@ -310,13 +314,21 @@ describe('OpenMeteoService keeps request URLs out of error data and logs (#59)',
     expect(String(fetchMock.mock.calls[0]?.[0]).slice(0, prefix.length)).toBe(prefix);
   });
 
-  it('carries no reason on a forecast coverage-gap error — only a 429 is tagged (#56)', async () => {
+  it('tags a forecast coverage gap coverage_gap and nothing else, whichever tool declares it (#77, #80)', async () => {
+    // The tag is the service's, independent of the endpoint: a tool that declares
+    // coverage_gap gets its recovery filled; one that does not still sees the reason.
+    // The forecast endpoint takes models, so its message carries the switch-models recovery.
     respondWith('{"error":true,"reason":"No data is available for this location"}', 400);
 
     const error = await forecast(createMockContext()).catch((e: unknown) => e);
 
-    const chain = mcpChain(error);
-    expect(chain.length).toBeGreaterThan(0);
-    for (const link of chain) expect((link.data as { reason?: unknown }).reason).toBeUndefined();
+    expect(mcpChain(error)).toEqual([
+      {
+        code: JsonRpcErrorCode.ValidationError,
+        message:
+          "Open-Meteo returned no data for this location (47.6, -122.3). Switch to a model whose domain includes this coordinate (any global model does), or omit models to use the tool's global default. Retrying returns the same response.",
+        data: { reason: 'coverage_gap' },
+      },
+    ]);
   });
 });

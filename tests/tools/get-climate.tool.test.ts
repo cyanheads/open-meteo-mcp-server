@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetClimateTool } from '@/mcp-server/tools/definitions/get-climate.tool.js';
+import { CLIMATE_MODELS } from '@/mcp-server/tools/model-catalog.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
@@ -580,6 +581,11 @@ describe('openmeteoGetClimateTool', () => {
       message: expect.stringMatching(/^Unknown variable or model name: bogus_var\./),
       data: { reason: 'invalid_variable' },
     });
+    // No models went upstream, so the rejected name is a variable: the hint lists no models.
+    const hint = (await wireError(openmeteoGetClimateTool, input)).data?.recovery?.hint ?? '';
+    expect(hint).toMatch(/^Check names against Open-Meteo Climate API docs\./);
+    expect(hint).not.toContain('Documented models');
+    for (const model of CLIMATE_MODELS) expect(hint).not.toContain(model);
   });
 
   it('throws date_out_of_range when API returns the "Invalid date" error envelope', async () => {
@@ -907,7 +913,7 @@ describe('openmeteoGetClimateTool', () => {
   });
   it('bounds the preview and sets truncated=true when the payload is oversized and canvas is disabled', async () => {
     // #28: the budget check used to act only inside the `if (canvas)` branch, so a
-    // default deployment (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
+    // deployment with DataCanvas off (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
     // inline return carrying truncated: false — the field a client reads to decide
     // whether anything is missing.
     const time = dailyDates(7670);

@@ -1,9 +1,15 @@
 /**
- * @fileoverview Frames Open-Meteo upstream error `reason` strings for the two rejections
- * every time-series tool has to tell apart: an unknown variable or model name, and a
- * request whose sheer volume upstream refuses. Both arrive in the same
- * `{"error":true,"reason":…}` envelope with no machine-readable code, so the reason
- * string is all there is to classify on.
+ * @fileoverview Upstream-failure contract entries the tools share, and the framing of
+ * Open-Meteo error `reason` strings.
+ *
+ * The entries cover the failures `OpenMeteoService` raises below every handler and tags
+ * with `data.reason` — a 429, a coverage gap, and a retry ladder that runs out — so the
+ * handler boundary fills each declaring tool's `recovery` onto the wire.
+ *
+ * The framing covers the two rejections every time-series tool has to tell apart: an
+ * unknown variable or model name, and a request whose sheer volume upstream refuses.
+ * Both arrive in the same `{"error":true,"reason":…}` envelope with no machine-readable
+ * code, so the reason string is all there is to classify on.
  *
  * The forecast/archive-family endpoints reject unknown variable names with
  * an internal Swift type-init message ("Data corrupted at path ''. Cannot initialize
@@ -16,6 +22,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { coverageGapRecovery } from '@/services/open-meteo/coverage-gap.js';
 
 /**
  * The `rate_limited` entry every upstream-calling tool declares in its `errors` contract.
@@ -30,6 +37,52 @@ export const RATE_LIMITED_ERROR = {
     'Wait before calling again. A per-minute, per-hour, or per-day limit reopens only when its window does (the message names which when Open-Meteo reports it), so an immediate retry gets the same rejection; "Too many concurrent requests" clears within seconds, once the requests already in flight finish.',
   thrownBy: 'service',
 } as const;
+
+/**
+ * The `upstream_unavailable` entry every upstream-calling tool declares: the service's
+ * three attempts all failed on an unreachable host, a 5xx, or an unreadable body (a CDN
+ * HTML page, malformed JSON), and the last of them was not a timeout.
+ */
+export const UPSTREAM_UNAVAILABLE_ERROR = {
+  reason: 'upstream_unavailable',
+  code: JsonRpcErrorCode.ServiceUnavailable,
+  when: 'Open-Meteo was unreachable, answered with a server error, or returned an unreadable response on all three attempts.',
+  recovery:
+    'Open-Meteo is unavailable right now, and this call already made three attempts. Wait a minute or two, then call again with the same arguments.',
+  thrownBy: 'service',
+} as const;
+
+/**
+ * The `upstream_timeout` entry every upstream-calling tool declares: the same exhausted
+ * ladder, ending on the 15 s per-attempt timeout. A slow answer can be the request's own
+ * size, so the recovery offers asking for less beside waiting.
+ */
+export const UPSTREAM_TIMEOUT_ERROR = {
+  reason: 'upstream_timeout',
+  code: JsonRpcErrorCode.ServiceUnavailable,
+  when: 'Open-Meteo failed on all three attempts, and the last one got no answer within 15 seconds.',
+  recovery:
+    'Wait a minute, then call again. If the request is large, ask for less in one call (fewer variables, models, or coordinates, or a shorter date range or forecast window) so it can finish in time.',
+  thrownBy: 'service',
+} as const;
+
+/** The endpoints whose tools reach a coverage gap and declare `coverage_gap`. */
+type CoverageGapOperation = 'forecast' | 'ensemble' | 'historical' | 'marine' | 'flood';
+
+/**
+ * The `coverage_gap` entry for a tool that reaches the gap. Its recovery is the sentence
+ * the service already writes into the rejection's message for that endpoint, so the
+ * handler boundary fills the hint without `content[]` stating it twice.
+ */
+export function coverageGapContract(operation: CoverageGapOperation) {
+  return {
+    reason: 'coverage_gap',
+    code: JsonRpcErrorCode.ValidationError,
+    when: 'Open-Meteo has no data at this coordinate for the requested dataset or model, because its grid or domain does not reach the point.',
+    recovery: coverageGapRecovery(operation),
+    thrownBy: 'service',
+  } as const;
+}
 
 /** The upstream type-init message shape: `… from invalid String value <value>.` */
 const INVALID_VALUE_PATTERN = /from invalid String value (.+?)\.?$/;
@@ -59,8 +112,9 @@ function extractInvalidValues(upstreamReason: string | undefined): string[] {
  *
  * @param upstreamReason - Raw `reason` from the Open-Meteo error envelope.
  * @param label - What kind of name was rejected — "variable" for most tools,
- *   "variable or model" for the ensemble and climate endpoints (their `models`
- *   parameter is rejected through the same envelope).
+ *   "variable or model" for the endpoints whose tool takes `models` — historical,
+ *   ensemble, climate, flood ("discharge variable or model"), and forecast when
+ *   models were sent (their `models` parameter is rejected through the same envelope).
  */
 export function frameInvalidVariableMessage(
   upstreamReason: string | undefined,
@@ -87,6 +141,20 @@ export function frameInvalidVariableMessage(
 
   const guidance = `The API rejected a requested ${label} name. Check that every name is an exact Open-Meteo API name and retry.`;
   return raw ? `${guidance} (Upstream: ${raw})` : guidance;
+}
+
+/**
+ * The declared `invalid_variable` recovery of a tool that takes `models`: its own
+ * `variableRecovery` plus the documented model list. A call that sent no models can only
+ * have had a variable rejected, so its handler hints `variableRecovery` alone.
+ *
+ * @param documentedModels - The catalog's comma-joined model names.
+ */
+export function variableOrModelRecovery(
+  variableRecovery: string,
+  documentedModels: string,
+): string {
+  return `${variableRecovery} Documented models: ${documentedModels}. When the message names one model, correct only that one — the rest of the models list is valid.`;
 }
 
 /**

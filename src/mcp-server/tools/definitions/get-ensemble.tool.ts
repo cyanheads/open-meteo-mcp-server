@@ -44,10 +44,13 @@ import {
   isInvalidTimezoneReason,
 } from '../timezone-input.js';
 import {
+  coverageGapContract,
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
+  UPSTREAM_TIMEOUT_ERROR,
+  UPSTREAM_UNAVAILABLE_ERROR,
 } from '../upstream-error.js';
 import {
   describeCadenceMismatches,
@@ -179,7 +182,10 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         'Narrow the request and retry: fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or a models value with fewer members where the message names one. Every requested name and the model are valid — the size of the request is what was rejected.',
       retryable: false,
     },
+    coverageGapContract('ensemble'),
     RATE_LIMITED_ERROR,
+    UPSTREAM_UNAVAILABLE_ERROR,
+    UPSTREAM_TIMEOUT_ERROR,
   ],
 
   input: z.object({
@@ -517,7 +523,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       }
 
       /*
-       * No canvas (CANVAS_PROVIDER_TYPE=none, the default): bound the preview anyway.
+       * No canvas (CANVAS_PROVIDER_TYPE=none): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
        * multi-megabyte member fan-out. Same per-cadence preview selection the canvas
        * branch uses, so both paths return the same rows for the same records.

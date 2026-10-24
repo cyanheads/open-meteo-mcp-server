@@ -17,6 +17,7 @@ import {
 } from '@cyanheads/mcp-ts-core/errors';
 import { withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import { coverageGapRecovery, isModelCapable, type OpenMeteoOperation } from './coverage-gap.js';
 import type {
   ElevationResponse,
   EnsembleEnvelope,
@@ -71,15 +72,6 @@ const NO_DATA_REASON = /^no data is available for this location/i;
 const NAN_ARRAY_ELEMENT = /(?<=[[,]\s*)nan(?=\s*[\],])/g;
 
 /**
- * What a caller does about either shape when the calling tool exposes `models` —
- * `openmeteo_get_ensemble`, `openmeteo_get_climate`, and `openmeteo_get_historical`, the
- * three for which choosing a different model is a move the caller can actually make.
- */
-const COVERAGE_GAP_MODEL_RECOVERY =
-  'Switch to a model whose domain includes this coordinate (any global model does), or omit ' +
-  "models to use the tool's global default. Retrying returns the same response.";
-
-/**
  * Identifies the call for a coverage-gap rejection. Both shape checks fire inside
  * {@link openMeteoFetch}, which sees only the built URL, so the two facts the message
  * needs travel with the call: which endpoint asked, and the coordinate it asked about.
@@ -97,38 +89,17 @@ interface RequestOrigin {
   operation: OpenMeteoOperation;
 }
 
-type OpenMeteoOperation =
-  | 'geocode'
-  | 'forecast'
-  | 'historical'
-  | 'marine'
-  | 'air-quality'
-  | 'ensemble'
-  | 'flood'
-  | 'climate'
-  | 'elevation';
-
-/**
- * The endpoints whose tool takes a `models` input. `historical` belongs here because the
- * archive's `cerra` model is Europe-only: requested elsewhere it reaches the coverage-gap
- * shapes above, and switching models is the fix — not a different coordinate.
- */
-const MODEL_CAPABLE_OPERATIONS: ReadonlySet<OpenMeteoOperation> = new Set([
-  'ensemble',
-  'climate',
-  'historical',
-]);
-
 /**
  * The coverage-gap rejection for either shape. The recovery half splits on whether the
- * calling endpoint exposes `models`: on the three that do, "switch models" is actionable;
- * on every other endpoint it names a parameter the tool has no input for, so the honest
- * statement is that the dataset's grid does not reach the coordinate and only a
- * different coordinate will. Non-retryable in both branches — the same request returns
- * the same body.
+ * calling endpoint exposes `models` (see {@link coverageGapRecovery}). Non-retryable in
+ * both branches — the same request returns the same body.
+ *
+ * `data.reason` names the `coverage_gap` entry the tools that reach a gap declare with
+ * this same recovery sentence, so the handler boundary fills it onto the wire and
+ * `content[]` still states it once.
  */
 function coverageGapError(origin: RequestOrigin, fromNanBody: boolean): McpError {
-  const modelCapable = MODEL_CAPABLE_OPERATIONS.has(origin.operation);
+  const modelCapable = isModelCapable(origin.operation);
   const at = origin.coordinate
     ? ` (${origin.coordinate.latitude}, ${origin.coordinate.longitude})`
     : '';
@@ -138,12 +109,10 @@ function coverageGapError(origin: RequestOrigin, fromNanBody: boolean): McpError
         ? 'a regional model reports a coordinate outside the area it covers'
         : 'the endpoint reports a coordinate outside the grid it covers')
     : '';
-  const recovery = modelCapable
-    ? COVERAGE_GAP_MODEL_RECOVERY
-    : `The ${origin.operation} dataset's grid does not cover this coordinate — request a ` +
-      'point inside its coverage. Retrying returns the same response.';
-
-  return validationError(`Open-Meteo returned no data for this location${at}${shape}. ${recovery}`);
+  return validationError(
+    `Open-Meteo returned no data for this location${at}${shape}. ${coverageGapRecovery(origin.operation)}`,
+    { reason: 'coverage_gap' },
+  );
 }
 
 /**
@@ -231,6 +200,29 @@ function isRetryable(error: unknown): boolean {
 }
 
 /**
+ * Classifies a transport failure from either phase of an attempt: waiting for headers
+ * (refused, reset, DNS) or reading the body after they arrived (a reset mid-body). The
+ * per-attempt timeout spans both phases, and on Node and Bun alike it rejects the body
+ * read with the timer's own `TimeoutError` `DOMException` — which the retry predicate
+ * does not admit — so both phases map to the same `Timeout`. The caller's own abort is
+ * returned untouched in either phase, so it surfaces as cancellation.
+ */
+function transportError(err: unknown, ctx: Context, phase: 'request' | 'body'): unknown {
+  if (ctx.signal.aborted) return err;
+  const name = err instanceof Error ? err.name : '';
+  if (name === 'AbortError' || name === 'TimeoutError') {
+    return timeout(`Open-Meteo request timed out after ${REQUEST_TIMEOUT_MS / 1000}s.`, undefined, {
+      cause: err,
+    });
+  }
+  const message =
+    phase === 'request'
+      ? 'Open-Meteo API unreachable.'
+      : 'Open-Meteo response was cut off before the body finished.';
+  return serviceUnavailable(message, undefined, { cause: err });
+}
+
+/**
  * One request and the classification of its response. Request URLs never appear in
  * error data or logs: the URL is built on an operator-configured base and reaches only
  * `fetch`, while every error carries the message alone or a field the caller can act
@@ -239,23 +231,18 @@ function isRetryable(error: unknown): boolean {
 async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigin): Promise<T> {
   const signal = AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), ctx.signal]);
   let response: Response;
+  let text: string;
 
   try {
     response = await fetch(url, { signal });
   } catch (err) {
-    if (ctx.signal.aborted) throw err;
-    const name = err instanceof Error ? err.name : '';
-    if (name === 'AbortError' || name === 'TimeoutError') {
-      throw timeout(
-        `Open-Meteo request timed out after ${REQUEST_TIMEOUT_MS / 1000}s.`,
-        undefined,
-        { cause: err },
-      );
-    }
-    throw serviceUnavailable('Open-Meteo API unreachable.', undefined, { cause: err });
+    throw transportError(err, ctx, 'request');
   }
-
-  const text = await response.text();
+  try {
+    text = await response.text();
+  } catch (err) {
+    throw transportError(err, ctx, 'body');
+  }
 
   // Rate limit — classified by status ahead of every body-shape check, since an edge
   // 429 can answer with an HTML page the transient guard below would otherwise retry.
@@ -347,9 +334,20 @@ function withOpenMeteoRetry<T>(url: string, ctx: Context, origin: RequestOrigin)
       );
     }
     if (!isRetryable(err) || ctx.signal.aborted) throw err;
+    /**
+     * One outage message whatever the ladder hit, but the reason follows the last
+     * attempt: a run that ended on the per-attempt timeout is one a smaller request may
+     * clear, so it names its own entry — whether it fired before the headers or during
+     * the body read. `withRetry` keeps the last attempt's code on the error it rethrows;
+     * anything else it admitted is an outage.
+     */
+    const reason =
+      err instanceof McpError && err.code === JsonRpcErrorCode.Timeout
+        ? 'upstream_timeout'
+        : 'upstream_unavailable';
     throw serviceUnavailable(
       `Open-Meteo API unavailable after ${attempts} attempt${attempts === 1 ? '' : 's'}.`,
-      { retryAttempts: attempts },
+      { reason, retryAttempts: attempts },
       { cause: err },
     );
   });
@@ -365,6 +363,12 @@ export interface ForecastParams {
   daily?: string[] | undefined;
   forecast_days?: number | undefined;
   hourly?: string[] | undefined;
+  /**
+   * Deterministic models to read from. Omitted selects Open-Meteo's `best_match`; with 2+
+   * names every hourly and daily column comes back suffixed with the model, while
+   * `current` stays one unsuffixed block from the first listed model covering the point.
+   */
+  models?: string[] | undefined;
   past_days?: number | undefined;
   precipitation_unit?: string | undefined;
   temperature_unit?: string | undefined;
@@ -395,13 +399,21 @@ export interface HistoricalParams {
  * combination outright. Tool handlers pick one set before calling.
  */
 export interface MarineParams {
+  /** Variables to return at the current instant, forwarded as the upstream `current`. */
+  current?: string[] | undefined;
   daily?: string[] | undefined;
   end_date?: string | undefined;
   forecast_days?: number | undefined;
   hourly?: string[] | undefined;
+  /** `imperial` returns wave, swell, and sea-level heights in ft; omitted means m. */
+  length_unit?: string | undefined;
   past_days?: number | undefined;
   start_date?: string | undefined;
+  /** Unit of `sea_surface_temperature`; omitted means °C. */
+  temperature_unit?: string | undefined;
   timezone?: string | undefined;
+  /** Unit of `ocean_current_velocity`; omitted means km/h. */
+  wind_speed_unit?: string | undefined;
 }
 
 export interface AirQualityParams {
@@ -431,6 +443,7 @@ export interface FloodParams {
   daily: string[];
   end_date?: string | undefined;
   forecast_days?: number | undefined;
+  models?: string[] | undefined;
   start_date?: string | undefined;
   timezone?: string | undefined;
 }
@@ -484,7 +497,12 @@ export class OpenMeteoService {
   ): Promise<WeatherEnvelope> {
     const { apiBaseUrl } = getServerConfig();
     const url = buildWeatherUrl(`${apiBaseUrl}/v1/forecast`, lat, lon, params);
-    ctx.log.info('Fetching forecast', { lat, lon, forecast_days: params.forecast_days });
+    ctx.log.info('Fetching forecast', {
+      lat,
+      lon,
+      forecast_days: params.forecast_days,
+      models: params.models,
+    });
     return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, {
       operation: 'forecast',
       coordinate: { latitude: lat, longitude: lon },
@@ -596,13 +614,17 @@ export class OpenMeteoService {
     });
   }
 
-  /** GloFAS Flood endpoint — river discharge forecasts and reanalysis history. */
+  /**
+   * GloFAS Flood endpoint — daily river discharge. An omitted `models` reads upstream's
+   * `seamless_v4`; with 2+ models every daily column comes back suffixed with the model name.
+   */
   getFlood(lat: number, lon: number, params: FloodParams, ctx: Context): Promise<FloodEnvelope> {
     const { floodBaseUrl } = getServerConfig();
     const url = openMeteoUrl(`${floodBaseUrl}/v1/flood`, {
       latitude: lat,
       longitude: lon,
       daily: params.daily,
+      models: params.models,
       forecast_days: params.forecast_days,
       start_date: params.start_date,
       end_date: params.end_date,
@@ -612,6 +634,7 @@ export class OpenMeteoService {
     ctx.log.info('Fetching flood forecast', {
       lat,
       lon,
+      models: params.models,
       forecast_days: params.forecast_days,
       start_date: params.start_date,
       end_date: params.end_date,
@@ -751,6 +774,7 @@ interface WeatherQueryParams {
   end_date?: string | undefined;
   forecast_days?: number | undefined;
   hourly?: string[] | undefined;
+  length_unit?: string | undefined;
   models?: string[] | undefined;
   past_days?: number | undefined;
   precipitation_unit?: string | undefined;
@@ -780,6 +804,7 @@ function buildWeatherUrl(
     temperature_unit: params.temperature_unit,
     wind_speed_unit: params.wind_speed_unit,
     precipitation_unit: params.precipitation_unit,
+    length_unit: params.length_unit,
     timezone: params.timezone ?? 'auto',
   });
 }

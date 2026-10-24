@@ -13,25 +13,28 @@ import { describe, expect, it } from 'vitest';
 import * as definitions from '@/mcp-server/tools/definitions/index.js';
 
 /**
- * Reasons each tool marks `thrownBy: 'service'`. `rate_limited` is the one: the
- * Open-Meteo client raises it on HTTP 429 for every tool that calls upstream. Every
- * other declared reason is thrown by the handler itself — the canvas and SQL-gate
- * failures the dataframe tools declare are caught from the framework and rethrown
- * through `ctx.fail`, so they count as handler-thrown too.
+ * Reasons each tool marks `thrownBy: 'service'`. The Open-Meteo client raises
+ * `rate_limited` on HTTP 429, and `upstream_unavailable` or `upstream_timeout` when its
+ * retries run out, for every tool that calls upstream; `coverage_gap` only on the five
+ * tools whose endpoint can answer a coordinate with no data. Every other declared
+ * reason is thrown by the handler itself — the canvas and SQL-gate failures the
+ * dataframe tools declare are caught from the framework and rethrown through
+ * `ctx.fail`, so they count as handler-thrown too.
  */
+const UPSTREAM = ['rate_limited', 'upstream_timeout', 'upstream_unavailable'] as const;
 const SERVICE_MARKED: Record<string, readonly string[]> = {
   openmeteo_dataframe_describe: [],
   openmeteo_dataframe_drop: [],
   openmeteo_dataframe_query: [],
-  openmeteo_get_air_quality: ['rate_limited'],
-  openmeteo_get_climate: ['rate_limited'],
-  openmeteo_get_elevation: ['rate_limited'],
-  openmeteo_get_ensemble: ['rate_limited'],
-  openmeteo_get_flood: ['rate_limited'],
-  openmeteo_get_forecast: ['rate_limited'],
-  openmeteo_get_historical: ['rate_limited'],
-  openmeteo_get_marine: ['rate_limited'],
-  openmeteo_search_locations: ['rate_limited'],
+  openmeteo_get_air_quality: UPSTREAM,
+  openmeteo_get_climate: UPSTREAM,
+  openmeteo_get_elevation: UPSTREAM,
+  openmeteo_get_ensemble: [...UPSTREAM, 'coverage_gap'],
+  openmeteo_get_flood: [...UPSTREAM, 'coverage_gap'],
+  openmeteo_get_forecast: [...UPSTREAM, 'coverage_gap'],
+  openmeteo_get_historical: [...UPSTREAM, 'coverage_gap'],
+  openmeteo_get_marine: [...UPSTREAM, 'coverage_gap'],
+  openmeteo_search_locations: UPSTREAM,
 };
 
 const tools = Object.values(definitions);

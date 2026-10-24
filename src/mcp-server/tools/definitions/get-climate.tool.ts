@@ -39,6 +39,9 @@ import {
   frameRequestTooLargeMessage,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
+  UPSTREAM_TIMEOUT_ERROR,
+  UPSTREAM_UNAVAILABLE_ERROR,
+  variableOrModelRecovery,
 } from '../upstream-error.js';
 import { undefinedUnitColumns } from '../variable-cadence.js';
 
@@ -49,6 +52,10 @@ import { undefinedUnitColumns } from '../variable-cadence.js';
  */
 const PAYLOAD_NARROWING =
   'a shorter start_date–end_date range, fewer daily_variables, or fewer models';
+
+/** The variable half of the `invalid_variable` recovery; see {@link variableOrModelRecovery}. */
+const VARIABLE_RECOVERY =
+  'Check names against Open-Meteo Climate API docs. Common daily variables: temperature_2m_max, temperature_2m_min, temperature_2m_mean, precipitation_sum, rain_sum, snowfall_sum, wind_speed_10m_mean, wind_speed_10m_max, shortwave_radiation_sum, cloud_cover_mean.';
 
 export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
   description:
@@ -96,7 +103,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
       when: 'An unknown variable name or unsupported climate model was requested.',
-      recovery: `Check names against Open-Meteo Climate API docs. Common daily variables: temperature_2m_max, temperature_2m_min, temperature_2m_mean, precipitation_sum, rain_sum, snowfall_sum, wind_speed_10m_mean, wind_speed_10m_max, shortwave_radiation_sum, cloud_cover_mean. Documented models: ${CLIMATE_MODEL_LIST}. When the message names one model, correct only that one — the rest of the models list is valid.`,
+      recovery: variableOrModelRecovery(VARIABLE_RECOVERY, CLIMATE_MODEL_LIST),
       retryable: false,
     },
     {
@@ -115,6 +122,8 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       retryable: false,
     },
     RATE_LIMITED_ERROR,
+    UPSTREAM_UNAVAILABLE_ERROR,
+    UPSTREAM_TIMEOUT_ERROR,
   ],
 
   input: z.object({
@@ -309,11 +318,13 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
        * alongside a bad name is not echoed as a suspect. Reframing that message is all
        * this needs; reconstructing the offender from a local catalog would only re-derive
        * what upstream already stated, against a list that has to be refreshed to stay
-       * correct. The same holds for a rejected variable name.
+       * correct. The same holds for a rejected variable name. With no models sent, the
+       * rejected name is a variable, so the hint drops the model list.
        */
       throw ctx.fail(
         'invalid_variable',
         frameInvalidVariableMessage(data.reason, 'variable or model'),
+        input.models ? undefined : { recovery: { hint: VARIABLE_RECOVERY } },
       );
     }
 
@@ -390,7 +401,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       }
 
       /*
-       * No canvas (CANVAS_PROVIDER_TYPE=none, the default): bound the preview anyway.
+       * No canvas (CANVAS_PROVIDER_TYPE=none): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
        * multi-decade, multi-model pull.
        *

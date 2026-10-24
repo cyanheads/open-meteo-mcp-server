@@ -48,6 +48,8 @@ import {
   frameRequestTooLargeMessage,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
+  UPSTREAM_TIMEOUT_ERROR,
+  UPSTREAM_UNAVAILABLE_ERROR,
 } from '../upstream-error.js';
 import { undefinedUnitColumns } from '../variable-cadence.js';
 
@@ -140,6 +142,8 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       retryable: false,
     },
     RATE_LIMITED_ERROR,
+    UPSTREAM_UNAVAILABLE_ERROR,
+    UPSTREAM_TIMEOUT_ERROR,
   ],
 
   input: z.object({
@@ -439,7 +443,7 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       }
 
       /*
-       * No canvas (CANVAS_PROVIDER_TYPE=none, the default): bound the preview anyway.
+       * No canvas (CANVAS_PROVIDER_TYPE=none): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
        * 92-day hourly window.
        *

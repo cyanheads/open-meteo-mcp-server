@@ -17,7 +17,13 @@ import { CalendarDateSchema } from '../date-input.js';
 import { ARCHIVE_MODEL_LIST, ARCHIVE_MODEL_NAMES } from '../model-catalog.js';
 import { cleanNames } from '../name-input.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
-import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
+import {
+  composeNotice,
+  describeCoverageGaps,
+  describeDroppedModels,
+  describeUnservedColumns,
+  findCoverageGaps,
+} from '../response-notice.js';
 import {
   boundedPreviewByCadence,
   canvasPointerLine,
@@ -35,10 +41,14 @@ import {
   isInvalidTimezoneReason,
 } from '../timezone-input.js';
 import {
+  coverageGapContract,
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
+  UPSTREAM_TIMEOUT_ERROR,
+  UPSTREAM_UNAVAILABLE_ERROR,
+  variableOrModelRecovery,
 } from '../upstream-error.js';
 import {
   describeCadenceMismatches,
@@ -54,6 +64,10 @@ import {
  */
 const PAYLOAD_NARROWING =
   'a shorter start_date–end_date range, fewer hourly_variables / daily_variables, or fewer models';
+
+/** The variable half of the `invalid_variable` recovery; see {@link variableOrModelRecovery}. */
+const VARIABLE_RECOVERY =
+  'Check the variable name against Open-Meteo docs. Common hourly: temperature_2m, precipitation, wind_speed_10m, relative_humidity_2m, cloud_cover. Common daily: temperature_2m_max, temperature_2m_min, precipitation_sum.';
 
 export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
   description:
@@ -99,7 +113,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
       when: 'An unknown variable name or unsupported archive model was requested.',
-      recovery: `Check the variable name against Open-Meteo docs. Common hourly: temperature_2m, precipitation, wind_speed_10m, relative_humidity_2m, cloud_cover. Common daily: temperature_2m_max, temperature_2m_min, precipitation_sum. Documented models: ${ARCHIVE_MODEL_NAMES}. When the message names one model, correct only that one — the rest of the models list is valid.`,
+      recovery: variableOrModelRecovery(VARIABLE_RECOVERY, ARCHIVE_MODEL_NAMES),
       retryable: false,
     },
     {
@@ -125,7 +139,10 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid and the dates are in range — the size of the request is what was rejected.`,
       retryable: false,
     },
+    coverageGapContract('historical'),
     RATE_LIMITED_ERROR,
+    UPSTREAM_UNAVAILABLE_ERROR,
+    UPSTREAM_TIMEOUT_ERROR,
   ],
 
   input: z.object({
@@ -162,7 +179,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .max(8)
       .optional()
       .describe(
-        `Archive models to read from: ${ARCHIVE_MODEL_LIST}. Omit to use Open-Meteo's Best Match default, which blends IFS HRES, ERA5, and ERA5-Land — pin a model instead when a consistent source matters across the range. With 2+ models each variable column is suffixed with the model name. cerra covers Europe only and is rejected as a coverage gap elsewhere. A name outside this list is sent upstream rather than rejected here.`,
+        `Archive models to read from: ${ARCHIVE_MODEL_LIST}. Omit to use Open-Meteo's Best Match default, which blends IFS HRES, ERA5, and ERA5-Land — pin a model instead when a consistent source matters across the range. With 2+ models each variable column is suffixed with the model name. cerra covers Europe only: requested alone elsewhere it is rejected as a coverage gap, and beside another model the archive drops it and the notice says so. A name outside this list is sent upstream rather than rejected here.`,
       ),
     temperature_unit: z
       .enum(['celsius', 'fahrenheit'])
@@ -252,7 +269,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the archive returned with the unit "undefined" (a name it parsed but does not serve in the requested cadence); recognized variables whose requested window falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the archive returned with the unit "undefined" (a name it parsed but does not serve in the requested cadence, or — on a model-suffixed column — a variable that model does not serve); requested models the archive left out for having no data at this coordinate, or the plain-named columns a multi-model request cannot attribute to one model; recognized variables whose requested window falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
 
@@ -350,10 +367,12 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
        * The models array goes out with a literal comma, so upstream parses it as a list
        * and its rejection names only the offending model rather than the whole request.
        * Reframing that message is all this needs — the same holds for a variable name.
+       * With no models sent, the rejected name is a variable, so the hint drops the model list.
        */
       throw ctx.fail(
         'invalid_variable',
         frameInvalidVariableMessage(data.reason, 'variable or model'),
+        input.models ? undefined : { recovery: { hint: VARIABLE_RECOVERY } },
       );
     }
 
@@ -378,14 +397,26 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     /*
      * Backstop for a name the catalog does not carry: the archive answers some
      * wrong-cadence names with HTTP 200 and an all-null column whose unit is the
-     * literal string "undefined". Left unsaid that reads as a genuine data gap.
+     * literal string "undefined". Left unsaid that reads as a genuine data gap. On a
+     * model-suffixed column the same unit means that model does not serve the variable,
+     * which the cadence advice would misdirect — that case gets its own sentence.
      */
-    const emptyColumns = undefinedUnitColumns(rawHourlyUnits, rawDailyUnits);
-    if (emptyColumns.length > 0) {
-      notice.add(
-        `${emptyColumns.join(', ')} returned no data — Open-Meteo reported the unit as "undefined", which means the archive does not serve that name in the cadence it was requested under. Check the spelling, and whether it belongs in hourly_variables or daily_variables.`,
-      );
-    }
+    const selection = {
+      models: input.models,
+      variables: [...(input.hourly_variables ?? []), ...(input.daily_variables ?? [])],
+    };
+    notice.add(
+      describeUnservedColumns(undefinedUnitColumns(rawHourlyUnits, rawDailyUnits), selection, {
+        server: 'the archive',
+        fields: 'hourly_variables or daily_variables',
+      }),
+    );
+
+    /*
+     * A model the archive dropped from a multi-model request for having no data here —
+     * cerra outside Europe beside era5 comes back as plain, unattributable columns.
+     */
+    notice.add(describeDroppedModels(selection, data.hourly, data.daily));
 
     /*
      * Temporal coverage, the case the check above cannot see: the archive leaves a
@@ -448,7 +479,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       }
 
       /*
-       * No canvas (CANVAS_PROVIDER_TYPE=none, the default): bound the preview anyway.
+       * No canvas (CANVAS_PROVIDER_TYPE=none): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
        * multi-megabyte payload. Same per-cadence selection the canvas branch uses, so
        * both paths return the same rows for the same records.

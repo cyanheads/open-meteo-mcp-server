@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetFloodTool } from '@/mcp-server/tools/definitions/get-flood.tool.js';
+import { FLOOD_MODELS } from '@/mcp-server/tools/model-catalog.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
@@ -381,14 +382,18 @@ describe('openmeteoGetFloodTool', () => {
       longitude: -122.3,
       daily_variables: ['bogus_discharge'],
     });
-    await expect(wireError(openmeteoGetFloodTool, input)).resolves.toMatchObject({
+    const error = await wireError(openmeteoGetFloodTool, input);
+    expect(error).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringMatching(/^Unknown discharge variable name: bogus_discharge\./),
       data: {
         reason: 'invalid_variable',
-        recovery: { hint: expect.stringContaining('river_discharge') },
+        recovery: { hint: expect.stringMatching(/^Valid variables: river_discharge, /) },
       },
     });
+    // No models went upstream, so the rejected name is a variable: the hint lists no models.
+    expect(error.data?.recovery?.hint).not.toContain('Documented models');
+    for (const model of FLOOD_MODELS) expect(error.data?.recovery?.hint).not.toContain(model.name);
   });
 
   it('classifies the upstream too-much-data rejection as request_too_large (#50)', async () => {
@@ -653,7 +658,7 @@ describe('openmeteoGetFloodTool', () => {
 
   it('bounds the preview and sets truncated=true when the payload is oversized and canvas is disabled', async () => {
     // #28: the budget check used to act only inside the `if (canvas)` branch, so a
-    // default deployment (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
+    // deployment with DataCanvas off (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
     // inline return carrying truncated: false — the field a client reads to decide
     // whether anything is missing.
     const time = dailyDates(15_000);
@@ -1080,8 +1085,365 @@ describe('openmeteoGetFloodTool river-selection wording (#43)', () => {
       'invalid_variable',
       'invalid_timezone',
       'request_too_large',
+      'coverage_gap',
       'rate_limited',
+      'upstream_unavailable',
+      'upstream_timeout',
     ]);
+  });
+});
+
+describe('openmeteoGetFloodTool GloFAS model selection (#79)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+  });
+
+  /** The repro point and dates from the issue: the last three days consolidated_v4 serves. */
+  const REPRO = {
+    latitude: 47.48,
+    longitude: -122.21,
+    daily_variables: ['river_discharge', 'river_discharge_max'],
+    start_date: '2025-05-29',
+    end_date: '2025-05-31',
+  };
+
+  /** Live seamless_v4 answer for REPRO — forecast-run values, with spread in _max. */
+  const SEAMLESS_REPRO = {
+    ...MOCK_RESPONSE,
+    latitude: 47.475006,
+    longitude: -122.22499,
+    daily_units: { time: 'iso8601', river_discharge: 'm³/s', river_discharge_max: 'm³/s' },
+    daily: {
+      time: ['2025-05-29', '2025-05-30', '2025-05-31'],
+      river_discharge: [7.63, 7.0, 6.57],
+      river_discharge_max: [7.65, 7.28, 6.57],
+    },
+  };
+
+  /** The upstream params the handler sent on its one call. */
+  const sentParams = () => mockGetFlood.mock.calls[0]?.[2] as Record<string, unknown>;
+
+  it('sends no models parameter and leaves structuredContent unchanged when models is omitted', async () => {
+    mockGetFlood.mockResolvedValue(SEAMLESS_REPRO);
+
+    const result = await runToolContract(openmeteoGetFloodTool, REPRO);
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams().models).toBeUndefined();
+    // Serialized, as the wire carries it: an undefined value leaves no key behind.
+    expect(JSON.parse(JSON.stringify(result.structuredContent))).toStrictEqual({
+      latitude: 47.475006,
+      longitude: -122.22499,
+      timezone: 'America/Los_Angeles',
+      record_count: 3,
+      daily: [
+        { time: '2025-05-29', river_discharge: 7.63, river_discharge_max: 7.65 },
+        { time: '2025-05-30', river_discharge: 7, river_discharge_max: 7.28 },
+        { time: '2025-05-31', river_discharge: 6.57, river_discharge_max: 6.57 },
+      ],
+      daily_units: { time: 'iso8601', river_discharge: 'm³/s', river_discharge_max: 'm³/s' },
+      truncated: false,
+    });
+  });
+
+  it('names seamless_v4 and both of its spans under the neutral heading when models is omitted', async () => {
+    mockGetFlood.mockResolvedValue(SEAMLESS_REPRO);
+
+    const result = await runToolContract(openmeteoGetFloodTool, REPRO);
+
+    const [heading, modelLine] = firstText(result.content).split('\n');
+    expect(heading).toBe('## GloFAS river discharge');
+    expect(modelLine).toBe(
+      '**Model:** seamless_v4 (default — consolidated_v4 reanalysis before 2023-08-05, forecast_v4 runs from 2023-08-05 into the live forecast)',
+    );
+    expect(firstText(result.content)).not.toContain('river discharge forecast');
+  });
+
+  it('forwards consolidated_v4 and returns the reanalysis values, echoing models on both surfaces', async () => {
+    // Live consolidated_v4 answer for the repro input: every statistic repeats river_discharge.
+    mockGetFlood.mockResolvedValue({
+      ...SEAMLESS_REPRO,
+      daily: {
+        time: ['2025-05-29', '2025-05-30', '2025-05-31'],
+        river_discharge: [7.09, 6.66, 6.28],
+        river_discharge_max: [7.09, 6.66, 6.28],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetFloodTool, {
+      ...REPRO,
+      models: ['consolidated_v4'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams().models).toEqual(['consolidated_v4']);
+    const structured = result.structuredContent as { daily: Record<string, unknown>[] } & Record<
+      string,
+      unknown
+    >;
+    expect(structured.models).toEqual(['consolidated_v4']);
+    expect(structured.daily.map((row) => row.river_discharge)).toEqual([7.09, 6.66, 6.28]);
+
+    const text = firstText(result.content);
+    expect(text).toContain('## GloFAS river discharge\n**Model:** consolidated_v4\n');
+    expect(text).toContain('river_discharge: 7.09');
+  });
+
+  it.each([[[]], [['', ' ']]])('treats a blank models list %j as omitted', async (models) => {
+    mockGetFlood.mockResolvedValue(SEAMLESS_REPRO);
+
+    const result = await runToolContract(openmeteoGetFloodTool, { ...REPRO, models });
+
+    expect(sentParams().models).toBeUndefined();
+    expect(JSON.stringify(result.structuredContent)).not.toContain('"models"');
+    expect(firstText(result.content)).toContain('**Model:** seamless_v4 (default');
+  });
+
+  it('sends a name outside the catalog upstream unrejected (a GloFAS v3 selector)', async () => {
+    mockGetFlood.mockResolvedValue(SEAMLESS_REPRO);
+
+    const result = await runToolContract(openmeteoGetFloodTool, {
+      ...REPRO,
+      models: [' seamless_v3 '],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams().models).toEqual(['seamless_v3']);
+    expect((result.structuredContent as { models?: string[] }).models).toEqual(['seamless_v3']);
+  });
+
+  it('caps models at the six GloFAS selectors', () => {
+    const parse = (count: number) =>
+      openmeteoGetFloodTool.input.safeParse({
+        ...REPRO,
+        models: Array.from({ length: count }, (_, i) => `m${i}`),
+      }).success;
+    expect(parse(6)).toBe(true);
+    expect(parse(7)).toBe(false);
+  });
+
+  it('returns suffixed columns for two models on both surfaces, and names the model with no data', async () => {
+    // Live: consolidated_v4,forecast_v4 with forecast_days=2 at the repro point —
+    // consolidated_v4 serves no forecast days, so its columns come back null with a real unit.
+    mockGetFlood.mockResolvedValue({
+      ...SEAMLESS_REPRO,
+      daily_units: {
+        time: 'iso8601',
+        river_discharge_consolidated_v4: 'm³/s',
+        river_discharge_forecast_v4: 'm³/s',
+      },
+      daily: {
+        time: ['2026-10-24', '2026-10-25'],
+        river_discharge_consolidated_v4: [null, null],
+        river_discharge_forecast_v4: [3.29, 3.31],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetFloodTool, {
+      latitude: 47.48,
+      longitude: -122.21,
+      daily_variables: ['river_discharge'],
+      forecast_days: 2,
+      models: ['consolidated_v4', 'forecast_v4'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams()).toMatchObject({
+      forecast_days: 2,
+      models: ['consolidated_v4', 'forecast_v4'],
+    });
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured.daily).toEqual([
+      {
+        time: '2026-10-24',
+        river_discharge_consolidated_v4: null,
+        river_discharge_forecast_v4: 3.29,
+      },
+      {
+        time: '2026-10-25',
+        river_discharge_consolidated_v4: null,
+        river_discharge_forecast_v4: 3.31,
+      },
+    ]);
+    expect(structured.models).toEqual(['consolidated_v4', 'forecast_v4']);
+    expect(String(structured.notice)).toContain(
+      'No daily data for river_discharge_consolidated_v4 anywhere in the requested window',
+    );
+
+    const text = firstText(result.content);
+    expect(text).toContain('**Models:** consolidated_v4, forecast_v4\n');
+    expect(text).toContain('river_discharge_forecast_v4: 3.31');
+    expect(text).toContain('river_discharge_consolidated_v4: m³/s');
+  });
+
+  it('answers consolidated_v4 with forecast_days with the null rows and the coverage notice — no pre-call rejection', async () => {
+    mockGetFlood.mockResolvedValue({
+      ...SEAMLESS_REPRO,
+      daily_units: { time: 'iso8601', river_discharge: 'm³/s' },
+      daily: {
+        time: ['2026-10-24', '2026-10-25', '2026-10-26'],
+        river_discharge: [null, null, null],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetFloodTool, {
+      latitude: 47.48,
+      longitude: -122.21,
+      daily_variables: ['river_discharge'],
+      forecast_days: 3,
+      models: ['consolidated_v4'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockGetFlood).toHaveBeenCalledTimes(1);
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured.record_count).toBe(3);
+    expect(String(structured.notice)).toContain(
+      'No daily data for river_discharge anywhere in the requested window',
+    );
+  });
+
+  it('reports where consolidated_v4 stops when a range runs past its end', async () => {
+    // Live: consolidated_v4 carries values through 2025-05-31 and nulls from 2025-06-01.
+    const time = dailyDates(10, '2025-05-29');
+    mockGetFlood.mockResolvedValue({
+      ...SEAMLESS_REPRO,
+      daily_units: { time: 'iso8601', river_discharge: 'm³/s' },
+      daily: { time, river_discharge: time.map((_, row) => (row < 3 ? 7 - row : null)) },
+    });
+
+    const result = await runToolContract(openmeteoGetFloodTool, {
+      latitude: 47.48,
+      longitude: -122.21,
+      daily_variables: ['river_discharge'],
+      start_date: '2025-05-29',
+      end_date: '2025-06-07',
+      models: ['consolidated_v4'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(String((result.structuredContent as Record<string, unknown>).notice)).toContain(
+      'data runs 2025-05-29 to 2025-05-31, and 7 of 10 rows are null',
+    );
+  });
+
+  it.each([
+    [['consolidated_v4', 'forecast_v4'], true],
+    [['consolidated_v4'], false],
+    [undefined, false],
+  ])(
+    'offers fewer models as a narrowing lever only when several were sent (%j)',
+    async (models, offered) => {
+      mockGetFlood.mockResolvedValue({
+        error: true,
+        reason:
+          'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
+      });
+
+      const error = await wireError(openmeteoGetFloodTool, { ...REPRO, ...(models && { models }) });
+
+      expect(error.data?.reason).toBe('request_too_large');
+      expect(error.message).toContain('fewer daily_variables');
+      expect(error.message.includes('or fewer models')).toBe(offered);
+      expect(
+        firstText(
+          openmeteoGetFloodTool.format!({
+            latitude: 47.48,
+            longitude: -122.21,
+            timezone: 'GMT',
+            models,
+            record_count: 15_000,
+            daily: [{ time: '1984-01-01', river_discharge: 1 }],
+            canvas_id: undefined,
+            table_name: undefined,
+            truncated: true,
+          }),
+        ).includes('or fewer models'),
+      ).toBe(offered);
+    },
+  );
+
+  it('frames an unknown model as a variable-or-model rejection and lists the flood models', async () => {
+    mockGetFlood.mockResolvedValue({
+      error: true,
+      reason: 'Invalid value: Cannot initialize MultiDomains from invalid String value bogus_v9',
+    });
+
+    const error = await wireError(openmeteoGetFloodTool, {
+      ...REPRO,
+      models: ['seamless_v4', 'bogus_v9'],
+    });
+
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data?.reason).toBe('invalid_variable');
+    expect(error.message).toMatch(/^Unknown discharge variable or model name: bogus_v9\./);
+    expect(error.message).not.toMatch(/^Unknown discharge variable name/);
+    for (const model of ['seamless_v4', 'consolidated_v4', 'forecast_v4']) {
+      expect(error.data?.recovery?.hint).toContain(model);
+    }
+    expect(error.data?.recovery?.hint).toContain('river_discharge_p75');
+  });
+});
+
+describe('openmeteoGetFloodTool span-aware wording (#79)', () => {
+  /*
+   * The default seamless_v4 serves consolidated_v4 reanalysis before 2023-08-05 and
+   * forecast_v4 run data from then on, and consolidated_v4 itself ends 2025-05-31 — so
+   * a date range is reanalysis only up to the switch, and the statistics carry ensemble
+   * spread on every forecast-run day, date ranges included.
+   */
+  const SPAN_SURFACES: [string, () => string][] = [
+    ['tool description', () => openmeteoGetFloodTool.description],
+    [
+      'daily_variables input',
+      () => openmeteoGetFloodTool.input.shape.daily_variables.description ?? '',
+    ],
+    ['start_date input', () => openmeteoGetFloodTool.input.shape.start_date.description ?? ''],
+    ['end_date input', () => openmeteoGetFloodTool.input.shape.end_date.description ?? ''],
+  ];
+
+  it.each(SPAN_SURFACES)('the %s names the seamless switch and the reanalysis end', (_s, read) => {
+    const text = read();
+    expect(text).toContain('2023-08-05');
+    expect(text).toContain('2025-05-31');
+    expect(text).not.toMatch(/historical reanalysis|reanalysis history/i);
+  });
+
+  it.each(SPAN_SURFACES.slice(0, 2))(
+    'the %s says where the statistics carry spread and where they repeat river_discharge',
+    (_s, read) => {
+      const text = read();
+      expect(text).not.toMatch(/forecast mode only/i);
+      expect(text).toMatch(/forecast-run days/i);
+      expect(text).toMatch(/repeat river_discharge/i);
+      expect(text).toMatch(/not uncertainty estimates/i);
+    },
+  );
+
+  it('states the forecast horizon as a bound the GloFAS run sets, not a 210-day promise', () => {
+    for (const text of [
+      openmeteoGetFloodTool.description,
+      openmeteoGetFloodTool.input.shape.forecast_days.description ?? '',
+    ]) {
+      expect(text).not.toMatch(/up to 210 days|210 days ahead/i);
+      expect(text).toMatch(/come back null/i);
+    }
+    expect(openmeteoGetFloodTool.input.shape.forecast_days.description).toContain(
+      'consolidated_v4 serves no forecast days',
+    );
+  });
+
+  it('advertises the three v4 models on the models input and the tool description', () => {
+    for (const text of [
+      openmeteoGetFloodTool.description,
+      openmeteoGetFloodTool.input.shape.models.description ?? '',
+    ]) {
+      for (const model of ['seamless_v4', 'consolidated_v4', 'forecast_v4']) {
+        expect(text).toContain(model);
+      }
+      expect(text).not.toContain('seamless_v3');
+    }
   });
 });
 
@@ -1098,22 +1460,6 @@ describe('openmeteoGetFloodTool discharge-variable wording (#64)', () => {
     expect(text).toContain('"river_discharge" (the daily discharge value');
     expect(text).toContain('the mean across ensemble members is "river_discharge_mean"');
   });
-
-  it.each([
-    ['tool description', () => openmeteoGetFloodTool.description],
-    [
-      'daily_variables input',
-      () => openmeteoGetFloodTool.input.shape.daily_variables.description ?? '',
-    ],
-  ])(
-    'the %s says the statistics are forecast-only and repeat river_discharge in reanalysis (#64)',
-    (_surface, read) => {
-      const text = read();
-      expect(text).toMatch(/forecast mode only/i);
-      expect(text).toMatch(/repeat river_discharge/i);
-      expect(text).toMatch(/not uncertainty estimates/i);
-    },
-  );
 
   it('forwards every statistic in reanalysis mode unchanged rather than rejecting it (#64)', async () => {
     // Live shape: a reanalysis range returns the consolidated discharge in every column.

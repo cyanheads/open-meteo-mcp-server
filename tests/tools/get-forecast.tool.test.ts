@@ -7,11 +7,12 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetForecastTool } from '@/mcp-server/tools/definitions/get-forecast.tool.js';
+import { FORECAST_MODELS } from '@/mcp-server/tools/model-catalog.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
 import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
-import { wireError } from '../helpers/wire-error.js';
+import { type WireError, wireError } from '../helpers/wire-error.js';
 
 const mockGetForecast = vi.fn();
 const mockSpillover = vi.fn();
@@ -1162,6 +1163,468 @@ describe('openmeteoGetForecastTool', () => {
     // The response is small enough to return whole — the gap is reported anyway.
     expect(result.truncated).toBe(false);
     expect(result.record_count).toBe(240);
+  });
+});
+
+describe('openmeteoGetForecastTool model comparison (#80)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
+  });
+
+  const SEATTLE = { latitude: 47.6062, longitude: -122.3321 };
+
+  /** The upstream params the handler sent on its one call. */
+  const sentParams = () => mockGetForecast.mock.calls[0]?.[2] as Record<string, unknown>;
+
+  it('sends no models parameter and leaves the output unchanged when models is omitted', async () => {
+    mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m', 'precipitation'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    // The service omits an undefined models value from the URL (pinned in its own suite).
+    expect(sentParams().models).toBeUndefined();
+    // Serialized, as the wire carries it: an undefined value leaves no key behind.
+    const wire = JSON.parse(JSON.stringify(result.structuredContent)) as Record<string, unknown>;
+    expect(wire).not.toHaveProperty('models');
+    expect(wire).not.toHaveProperty('notice');
+    expect(firstText(result.content)).toBe(
+      [
+        '## Weather forecast',
+        '**Location:** 47.595562, -122.32443 | **Elevation:** 59m',
+        '**Timezone:** America/Los_Angeles | **utc_offset_seconds:** -25200',
+        '**Records:** 2 | **Truncated:** false',
+        '',
+        '**Hourly units:** time: iso8601 | temperature_2m: °C | precipitation: mm',
+        '',
+        '### Hourly (2 records)',
+        '**2026-05-30T00:00** — temperature_2m: 10.1 | precipitation: 0',
+        '**2026-05-30T01:00** — temperature_2m: 9.4 | precipitation: 0',
+        '',
+        '_Weather data by Open-Meteo.com_',
+      ].join('\n'),
+    );
+  });
+
+  /** Live Seattle shape for gfs_seamless,ecmwf_ifs025,icon_seamless — every key suffixed. */
+  const THREE_MODELS = ['gfs_seamless', 'ecmwf_ifs025', 'icon_seamless'];
+  const THREE_MODEL_RESPONSE = {
+    ...MOCK_RESPONSE,
+    hourly_units: {
+      time: 'iso8601',
+      temperature_2m_gfs_seamless: '°C',
+      temperature_2m_ecmwf_ifs025: '°C',
+      temperature_2m_icon_seamless: '°C',
+    },
+    hourly: {
+      time: ['2026-10-24T00:00', '2026-10-24T01:00'],
+      temperature_2m_gfs_seamless: [5.9, 5.6],
+      temperature_2m_ecmwf_ifs025: [6.8, 6.6],
+      temperature_2m_icon_seamless: [6.3, 5.2],
+    },
+    daily_units: {
+      time: 'iso8601',
+      temperature_2m_max_gfs_seamless: '°C',
+      temperature_2m_max_ecmwf_ifs025: '°C',
+      temperature_2m_max_icon_seamless: '°C',
+    },
+    daily: {
+      time: ['2026-10-24'],
+      temperature_2m_max_gfs_seamless: [13.6],
+      temperature_2m_max_ecmwf_ifs025: [13.1],
+      temperature_2m_max_icon_seamless: [12.3],
+    },
+  };
+
+  it('forwards three models and returns suffixed columns and unit keys, echoing models on both surfaces', async () => {
+    mockGetForecast.mockResolvedValue(THREE_MODEL_RESPONSE);
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m'],
+      daily_variables: ['temperature_2m_max'],
+      models: THREE_MODELS,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams().models).toEqual(THREE_MODELS);
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured.models).toEqual(THREE_MODELS);
+    expect(structured.hourly).toEqual([
+      {
+        time: '2026-10-24T00:00',
+        temperature_2m_gfs_seamless: 5.9,
+        temperature_2m_ecmwf_ifs025: 6.8,
+        temperature_2m_icon_seamless: 6.3,
+      },
+      {
+        time: '2026-10-24T01:00',
+        temperature_2m_gfs_seamless: 5.6,
+        temperature_2m_ecmwf_ifs025: 6.6,
+        temperature_2m_icon_seamless: 5.2,
+      },
+    ]);
+    expect(structured.daily_units).toEqual(THREE_MODEL_RESPONSE.daily_units);
+    // Every requested model is present, so there is nothing to disclose.
+    expect(structured).not.toHaveProperty('notice');
+
+    const text = firstText(result.content);
+    expect(text).toContain('**Models:** gfs_seamless, ecmwf_ifs025, icon_seamless\n');
+    expect(text).toContain('temperature_2m_max_icon_seamless: 12.3');
+    expect(text).toContain('temperature_2m_ecmwf_ifs025: °C');
+  });
+
+  it('forwards a single model, keeps its plain column names, and echoes it', async () => {
+    mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m', 'precipitation'],
+      models: ['gfs_seamless'],
+    });
+
+    expect(sentParams().models).toEqual(['gfs_seamless']);
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured.models).toEqual(['gfs_seamless']);
+    expect(structured).not.toHaveProperty('notice');
+    expect(firstText(result.content)).toContain('**Models:** gfs_seamless\n');
+  });
+
+  it.each([[[]], [['', ' ']]])('treats a blank models list %j as omitted', async (models) => {
+    mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m'],
+      models,
+    });
+
+    expect(sentParams().models).toBeUndefined();
+    expect(JSON.stringify(result.structuredContent)).not.toContain('"models"');
+  });
+
+  it('caps models at the documented forecast model count', () => {
+    const parse = (count: number) =>
+      openmeteoGetForecastTool.input.safeParse({
+        ...SEATTLE,
+        hourly_variables: ['temperature_2m'],
+        models: Array.from({ length: count }, (_, i) => `m${i}`),
+      }).success;
+    expect(parse(FORECAST_MODELS.length)).toBe(true);
+    expect(parse(FORECAST_MODELS.length + 1)).toBe(false);
+  });
+
+  it('names a model upstream dropped from a partly out-of-domain list', async () => {
+    // Live: gfs_seamless,ecmwf_ifs025,icon_d2 at Seattle answers HTTP 200 with two
+    // suffixed columns — icon_d2 is left out without a word.
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: {
+        time: 'iso8601',
+        temperature_2m_gfs_seamless: '°C',
+        temperature_2m_ecmwf_ifs025: '°C',
+      },
+      hourly: {
+        time: ['2026-10-24T00:00', '2026-10-24T01:00'],
+        temperature_2m_gfs_seamless: [5.9, 5.6],
+        temperature_2m_ecmwf_ifs025: [6.8, 6.6],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m'],
+      models: ['gfs_seamless', 'ecmwf_ifs025', 'icon_d2'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+    expect(notice).toContain('Open-Meteo returned no columns for icon_d2');
+    expect(notice).toContain('compares only gfs_seamless, ecmwf_ifs025');
+    expect(result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')).toContain(
+      'Open-Meteo returned no columns for icon_d2',
+    );
+  });
+
+  it('reads the daily block for a dropped model on a daily-only request', async () => {
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: undefined,
+      hourly: undefined,
+      daily_units: {
+        time: 'iso8601',
+        temperature_2m_max_gfs_seamless: '°C',
+        temperature_2m_max_ecmwf_ifs025: '°C',
+      },
+      daily: {
+        time: ['2026-10-24'],
+        temperature_2m_max_gfs_seamless: [13.6],
+        temperature_2m_max_ecmwf_ifs025: [13.1],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      daily_variables: ['temperature_2m_max'],
+      models: ['gfs_seamless', 'ecmwf_ifs025', 'icon_d2'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+    expect(notice).toContain(
+      'Open-Meteo returned no columns for icon_d2 — it leaves a requested model out of the response when it has no data at this coordinate',
+    );
+    expect(notice).toContain('compares only gfs_seamless, ecmwf_ifs025.');
+  });
+
+  it('calls the unsuffixed columns of a 2-model request unattributable', async () => {
+    // Live: gfs_seamless,icon_d2 at Seattle — icon_d2 dropped, plain column names.
+    mockGetForecast.mockResolvedValue(MOCK_RESPONSE);
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m', 'precipitation'],
+      models: ['gfs_seamless', 'icon_d2'],
+    });
+
+    const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+    expect(notice).toContain(
+      'temperature_2m, precipitation came back without a model suffix although 2 models were requested',
+    );
+    expect(notice).toContain('unattributable');
+    expect(notice).toContain('one of gfs_seamless, icon_d2');
+  });
+
+  it('rejects current_variables with two models before any request (current_multi_model)', async () => {
+    const error = await wireError(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      current_variables: ['temperature_2m'],
+      hourly_variables: ['temperature_2m'],
+      models: ['gfs_seamless', 'ecmwf_ifs025'],
+    });
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'current_multi_model',
+        recovery: { hint: expect.stringContaining('at most one model') },
+      },
+    });
+    expect(error.message).toContain('2 models (gfs_seamless, ecmwf_ifs025)');
+    expect(mockGetForecast).not.toHaveBeenCalled();
+  });
+
+  it('accepts current_variables with one model and forwards both', async () => {
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      current_units: { time: 'iso8601', interval: 'seconds', temperature_2m: '°C' },
+      current: { time: '2026-10-24T00:15', interval: 900, temperature_2m: 6.7 },
+    });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      current_variables: ['temperature_2m'],
+      models: ['ecmwf_ifs025'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams()).toMatchObject({ current: ['temperature_2m'], models: ['ecmwf_ifs025'] });
+    expect((result.structuredContent as { current: unknown }).current).toMatchObject({
+      temperature_2m: 6.7,
+    });
+  });
+
+  it('frames an unknown model as a variable-or-model rejection and lists the forecast models', async () => {
+    mockGetForecast.mockResolvedValue({
+      error: true,
+      reason:
+        'Invalid value: Cannot initialize MultiDomains from invalid String value bogus_model_xyz',
+    });
+
+    const error = await wireError(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m'],
+      models: ['gfs_seamless', 'bogus_model_xyz'],
+    });
+
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data?.reason).toBe('invalid_variable');
+    expect(error.message).toMatch(/^Unknown variable or model name: bogus_model_xyz\./);
+    expect(error.data?.recovery?.hint).toContain('ncep_gfs_seamless');
+    expect(error.data?.recovery?.hint).toContain('ecmwf_ifs025');
+  });
+
+  it('keeps the variable-only framing for an unknown name when models is omitted', async () => {
+    mockGetForecast.mockResolvedValue({
+      error: true,
+      reason: 'Cannot initialize ForecastVariable from invalid String value not_a_variable',
+    });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: ['not_a_variable'],
+    });
+    const error = (result.structuredContent as { error: WireError }).error;
+
+    expect(error.message).toMatch(/^Unknown variable name: not_a_variable\./);
+    // No models went upstream, so the rejected name is a variable: the hint names variables only.
+    const hint = error.data?.recovery?.hint ?? '';
+    expect(hint).toMatch(/^Check the variable name against Open-Meteo docs\./);
+    expect(hint).not.toContain('Documented models');
+    for (const model of FORECAST_MODELS) expect(hint).not.toContain(model);
+    expect(firstText(result.content)).toContain(hint);
+    expect(firstText(result.content)).not.toContain('Documented models');
+  });
+
+  it('says a model does not serve a variable when its suffixed column has the unit "undefined"', async () => {
+    // Live: lightning_potential across gfs_hrrr,icon_seamless at Seattle — gfs_hrrr's
+    // column carries the unit "undefined", icon_seamless's a real J/kg over nulls.
+    const time = hourlyTimes(24, '2026-10-24T00:00');
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: {
+        time: 'iso8601',
+        lightning_potential_gfs_hrrr: 'undefined',
+        lightning_potential_icon_seamless: 'J/kg',
+      },
+      hourly: {
+        time,
+        lightning_potential_gfs_hrrr: time.map(() => null),
+        lightning_potential_icon_seamless: time.map(() => null),
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: ['lightning_potential'],
+      models: ['gfs_hrrr', 'icon_seamless'],
+    });
+
+    const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+    expect(notice).toContain(
+      'gfs_hrrr does not serve lightning_potential. Read it from a model that serves it.',
+    );
+    expect(notice).not.toContain('cadence');
+    // icon_seamless serves it under a real unit, so its nulls are a coverage gap.
+    expect(notice).toContain('No hourly data for lightning_potential_icon_seamless');
+    expect(notice).not.toContain('icon_seamless does not serve');
+  });
+
+  it('names the selected model as a cause of an "undefined" unit on a single-model call', async () => {
+    // Live: models=gfs_hrrr alone answers lightning_potential with a plain column, unit "undefined".
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', lightning_potential: 'undefined' },
+      hourly: { time: ['2026-10-24T00:00'], lightning_potential: [null] },
+    });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: ['lightning_potential'],
+      models: ['gfs_hrrr'],
+    });
+
+    const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+    expect(notice).toContain('lightning_potential returned no data');
+    expect(notice).toContain('or the selected model (gfs_hrrr) does not serve it');
+  });
+
+  /** A 3-model, 16-day hourly block wide enough to overflow the inline budget. */
+  const threeModelWideBlock = () => {
+    const time = hourlyTimes(16 * 24, '2026-10-24T00:00');
+    const block: Record<string, (number | null)[] | string[]> = { time };
+    const units: Record<string, string> = { time: 'iso8601' };
+    for (const variable of ['temperature_2m', 'precipitation', 'wind_speed_10m', 'cloud_cover']) {
+      for (const model of THREE_MODELS) {
+        block[`${variable}_${model}`] = time.map((_, i) => 100.5 + (i % 17));
+        units[`${variable}_${model}`] = '°C';
+      }
+    }
+    return { time, block, units };
+  };
+
+  it('stages every suffixed column on the canvas spill and keeps them in the preview', async () => {
+    const { time, block, units } = threeModelWideBlock();
+    mockGetForecast.mockResolvedValue({ ...MOCK_RESPONSE, hourly_units: units, hourly: block });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: time.length, tableName: 'spilled_models' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-models' }) };
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      forecast_days: 16,
+      hourly_variables: ['temperature_2m', 'precipitation', 'wind_speed_10m', 'cloud_cover'],
+      models: THREE_MODELS,
+    });
+
+    const structured = result.structuredContent as {
+      hourly: Record<string, unknown>[];
+      hourly_units: Record<string, string>;
+      models: string[];
+      truncated: boolean;
+      notice?: string;
+    };
+    expect(structured.truncated).toBe(true);
+    expect(structured.models).toEqual(THREE_MODELS);
+    // The staged schema carries one column per variable per model.
+    const [opts] = mockSpillover.mock.calls[0] as [{ schema: { name: string }[] }];
+    const staged = opts.schema.map((c) => c.name);
+    expect(staged).toHaveLength(1 + 4 * THREE_MODELS.length);
+    expect(staged).toContain('cloud_cover_icon_seamless');
+    // The bounded preview rows and the unit map keep the suffixed keys.
+    expect(structured.hourly.length).toBeGreaterThan(0);
+    expect(structured.hourly.length).toBeLessThan(time.length);
+    expect(Object.keys(structured.hourly[0] ?? {})).toEqual(Object.keys(block));
+    expect(structured.hourly_units).toEqual(units);
+    // All three models came back, so the only notice part is the canvas pointer.
+    expect(structured.notice).toMatch(/^Staged 384 rows to table "spilled_models"/);
+  });
+
+  it('keeps suffixed columns in the canvas-less preview and offers fewer models as a lever', async () => {
+    const { time, block, units } = threeModelWideBlock();
+    mockGetForecast.mockResolvedValue({ ...MOCK_RESPONSE, hourly_units: units, hourly: block });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      forecast_days: 16,
+      hourly_variables: ['temperature_2m', 'precipitation', 'wind_speed_10m', 'cloud_cover'],
+      models: THREE_MODELS,
+    });
+
+    const structured = result.structuredContent as {
+      hourly: Record<string, unknown>[];
+      truncated: boolean;
+      notice?: string;
+    };
+    expect(structured.truncated).toBe(true);
+    expect(structured.hourly.length).toBeLessThan(time.length);
+    expect(Object.keys(structured.hourly[0] ?? {})).toEqual(Object.keys(block));
+    expect(structured.notice).toContain('or fewer models.');
+    expect(firstText(result.content)).toContain('or fewer models.');
+  });
+
+  it('leaves models out of the narrowing levers when none were requested', async () => {
+    const time = hourlyTimes(2592);
+    mockGetForecast.mockResolvedValue({ ...MOCK_RESPONSE, hourly: wideHourlyBlock(time) });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      past_days: 92,
+      forecast_days: 16,
+      hourly_variables: ['temperature_2m'],
+    });
+
+    const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+    expect(notice).toContain('narrow the request: fewer past_days');
+    expect(notice).not.toContain('models');
   });
 });
 

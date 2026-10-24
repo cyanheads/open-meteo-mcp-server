@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -36,13 +36,13 @@ Global weather from Open-Meteo: forecasts, history back to 1940, marine conditio
 | Tool | Description |
 |:---|:---|
 | `openmeteo_search_locations` | Resolve a place name to ranked coordinates with country, region, timezone, and population |
-| `openmeteo_get_forecast` | Current conditions and hourly/daily forecast up to 16 days, with up to 92 past days |
+| `openmeteo_get_forecast` | Current conditions and hourly/daily forecast up to 16 days, with up to 92 past days, from best match or chosen models side by side |
 | `openmeteo_get_historical` | Hourly/daily history from the reanalysis archive, 1940 to present |
-| `openmeteo_get_marine` | Wave, swell, and sea-surface conditions: up to 8 forecast days or an archive range |
+| `openmeteo_get_marine` | Wave, swell, and sea-surface conditions: current, up to 8 forecast days, or an archive range, in metric or imperial units |
 | `openmeteo_get_air_quality` | Modeled CAMS pollutants, pollen, and AQI: current, up to 7 forecast days, or an archive range |
-| `openmeteo_get_elevation` | Copernicus DEM terrain elevation for up to 100 coordinate pairs |
+| `openmeteo_get_elevation` | Copernicus DEM terrain elevation: up to 1,000 coordinate pairs, the first 100 sampled per call with the rest reported for resubmission |
 | `openmeteo_get_ensemble` | Per-member ensemble forecast (up to 64 members, up to 35 days) for exceedance and uncertainty |
-| `openmeteo_get_flood` | GloFAS river discharge forecast (up to 210 days) or reanalysis from 1984 |
+| `openmeteo_get_flood` | GloFAS river discharge: a ~6-month forecast or a date range from 1984, from seamless or chosen v4 models |
 | `openmeteo_get_climate` | Bias-corrected daily CMIP6 projections, 1950–2050, across up to 7 models |
 | `openmeteo_dataframe_describe` | List the tables and columns staged on a DataCanvas |
 | `openmeteo_dataframe_query` | Run a read-only SQL `SELECT` against staged tables |
@@ -63,6 +63,8 @@ Global weather from Open-Meteo: forecasts, history back to 1940, marine conditio
 
 - At least one of `current_variables`, `hourly_variables`, or `daily_variables` (up to 50 each); `forecast_days` 1–16 (default 7), `past_days` 0–92 (default 0)
 - Per-timestamp `hourly` / `daily` records with `hourly_units` / `daily_units`; `current_variables` adds a `current` object from 15-minute data (`interval` 900) plus `current_units`
+- Omitting `models` reads Open-Meteo `best_match`; `models` compares deterministic models (e.g. `ncep_gfs_seamless`, `ecmwf_ifs025`, `dwd_icon_seamless`; older spellings like `gfs_seamless` still resolve). With 2+ models each hourly and daily column carries a model-name suffix, and `models` is echoed. `current_variables` takes at most one model (`current_multi_model`)
+- A regional model with no data at the point is dropped from a multi-model response: the `notice` names it, or, when one model is left with unsuffixed columns, says the values cannot be attributed to a model; when every requested model misses, the call fails as `coverage_gap`
 - Prefer `past_days` over `openmeteo_get_historical` for the last ~5 days, where the archive's ERA5 components lag
 
 ---
@@ -71,14 +73,16 @@ Global weather from Open-Meteo: forecasts, history back to 1940, marine conditio
 
 - `start_date` and `end_date` required (YYYY-MM-DD, from 1940-01-01), plus at least one of `hourly_variables` / `daily_variables`, named as on the forecast tool
 - Omitting `models` reads Best Match (IFS HRES + ERA5 + ERA5-Land, source varies by date); up to 8 `models` pin a source. The ERA5 family runs ~5 days behind, `ecmwf_ifs` has no delay, and `cerra` covers Europe only
-- Output echoes `models` and the returned `date_range`; with 2+ models each column carries a model-name suffix
+- Output echoes `models` and the returned `date_range`; with 2+ models each column carries a model-name suffix. A model with no data at the point (`cerra` outside Europe) is dropped from a multi-model response; the `notice` names it, or, when one model is left with unsuffixed columns (`era5,cerra`), says the values cannot be attributed to a model
 
 ---
 
 ### `openmeteo_get_marine` <sub>tool</sub>
 
 - One window per call: `forecast_days` 1–8 (upstream default 7) with `past_days` 0–92, or a `start_date` / `end_date` archive range back to at least 2022. Mixing them fails as `forecast_window_conflict`, a lone date as `date_range_incomplete`
-- At least one of `hourly_variables` / `daily_variables` (wave height, period, and direction, swell, sea-surface temperature); sheltered water returns near-zero waves, a land point returns nulls (named in the `notice`), and `ocean_current_velocity` is null off the open ocean
+- At least one of `current_variables`, `hourly_variables`, or `daily_variables` (wave height, period, and direction, swell, sea-surface temperature); sheltered water returns near-zero waves, a land point returns nulls (named in the `notice`), and `ocean_current_velocity` is null off the open ocean
+- `current_variables` takes the hourly names and adds a `current` object from 15-minute data (`interval` 900) plus `current_units`, alongside either window; a daily name there fails as `variable_wrong_cadence`
+- `length_unit` (`metric` / `imperial`) sets every height, `sea_level_height_msl` included, in m or ft; `wind_speed_unit` (`kmh`, `mph`, `ms`, `kn`) sets `ocean_current_velocity`; `temperature_unit` (`celsius` / `fahrenheit`) sets `sea_surface_temperature`. Open-Meteo converts the values, and the `*_units` maps label them (`mph` reads `mp/h`)
 
 ---
 
@@ -92,7 +96,8 @@ Global weather from Open-Meteo: forecasts, history back to 1940, marine conditio
 
 ### `openmeteo_get_elevation` <sub>tool</sub>
 
-- Parallel `latitudes[]` / `longitudes[]` arrays of up to 100 pairs; unequal lengths fail as `coordinate_count_mismatch`
+- Parallel `latitudes[]` / `longitudes[]` arrays of up to 1,000 pairs; unequal lengths fail as `coordinate_count_mismatch`, compared on the full arrays
+- Samples the first 100 pairs (the Elevation API's per-request limit) in one upstream request; `unprocessed_count` says how many were left and `next_offset` is where to resume — resubmit `latitudes.slice(next_offset)` and `longitudes.slice(next_offset)` until `next_offset` is `null`. A call of 100 or fewer returns `0` / `null`. Each sampled pair counts as one call against Open-Meteo's per-IP limits (600 a minute), so a seventh 100-pair slice inside one minute comes back `rate_limited`
 - `elevations[]` in input order, each `{ latitude, longitude, elevation_m }` from the Copernicus DEM (~90 m); `elevation_m` is `null` where the DEM has no value (latitude 90), without failing the rest of the call
 
 ---
@@ -107,8 +112,9 @@ Global weather from Open-Meteo: forecasts, history back to 1940, marine conditio
 
 ### `openmeteo_get_flood` <sub>tool</sub>
 
-- `daily_variables` required (up to 20), all in m³/s: `river_discharge` plus the statistics `river_discharge_mean` / `_median` / `_min` / `_max` / `_p25` / `_p75`, which carry spread in forecast mode only (in reanalysis they repeat `river_discharge`)
-- One mode per call: `forecast_days` 1–210, or a `start_date` / `end_date` reanalysis range from 1984-01-01. Mixing them fails as `forecast_days_conflict`, a lone date as `date_range_incomplete`
+- `daily_variables` required (up to 20), all in m³/s: `river_discharge` plus the statistics `river_discharge_mean` / `_median` / `_min` / `_max` / `_p25` / `_p75`, which carry ensemble spread on forecast-run days and repeat `river_discharge` on reanalysis days
+- One mode per call: `forecast_days` 1–210 (the current GloFAS run reaches about six months; later days are null), or a `start_date` / `end_date` range from 1984-01-01. Mixing them fails as `forecast_days_conflict`, a lone date as `date_range_incomplete`
+- Omitting `models` reads `seamless_v4`: `consolidated_v4` reanalysis before 2023-08-05, `forecast_v4` runs from then on. `models: ["consolidated_v4"]` reads the reanalysis through 2025-05-31 (null after, and on `forecast_days`); `forecast_v4` starts 2023-06-01. Output echoes `models`; with 2+ models each column carries a model-name suffix, and the `notice` names null spans
 - Discharge comes from the largest modeled river within 5 km, not always the closest; vary the coordinate by ~0.1° when a value looks off. Null outside GloFAS coverage
 
 ---
@@ -149,13 +155,13 @@ Open-Meteo-specific:
 
 - No API key for non-commercial use; commercial use requires Open-Meteo's paid API tier
 - Columnar API responses reshaped into per-timestamp records with `*_units` maps, on the same variable names across forecast and archive
-- DataCanvas spillover on the seven weather tools: with `CANVAS_PROVIDER_TYPE=duckdb` an over-budget result is staged as a DuckDB table (response carries `canvas_id`, `table_name`, `truncated: true`); with the default `none` it returns a bounded preview and `truncated: true`
-- `models` on the historical, ensemble, and climate tools is not an allowlist, so a model Open-Meteo adds later works without a server update
+- DataCanvas spillover on the seven weather tools: with `CANVAS_PROVIDER_TYPE=duckdb` (the default) an over-budget result is staged as a DuckDB table (response carries `canvas_id`, `table_name`, `truncated: true`); with `none` it returns a bounded preview and `truncated: true`
+- `models` on the forecast, historical, ensemble, climate, and flood tools is not an allowlist, so a model Open-Meteo adds later works without a server update
 
 Agent-friendly output:
 
 - Location-first workflow: `openmeteo_search_locations` returns the IANA `timezone` alongside coordinates, ready for any weather tool's `timezone` input (default `auto`)
-- Typed rejections: `variable_wrong_cadence` (names the correct field), `request_too_large` (names the inputs to narrow), and `rate_limited`; only `Too many concurrent requests` is retried first
+- Typed rejections: `variable_wrong_cadence` (names the correct field), `request_too_large` (names the inputs to narrow), `coverage_gap` (a coordinate outside the dataset's grid or the model's domain), and `rate_limited`; only `Too many concurrent requests` is retried first. An outage that outlasts three attempts fails as `upstream_unavailable`, or `upstream_timeout` when the last attempt timed out
 - Request URLs never appear in error data or client-visible logs
 - One `notice` per response for what the data alone won't show: unserved variable names, nulls outside a dataset's coverage, and where spilled rows went
 
@@ -275,7 +281,7 @@ Every variable is optional.
 | `OPEN_METEO_ENSEMBLE_BASE_URL` | Ensemble API base URL. | `https://ensemble-api.open-meteo.com` |
 | `OPEN_METEO_FLOOD_BASE_URL` | GloFAS flood API base URL. | `https://flood-api.open-meteo.com` |
 | `OPEN_METEO_CLIMATE_BASE_URL` | CMIP6 climate API base URL. | `https://climate-api.open-meteo.com` |
-| `CANVAS_PROVIDER_TYPE` | `duckdb` stages over-budget weather results on a DataCanvas and enables the dataframe tools; `none` returns a bounded preview. | `none` |
+| `CANVAS_PROVIDER_TYPE` | `duckdb` stages over-budget weather results on a DataCanvas and enables the dataframe tools; `none` returns a bounded preview. | `duckdb` |
 | `OPENMETEO_DATAFRAME_DROP_ENABLED` | `true` makes `openmeteo_dataframe_drop` callable; otherwise it is listed as disabled. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |

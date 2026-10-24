@@ -30,10 +30,10 @@
         },
         {
           "name": "CANVAS_PROVIDER_TYPE",
-          "description": "Canvas engine for openmeteo_get_forecast / openmeteo_get_historical / openmeteo_get_marine / openmeteo_get_air_quality / openmeteo_get_ensemble / openmeteo_get_flood / openmeteo_get_climate spillover. Set to 'duckdb' to enable DataCanvas and the dataframe_query / dataframe_describe tools. Default 'none' — those tools still bound an over-budget response to a preview with truncated: true, but nothing stages the rows they omit.",
+          "description": "Canvas engine for openmeteo_get_forecast / openmeteo_get_historical / openmeteo_get_marine / openmeteo_get_air_quality / openmeteo_get_ensemble / openmeteo_get_flood / openmeteo_get_climate spillover. Default 'duckdb' enables DataCanvas and the dataframe_query / dataframe_describe tools. Set to 'none' to disable — those tools still bound an over-budget response to a preview with truncated: true, but nothing stages the rows they omit.",
           "format": "string",
           "isRequired": false,
-          "default": "none"
+          "default": "duckdb"
         },
         {
           "name": "OPENMETEO_DATAFRAME_DROP_ENABLED",
@@ -97,10 +97,10 @@
         },
         {
           "name": "CANVAS_PROVIDER_TYPE",
-          "description": "Canvas engine for openmeteo_get_forecast / openmeteo_get_historical / openmeteo_get_marine / openmeteo_get_air_quality / openmeteo_get_ensemble / openmeteo_get_flood / openmeteo_get_climate spillover. Set to 'duckdb' to enable DataCanvas and the dataframe_query / dataframe_describe tools. Default 'none' — those tools still bound an over-budget response to a preview with truncated: true, but nothing stages the rows they omit.",
+          "description": "Canvas engine for openmeteo_get_forecast / openmeteo_get_historical / openmeteo_get_marine / openmeteo_get_air_quality / openmeteo_get_ensemble / openmeteo_get_flood / openmeteo_get_climate spillover. Default 'duckdb' enables DataCanvas and the dataframe_query / dataframe_describe tools. Set to 'none' to disable — those tools still bound an over-budget response to a preview with truncated: true, but nothing stages the rows they omit.",
           "format": "string",
           "isRequired": false,
-          "default": "none"
+          "default": "duckdb"
         },
         {
           "name": "OPENMETEO_DATAFRAME_DROP_ENABLED",

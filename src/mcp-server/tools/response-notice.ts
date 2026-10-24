@@ -24,6 +24,11 @@
  *     *location* the dataset carries nothing for — pollen outside Europe, waves at a
  *     land point.
  *
+ * It also attributes the columns of a multi-model forecast or archive response to the
+ * models that produced them ({@link columnModel}), which is how a model upstream
+ * silently dropped ({@link describeDroppedModels}) and a model that does not serve a
+ * variable ({@link describeModelUnserved}) get named.
+ *
  * @module mcp-server/tools/response-notice
  */
 
@@ -255,5 +260,133 @@ export function describeCurrentGaps(variables: readonly string[]): string | unde
   return (
     `No current value for ${nameList(variables)} — the ${value} null even though the ${unit} ` +
     `real, so ${it} no coverage at this location and time rather than the ${name} being unserved.`
+  );
+}
+
+/** What a multi-model request asked for: the models, and the variables they fan out over. */
+export interface ModelSelection {
+  /** The requested models, as sent; `undefined` when the caller selected none. */
+  readonly models: readonly string[] | undefined;
+  /** Every requested hourly and daily variable name. */
+  readonly variables: readonly string[];
+}
+
+/**
+ * The requested model a column belongs to. With 2+ models the forecast and archive
+ * endpoints name every hourly and daily column `<variable>_<model>`, so a column is
+ * attributed only when it spells exactly one requested variable–model pair — a bare
+ * suffix match would give `temperature_2m_gfs_seamless` to a requested `seamless` too.
+ * `undefined` for a bare column, an unrecognized one, or a selection of fewer than two
+ * models (whose columns carry plain names).
+ */
+export function columnModel(column: string, selection: ModelSelection): string | undefined {
+  const { models, variables } = selection;
+  if (!models || models.length < 2) return;
+  return models.find((model) => {
+    const suffix = `_${model}`;
+    return column.endsWith(suffix) && variables.includes(column.slice(0, -suffix.length));
+  });
+}
+
+/**
+ * A notice for the models a 2+-model response silently left out, or `undefined` when
+ * every requested model is accounted for.
+ *
+ * Open-Meteo answers a multi-model request in which some models have no data at the
+ * coordinate (a regional model outside its domain) with HTTP 200 and those models
+ * dropped — no error, no field naming them. Only when every model misses does it reject
+ * the request, which the service raises as a coverage gap. Two shapes follow:
+ *   - Suffixed columns remain for the models that served the point: name each requested
+ *     model with no `<variable>_<model>` column, and the ones the response does compare.
+ *   - One model remains, and its columns come back with plain names: which model that is
+ *     cannot be read off the response (the snapped grid coordinates are the only hint,
+ *     and too fragile to attribute by), so say the values are unattributable and name
+ *     the candidates rather than guess.
+ *
+ * Reads the column names of the hourly and daily `blocks`; `current` is a single
+ * unsuffixed block by design and is not passed.
+ */
+export function describeDroppedModels(
+  selection: ModelSelection,
+  ...blocks: (ColumnarBlock | undefined)[]
+): string | undefined {
+  const models = [...new Set(selection.models)];
+  if (models.length < 2) return;
+
+  const columns = blocks.flatMap((block) => Object.keys(block ?? {}));
+  const served = new Set(columns.map((column) => columnModel(column, selection)));
+  const present = models.filter((model) => served.has(model));
+  const missing = models.filter((model) => !served.has(model));
+  const bare = columns.filter((column) => selection.variables.includes(column));
+
+  if (bare.length > 0) {
+    return `${nameList(bare)} came back without a model suffix although ${models.length} models were requested (${models.join(', ')}) — Open-Meteo leaves out a requested model that has no data at this coordinate (typically a regional model outside its domain), and the columns of the one left carry plain names, so these values are unattributable: they come from one of ${missing.join(', ')}, and the response does not say which. Request one model at a time to attribute them.`;
+  }
+  if (missing.length === 0 || present.length === 0) return;
+  return `Open-Meteo returned no columns for ${missing.join(', ')} — it leaves a requested model out of the response when it has no data at this coordinate (typically a regional model outside its domain), so this response compares only ${present.join(', ')}.`;
+}
+
+/**
+ * A notice for the model-suffixed columns among `columns` (those upstream reported with
+ * the unit `"undefined"`), or `undefined` when none is attributable to a model.
+ *
+ * On a plain column that unit means the endpoint does not serve the name in the cadence
+ * it was requested under; on a `<variable>_<model>` column it means that model does not
+ * serve the variable at all — `lightning_potential_gfs_hrrr` beside a real-unit
+ * `lightning_potential_icon_seamless` — so the cadence advice would point the caller at
+ * the wrong input. The caller keeps reporting the unattributed columns its own way.
+ */
+export function describeModelUnserved(
+  columns: readonly string[],
+  selection: ModelSelection,
+): string | undefined {
+  const byModel = new Map<string, string[]>();
+  const attributed: string[] = [];
+  for (const column of columns) {
+    const model = columnModel(column, selection);
+    if (model === undefined) continue;
+    attributed.push(column);
+    byModel.set(model, [...(byModel.get(model) ?? []), column.slice(0, -(model.length + 1))]);
+  }
+  if (attributed.length === 0) return;
+  const pairs = [...byModel].map(
+    ([model, variables]) => `${model} does not serve ${nameList(variables)}`,
+  );
+  const remedy =
+    new Set([...byModel.values()].flat()).size === 1
+      ? 'Read it from a model that serves it.'
+      : 'Read those variables from a model that serves them.';
+  return `${nameList(attributed)} returned no data — Open-Meteo reported the unit as "undefined", which on a model-suffixed column means that model does not serve the variable: ${pairs.join('; ')}. ${remedy}`;
+}
+
+/**
+ * The notice for every column upstream reported with the unit `"undefined"` on a tool
+ * that takes `models`: the model-suffixed ones through {@link describeModelUnserved}, the
+ * rest as a name the endpoint does not serve in the cadence it was requested under — plus
+ * the selected model, when exactly one was sent, as the other thing that can leave a
+ * column empty. `undefined` when `columns` is empty.
+ *
+ * @param wording.server - What serves the data, in the sentence: `the endpoint`, `the archive`.
+ * @param wording.fields - The input fields a misplaced name may belong in, e.g.
+ * `hourly_variables or daily_variables`.
+ */
+export function describeUnservedColumns(
+  columns: readonly string[],
+  selection: ModelSelection,
+  wording: { readonly fields: string; readonly server: string },
+): string | undefined {
+  const unattributed = columns.filter((column) => !columnModel(column, selection));
+  const [onlyModel, ...others] = selection.models ?? [];
+  const modelClause =
+    onlyModel !== undefined && others.length === 0
+      ? `, or the selected model (${onlyModel}) does not serve it`
+      : '';
+  const cadenceSentence =
+    unattributed.length > 0
+      ? `${unattributed.join(', ')} returned no data — Open-Meteo reported the unit as "undefined", which means ${wording.server} does not serve that name in the cadence it was requested under${modelClause}. Check the spelling, and whether it belongs in ${wording.fields}.`
+      : undefined;
+  return (
+    [describeModelUnserved(columns, selection), cadenceSentence].filter(Boolean).join(' ') ||
+    undefined
   );
 }

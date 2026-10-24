@@ -1023,7 +1023,7 @@ describe('openmeteoGetEnsembleTool', () => {
   });
   it('bounds the preview and sets truncated=true when the payload is oversized and canvas is disabled', async () => {
     // #28: the budget check used to act only inside the `if (canvas)` branch, so a
-    // default deployment (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
+    // deployment with DataCanvas off (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
     // inline return carrying truncated: false — the field a client reads to decide
     // whether anything is missing.
     const time = hourlyTimes(384);

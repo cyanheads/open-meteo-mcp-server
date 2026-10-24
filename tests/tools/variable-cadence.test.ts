@@ -100,6 +100,41 @@ describe('findCadenceMismatches', () => {
     ).toEqual(['temperature_2m_max', 'temperature_2m']);
   });
 
+  it('checks current_variables against the hourly set and points a daily name at daily_variables (#81)', () => {
+    const mismatches = findCadenceMismatches(MARINE_CADENCE, undefined, undefined, [
+      'wave_height',
+      'wave_height_max',
+      'a_variable_open_meteo_added_later',
+    ]);
+
+    expect(mismatches).toEqual([
+      {
+        variable: 'wave_height_max',
+        passedIn: 'current_variables',
+        belongsIn: 'daily_variables',
+        alternatives: ['wave_height'],
+      },
+    ]);
+    expect(describeCadenceMismatches(mismatches)).toBe(
+      'wave_height_max is not valid in current_variables — Open-Meteo publishes it as a daily variable. Move it to daily_variables, or stay in current_variables with wave_height.',
+    );
+  });
+
+  it('reports current offenders after the hourly and daily ones (#81)', () => {
+    expect(
+      findCadenceMismatches(
+        MARINE_CADENCE,
+        ['wave_period_max'],
+        ['wave_period'],
+        ['wave_direction_dominant'],
+      ).map((m) => [m.variable, m.passedIn]),
+    ).toEqual([
+      ['wave_period_max', 'hourly_variables'],
+      ['wave_period', 'daily_variables'],
+      ['wave_direction_dominant', 'current_variables'],
+    ]);
+  });
+
   it('returns nothing when both fields are omitted', () => {
     expect(findCadenceMismatches(FORECAST_CADENCE, undefined, undefined)).toEqual([]);
   });

@@ -5,7 +5,7 @@
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
-**Zod:** ^4.6.5
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -244,6 +244,7 @@ src/
     server-config.ts                    # Server-specific env vars (optional base URL overrides + OPENMETEO_DATAFRAME_DROP_ENABLED)
   services/
     open-meteo/
+      coverage-gap.ts                   # Per-endpoint coverage-gap recovery, shared by the service message and the tools' coverage_gap contract
       open-meteo-service.ts             # HTTP client: forecast, archive, marine, air quality, geocoding, elevation, ensemble, flood, climate
       types.ts                          # API response types
     canvas-accessor.ts                  # DataCanvas accessor for the spill-capable tools (forecast / historical / marine / air quality / ensemble / flood / climate)

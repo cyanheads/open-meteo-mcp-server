@@ -13,10 +13,10 @@ export interface ColumnarBlock {
 export type UnitsMap = Record<string, string>;
 
 /**
- * The `current` block the forecast and air-quality endpoints return: one value per
- * requested variable at a single instant, alongside the timestamp and `interval` — the
- * aggregation interval in seconds (900 on forecast, 3600 on air quality) that summed or
- * averaged values cover, ending at `time`. It is metadata rather than a requested
+ * The `current` block the forecast, marine, and air-quality endpoints return: one value
+ * per requested variable at a single instant, alongside the timestamp and `interval` —
+ * the aggregation interval in seconds (900 on forecast and marine, 3600 on air quality)
+ * that summed or averaged values cover, ending at `time`. It is metadata rather than a requested
  * variable and is rendered as such.
  */
 export interface CurrentBlock {

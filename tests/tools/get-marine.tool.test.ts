@@ -7,7 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetMarineTool } from '@/mcp-server/tools/definitions/get-marine.tool.js';
-import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { INLINE_CHARS, inlineBudget } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
 import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
@@ -327,7 +327,7 @@ describe('openmeteoGetMarineTool', () => {
       },
     });
     expect(error.message).toContain('too much data at once');
-    expect(error.message).toContain('fewer hourly_variables');
+    expect(error.message).toContain('fewer current_variables / hourly_variables / daily_variables');
     expect(error.message).not.toMatch(/exact Open-Meteo API name/);
   });
 
@@ -351,6 +351,63 @@ describe('openmeteoGetMarineTool', () => {
     expect(result.daily![0]).toEqual({ time: '2026-05-30', wave_height_max: 1.2 });
     expect(result.daily![1]).toEqual({ time: '2026-05-31', wave_height_max: 0.9 });
     expect(result.daily_units).toMatchObject({ wave_height_max: 'm' });
+  });
+
+  it('returns unchanged output for a call that names no current or unit input (#81)', async () => {
+    // Characterization of both surfaces, so the additive inputs provably leave an
+    // existing call's answer alone.
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      daily_units: { time: 'iso8601', wave_height_max: 'm' },
+      daily: { time: ['2026-05-30'], wave_height_max: [1.2] },
+    });
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      latitude: 47.8,
+      longitude: -122.5,
+      hourly_variables: ['wave_height', 'wave_period'],
+      daily_variables: ['wave_height_max'],
+    });
+
+    // Through a JSON round trip, as the wire carries it: undefined keys drop out.
+    expect(JSON.parse(JSON.stringify(result.structuredContent))).toStrictEqual({
+      latitude: 47.8,
+      longitude: -122.5,
+      timezone: 'America/Los_Angeles',
+      record_count: 3,
+      hourly: [
+        { time: '2026-05-30T00:00', wave_height: 0.5, wave_period: 8.0 },
+        { time: '2026-05-30T01:00', wave_height: 0.6, wave_period: 8.5 },
+      ],
+      daily: [{ time: '2026-05-30', wave_height_max: 1.2 }],
+      hourly_units: { time: 'iso8601', wave_height: 'm', wave_period: 's' },
+      daily_units: { time: 'iso8601', wave_height_max: 'm' },
+      truncated: false,
+    });
+    expect(firstText(result.content)).toBe(
+      [
+        '## Marine conditions',
+        '**Location:** 47.8, -122.5 | **Timezone:** America/Los_Angeles',
+        '**Records:** 3 | **Truncated:** false',
+        '',
+        '**Hourly units:** time: iso8601 | wave_height: m | wave_period: s',
+        '**Daily units:** time: iso8601 | wave_height_max: m',
+        '',
+        '### Daily marine summary',
+        '**2026-05-30** — wave_height_max: 1.2',
+        '',
+        '### Hourly marine (2 records)',
+        '**2026-05-30T00:00** — wave_height: 0.5 | wave_period: 8',
+        '**2026-05-30T01:00** — wave_height: 0.6 | wave_period: 8.5',
+        '',
+        '_Weather data by Open-Meteo.com_',
+      ].join('\n'),
+    );
+    expect(mockGetMarine.mock.calls[0]?.[2]).toEqual({
+      hourly: ['wave_height', 'wave_period'],
+      daily: ['wave_height_max'],
+      past_days: 0,
+      timezone: 'auto',
+    });
   });
 
   // --- Time window: forecast_days / past_days / date range -------------------
@@ -1264,5 +1321,457 @@ describe('openmeteoGetMarineTool', () => {
     const result = await runToolContract(openmeteoGetMarineTool, wideInput());
 
     expectNoCanvasDisclosureOnce(result, 'fewer past_days / forecast_days');
+  });
+});
+
+describe('openmeteoGetMarineTool current conditions (#81)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
+  });
+
+  /** Live shape at 46.9,-124.6 (off the Washington coast): marine current, interval 900. */
+  const CURRENT_BLOCK = {
+    current_units: {
+      time: 'iso8601',
+      interval: 'seconds',
+      wave_height: 'm',
+      wave_period: 's',
+      sea_surface_temperature: '°C',
+    },
+    current: {
+      time: '2026-10-23T23:15',
+      interval: 900,
+      wave_height: 1.86,
+      wave_period: 9.3,
+      sea_surface_temperature: 12.2,
+    },
+  };
+
+  /** A response envelope with no hourly or daily block — what a current-only call returns. */
+  const CURRENT_ONLY = {
+    latitude: 46.875,
+    longitude: -124.62499,
+    elevation: 0,
+    utc_offset_seconds: -28800,
+    timezone: 'Etc/GMT+8',
+    timezone_abbreviation: 'GMT-8',
+    generationtime_ms: 0.2,
+    ...CURRENT_BLOCK,
+  };
+
+  const run = async (input: Record<string, unknown>, upstream: object) => {
+    mockGetMarine.mockResolvedValue(upstream);
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const parsed = openmeteoGetMarineTool.input.parse({
+      latitude: 46.9,
+      longitude: -124.6,
+      ...input,
+    });
+    const result = await openmeteoGetMarineTool.handler(parsed, ctx);
+    return { ctx, result, params: mockGetMarine.mock.calls[0]?.[2] as Record<string, unknown> };
+  };
+
+  it('accepts a current-only call and returns current with interval 900 and current_units', async () => {
+    const { result, params } = await run(
+      { current_variables: ['wave_height', 'wave_period', 'sea_surface_temperature'] },
+      CURRENT_ONLY,
+    );
+
+    expect(params.current).toEqual(['wave_height', 'wave_period', 'sea_surface_temperature']);
+    expect(params.hourly).toBeUndefined();
+    expect(params.daily).toBeUndefined();
+    expect(result.hourly).toBeUndefined();
+    expect(result.daily).toBeUndefined();
+    expect(result.record_count).toBe(0);
+    expect(result.truncated).toBe(false);
+    expect(result.current).toEqual(CURRENT_BLOCK.current);
+    expect(result.current_units).toEqual(CURRENT_BLOCK.current_units);
+    // The output schema carries the requested variables through, not just time/interval.
+    const parsed = openmeteoGetMarineTool.output.parse(result);
+    expect(parsed.current).toEqual(CURRENT_BLOCK.current);
+    expect(parsed.current?.interval).toBe(900);
+  });
+
+  it('drops blank current_variables entries and still requires a variable', async () => {
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const input = openmeteoGetMarineTool.input.parse({
+      latitude: 46.9,
+      longitude: -124.6,
+      current_variables: ['', '  '],
+    });
+    await expect(openmeteoGetMarineTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_variables_requested' },
+    });
+    expect(mockGetMarine).not.toHaveBeenCalled();
+  });
+
+  it('names current_variables in the no_variables_requested contract and message', async () => {
+    const input = openmeteoGetMarineTool.input.parse({ latitude: 46.9, longitude: -124.6 });
+    const error = await wireError(openmeteoGetMarineTool, input);
+    expect(error).toMatchObject({ data: { reason: 'no_variables_requested' } });
+    expect(error.message).toContain('current_variables');
+    const contract = openmeteoGetMarineTool.errors?.find(
+      (e) => e.reason === 'no_variables_requested',
+    );
+    expect(contract?.when).toContain('current_variables');
+    expect(contract?.recovery).toContain('current_variables');
+  });
+
+  it('omits current and current_units, and sends no current, when not requested', async () => {
+    const { result, params } = await run({ hourly_variables: ['wave_height'] }, MOCK_RESPONSE);
+    expect(params).not.toHaveProperty('current', expect.anything());
+    expect(result.current).toBeUndefined();
+    expect(result.current_units).toBeUndefined();
+    expect(firstText(openmeteoGetMarineTool.format!(result))).not.toContain('Current');
+  });
+
+  it('pairs current_variables with past_days on the forecast window', async () => {
+    const { params, result } = await run(
+      { current_variables: ['wave_height'], daily_variables: ['wave_height_max'], past_days: 2 },
+      {
+        ...CURRENT_ONLY,
+        daily_units: { time: 'iso8601', wave_height_max: 'm' },
+        daily: {
+          time: ['2026-10-21', '2026-10-22', '2026-10-23'],
+          wave_height_max: [1.76, 3.1, 3.1],
+        },
+      },
+    );
+    expect(params).toMatchObject({ current: ['wave_height'], past_days: 2 });
+    expect(result.current?.time).toBe('2026-10-23T23:15');
+    expect(result.daily).toHaveLength(3);
+  });
+
+  it('pairs current_variables with a date range on the archive window', async () => {
+    const { params, result } = await run(
+      {
+        current_variables: ['wave_height'],
+        daily_variables: ['wave_height_max'],
+        start_date: '2024-07-01',
+        end_date: '2024-07-02',
+      },
+      {
+        ...CURRENT_ONLY,
+        daily_units: { time: 'iso8601', wave_height_max: 'm' },
+        daily: { time: ['2024-07-01', '2024-07-02'], wave_height_max: [1.56, 1.8] },
+      },
+    );
+    expect(params).toMatchObject({
+      current: ['wave_height'],
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+    });
+    expect(params).not.toHaveProperty('past_days');
+    // Upstream answers the present instant alongside the archive rows.
+    expect(result.current?.time).toBe('2026-10-23T23:15');
+    expect(result.daily?.map((row) => row.time)).toEqual(['2024-07-01', '2024-07-02']);
+  });
+
+  it('renders the current-conditions section without misreading interval as a variable', async () => {
+    const { result } = await run(
+      { current_variables: ['wave_height', 'wave_period', 'sea_surface_temperature'] },
+      CURRENT_ONLY,
+    );
+    const text = firstText(openmeteoGetMarineTool.format!(result));
+    expect(text).toContain('### Current conditions');
+    expect(text).toContain(
+      '**2026-10-23T23:15** (interval: 900s) — wave_height: 1.86 | wave_period: 9.3 | sea_surface_temperature: 12.2',
+    );
+    expect(text).toContain(
+      '**Current units:** time: iso8601 | interval: seconds | wave_height: m | wave_period: s | sea_surface_temperature: °C',
+    );
+    expect(text).not.toContain('| interval: 900');
+  });
+
+  it('rejects a daily-only marine name in current_variables before the request', async () => {
+    // Live: current=wave_height_max is an HTTP 400 whose reason calls the name an
+    // invalid String value, which the post-call branch would frame as an unknown name.
+    const input = openmeteoGetMarineTool.input.parse({
+      latitude: 46.9,
+      longitude: -124.6,
+      current_variables: ['wave_height', 'wave_height_max'],
+    });
+    const error = await wireError(openmeteoGetMarineTool, input);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'variable_wrong_cadence' },
+    });
+    expect(error.message).toContain(
+      'wave_height_max is not valid in current_variables — Open-Meteo publishes it as a daily variable. Move it to daily_variables, or stay in current_variables with wave_height.',
+    );
+    expect(mockGetMarine).not.toHaveBeenCalled();
+  });
+
+  it('reports a non-marine current name through the "undefined"-unit notice, once', async () => {
+    const { ctx, result } = await run(
+      { current_variables: ['wave_height', 'temperature_2m'] },
+      {
+        ...CURRENT_ONLY,
+        current_units: {
+          time: 'iso8601',
+          interval: 'seconds',
+          wave_height: 'm',
+          temperature_2m: 'undefined',
+        },
+        current: {
+          time: '2026-10-23T23:15',
+          interval: 900,
+          wave_height: 1.86,
+          temperature_2m: null,
+        },
+      },
+    );
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('temperature_2m returned no data');
+    expect(notice.match(/temperature_2m/g)).toHaveLength(1);
+    expect(notice).not.toContain('No current value');
+    expect(result.current?.temperature_2m).toBeNull();
+  });
+
+  it('names a land point’s null current values on both surfaces', async () => {
+    // Live at 46.0,-119.0 (inland): current wave_height and sea_surface_temperature
+    // come back null under their real units.
+    const current = {
+      time: '2026-10-24T00:15',
+      interval: 900,
+      wave_height: null,
+      sea_surface_temperature: null,
+    };
+    mockGetMarine.mockResolvedValue({
+      ...CURRENT_ONLY,
+      latitude: 46.041664,
+      longitude: -119.04166,
+      timezone: 'America/Los_Angeles',
+      current_units: {
+        time: 'iso8601',
+        interval: 'seconds',
+        wave_height: 'm',
+        sea_surface_temperature: '°C',
+      },
+      current,
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      latitude: 46.0,
+      longitude: -119.0,
+      current_variables: ['wave_height', 'sea_surface_temperature'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      current: Record<string, unknown>;
+      notice?: string;
+    };
+    expect(structured.notice).toContain(
+      'No current value for wave_height, sea_surface_temperature — the values are null even though the units are real',
+    );
+    expect(structured.notice).not.toContain('interval');
+    expect(structured.current).toEqual(current);
+    const allText = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(allText).toContain('No current value for wave_height, sea_surface_temperature');
+    expect(allText).toContain('wave_height: null | sea_surface_temperature: null');
+  });
+
+  it('adds no current-gap sentence for a fully populated current block', async () => {
+    const { ctx } = await run({ current_variables: ['wave_height'] }, CURRENT_ONLY);
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('keeps a wide current block inside the inline ceiling on both surfaces', async () => {
+    const names = Array.from({ length: 50 }, (_, i) => `marine_variable_number_${i}`);
+    const wideCurrent: Record<string, number | string> = {
+      time: '2026-10-23T23:15',
+      interval: 900,
+    };
+    const wideCurrentUnits: Record<string, string> = { time: 'iso8601', interval: 'seconds' };
+    for (const [i, name] of names.entries()) {
+      wideCurrent[name] = 10.5 + i;
+      wideCurrentUnits[name] = 'm';
+    }
+
+    // Two hourly variables over 92 days: well past the row budget, so it is what bounds the rows.
+    const time = hourlyTimes(24 * 92);
+    const hourlyUnits = { time: 'iso8601', wave_height: 'm', wave_period: 's' };
+    const { ctx, result } = await run(
+      {
+        current_variables: names,
+        hourly_variables: ['wave_height', 'wave_period'],
+        past_days: 92,
+      },
+      {
+        ...MOCK_RESPONSE,
+        current: wideCurrent,
+        current_units: wideCurrentUnits,
+        hourly_units: hourlyUnits,
+        hourly: {
+          time,
+          wave_height: time.map((_, i) => 1 + (i % 11) / 10),
+          wave_period: time.map((_, i) => 8 + (i % 7) / 10),
+        },
+      },
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.current).toEqual(wideCurrent);
+    expect(result.current_units).toEqual(wideCurrentUnits);
+    expect(structuredSize(result, ctx)).toBeLessThanOrEqual(INLINE_CHARS);
+    expect(firstText(openmeteoGetMarineTool.format!(result)).length).toBeLessThanOrEqual(
+      INLINE_CHARS,
+    );
+    /*
+     * The rows were sized against what the current block and its units left, computed
+     * here from the upstream payload rather than from the result — a handler that
+     * leaves the block uncounted sizes the rows thousands of characters larger. Rows are
+     * measured as the budget measures them: serialized length plus one per key, plus one.
+     */
+    const { rowBudget } = inlineBudget(wideCurrent, hourlyUnits, undefined, wideCurrentUnits);
+    const rowCost = (result.hourly ?? []).reduce(
+      (chars, row) => chars + JSON.stringify(row).length + Object.keys(row).length + 1,
+      0,
+    );
+    expect(rowCost).toBeGreaterThan(rowBudget - 100);
+    expect(rowCost).toBeLessThanOrEqual(rowBudget + 100);
+  });
+
+  it('describes current.interval as a 900-second aggregation interval, never an update cadence', () => {
+    const interval =
+      openmeteoGetMarineTool.output.shape.current.unwrap().shape.interval.description ?? '';
+    expect(interval).toMatch(/aggregation interval/i);
+    expect(interval).toContain('900');
+    expect(interval).not.toMatch(/cadence|how often|refresh|updates?\b/i);
+  });
+});
+
+describe('openmeteoGetMarineTool unit inputs (#81)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
+  });
+
+  const callWith = async (units: Record<string, unknown>, upstream: object = MOCK_RESPONSE) => {
+    mockGetMarine.mockResolvedValue(upstream);
+    const ctx = createMockContext({ errors: openmeteoGetMarineTool.errors });
+    const result = await openmeteoGetMarineTool.handler(
+      openmeteoGetMarineTool.input.parse({
+        latitude: 46.9,
+        longitude: -124.6,
+        hourly_variables: ['wave_height'],
+        ...units,
+      }),
+      ctx,
+    );
+    return { result, params: mockGetMarine.mock.calls[0]?.[2] as Record<string, unknown> };
+  };
+
+  it('forwards non-default length, speed, and temperature units', async () => {
+    const { params } = await callWith({
+      length_unit: 'imperial',
+      wind_speed_unit: 'kn',
+      temperature_unit: 'fahrenheit',
+    });
+    expect(params).toMatchObject({
+      length_unit: 'imperial',
+      wind_speed_unit: 'kn',
+      temperature_unit: 'fahrenheit',
+    });
+  });
+
+  it.each([
+    ['omitted', {}],
+    [
+      'set to the defaults',
+      { length_unit: 'metric', wind_speed_unit: 'kmh', temperature_unit: 'celsius' },
+    ],
+  ])('sends no unit parameter when the units are %s', async (_label, units) => {
+    const { params } = await callWith(units);
+    expect(params.length_unit).toBeUndefined();
+    expect(params.wind_speed_unit).toBeUndefined();
+    expect(params.temperature_unit).toBeUndefined();
+  });
+
+  it.each([
+    ['length_unit', 'furlong'],
+    ['wind_speed_unit', 'knots'],
+    ['temperature_unit', 'kelvin'],
+  ])('rejects %s=%s at the schema and never calls upstream', async (field, value) => {
+    const parsed = openmeteoGetMarineTool.input.safeParse({
+      latitude: 46.9,
+      longitude: -124.6,
+      hourly_variables: ['wave_height'],
+      [field]: value,
+    });
+    // An enum rejection on the field itself, not an unknown-key rejection of it.
+    expect(parsed.error?.issues).toMatchObject([{ code: 'invalid_value', path: [field] }]);
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      latitude: 46.9,
+      longitude: -124.6,
+      hourly_variables: ['wave_height'],
+      [field]: value,
+    });
+    expect(result.isError).toBe(true);
+    expect(mockGetMarine).not.toHaveBeenCalled();
+  });
+
+  it('labels every surface with the units upstream returned (ft, kn, °F, mp/h) — nothing converted', async () => {
+    // Live units for length_unit=imperial, wind_speed_unit=mph, temperature_unit=fahrenheit.
+    const upstream = {
+      ...MOCK_RESPONSE,
+      current_units: {
+        time: 'iso8601',
+        interval: 'seconds',
+        wave_height: 'ft',
+        ocean_current_velocity: 'mp/h',
+        sea_surface_temperature: '°F',
+      },
+      current: {
+        time: '2026-10-23T23:15',
+        interval: 900,
+        wave_height: 6.102,
+        ocean_current_velocity: 0.6,
+        sea_surface_temperature: 54.0,
+      },
+      hourly_units: { time: 'iso8601', wave_height: 'ft', wave_period: 's' },
+      hourly: { time: ['2026-10-23T23:00'], wave_height: [6.168], wave_period: [9.25] },
+      daily_units: { time: 'iso8601', wave_height_max: 'ft', wave_period_max: 's' },
+      daily: { time: ['2026-10-23'], wave_height_max: [10.171], wave_period_max: [9.25] },
+    };
+    mockGetMarine.mockResolvedValue(upstream);
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      latitude: 46.9,
+      longitude: -124.6,
+      current_variables: ['wave_height', 'ocean_current_velocity', 'sea_surface_temperature'],
+      hourly_variables: ['wave_height', 'wave_period'],
+      daily_variables: ['wave_height_max', 'wave_period_max'],
+      length_unit: 'imperial',
+      wind_speed_unit: 'mph',
+      temperature_unit: 'fahrenheit',
+    });
+
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured.current_units).toEqual(upstream.current_units);
+    expect(structured.hourly_units).toEqual(upstream.hourly_units);
+    expect(structured.daily_units).toEqual(upstream.daily_units);
+    expect(structured.current).toEqual(upstream.current);
+    expect((structured.hourly as Record<string, unknown>[])[0]?.wave_height).toBe(6.168);
+    expect((structured.daily as Record<string, unknown>[])[0]?.wave_height_max).toBe(10.171);
+    const text = firstText(result.content);
+    expect(text).toContain('ocean_current_velocity: mp/h');
+    expect(text).toContain('sea_surface_temperature: °F');
+    expect(text).toContain('**Hourly units:** time: iso8601 | wave_height: ft | wave_period: s');
+    expect(text).toContain(
+      '**Daily units:** time: iso8601 | wave_height_max: ft | wave_period_max: s',
+    );
+    expect(text).toContain('wave_height: 6.102');
+  });
+
+  it('asserts no fixed height unit in any output description', () => {
+    const descriptions = Object.values(openmeteoGetMarineTool.output.shape).map(
+      (field) => field.description ?? '',
+    );
+    expect(descriptions.length).toBeGreaterThan(5);
+    for (const text of descriptions) expect(text).not.toMatch(/meters?\b|metres?\b/i);
   });
 });

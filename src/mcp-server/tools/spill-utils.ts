@@ -138,7 +138,7 @@ const unitsCost = (units: UnitsMap | undefined): number =>
  * {@link unitsTrimmedNotice} states the count and the levers that recover them.
  *
  * @param fixed - A payload the response carries whole, charged in full before anything
- * is divided: the `current` block on the forecast and air-quality tools, which is one
+ * is divided: the `current` block on the forecast, marine, and air-quality tools, which is one
  * record wide enough to matter and has neither a preview to bound nor a canvas to spill
  * to. It comes out of the units cap as well as the row budget, so the rows keep their
  * {@link MIN_ROW_CHARS} floor. `undefined` on a response that carries none.
@@ -299,8 +299,8 @@ function hasNonNullValue(record: Record<string, unknown>): boolean {
  *
  * The canvas-less half of the spill decision, and the canvas half too: both paths take
  * their preview from here, so the same records produce the same rows whether or not
- * DataCanvas is configured. `CANVAS_PROVIDER_TYPE` defaults to `none`, so `getCanvas()`
- * returns undefined on a default deployment and the tools would otherwise fall through
+ * DataCanvas is configured. With `CANVAS_PROVIDER_TYPE=none`, `getCanvas()` returns
+ * undefined and the tools would otherwise fall through
  * an exceeded budget to an unbounded inline return carrying `truncated: false` — the
  * field a client reads to decide whether anything is missing. The only difference
  * between the two paths is that one has a canvas holding the remainder, which
@@ -468,4 +468,16 @@ export function unitsTrimmedNotice(omitted: number, narrowing: string): string |
     'the units map is incomplete. Units are not staged on the canvas, so re-run with a ' +
     `narrower column set to see them all: ${narrowing}.`
   );
+}
+
+/**
+ * `narrowing` with "fewer models" appended when the call compared several. Fewer models
+ * is a lever only then — each one adds a full set of suffixed columns — so a call that
+ * sent none or one is never told to drop one.
+ */
+export function narrowingWithModels(
+  narrowing: string,
+  models: readonly string[] | undefined,
+): string {
+  return models && models.length > 1 ? `${narrowing}, or fewer models` : narrowing;
 }

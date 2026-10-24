@@ -5,9 +5,12 @@
  * @module tests/services/open-meteo-service.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createServer, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { openmeteoGetMarineTool } from '@/mcp-server/tools/definitions/get-marine.tool.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '@/mcp-server/tools/reshape-utils.js';
 import {
   getOpenMeteoService,
@@ -296,37 +299,107 @@ describe('OpenMeteoService upstream classification', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each([
-    [
-      'forecast',
-      () =>
-        getOpenMeteoService().getForecast(
-          90,
-          0,
-          { hourly: ['temperature_2m'] },
-          createMockContext(),
-        ),
-    ],
-    [
-      'air-quality',
-      () => getOpenMeteoService().getAirQuality(90, 0, { hourly: ['pm2_5'] }, createMockContext()),
-    ],
-  ])(
-    'gives the %s endpoint the same non-model wording by construction (#45)',
-    async (operation, call) => {
-      // No live case triggers the gap on these two today — their default blend has
-      // global coverage — so the guarantee is structural: an endpoint with no models
-      // input never draws the models wording.
-      respondWith('{"error":true,"reason":"No data is available for this location"}', 400);
+  it('gives the air-quality endpoint the same non-model wording by construction (#45)', async () => {
+    // No live case triggers the gap here today — the CAMS grid is global — so the
+    // guarantee is structural: an endpoint with no models input never draws the models
+    // wording.
+    respondWith('{"error":true,"reason":"No data is available for this location"}', 400);
 
-      const error = await call().catch((e: Error) => e);
+    const error = await getOpenMeteoService()
+      .getAirQuality(90, 0, { hourly: ['pm2_5'] }, createMockContext())
+      .catch((e: Error) => e);
 
-      if (!(error instanceof Error)) throw new Error(`Expected ${operation} to reject`);
-      expect(error.message).toContain('90, 0');
-      expect(error.message).toContain(`${operation} dataset's grid does not cover this coordinate`);
-      expect(error.message).not.toMatch(/model/i);
-    },
-  );
+    if (!(error instanceof Error)) throw new Error('Expected air-quality to reject');
+    expect(error.message).toContain('90, 0');
+    expect(error.message).toContain("air-quality dataset's grid does not cover this coordinate");
+    expect(error.message).not.toMatch(/model/i);
+  });
+
+  it('gives the forecast endpoint the model-switch recovery now that it takes models (#80)', async () => {
+    // Live: models=icon_d2 at Seattle answers HTTP 400 "No data is available for this
+    // location" — a regional model outside its domain, fixed by switching models.
+    respondWith('{"error":true,"reason":"No data is available for this location"}', 400);
+
+    const error = await getOpenMeteoService()
+      .getForecast(
+        47.6,
+        -122.3,
+        { hourly: ['temperature_2m'], models: ['icon_d2'] },
+        createMockContext(),
+      )
+      .catch((e: Error) => e);
+
+    if (!(error instanceof Error)) throw new Error('Expected getForecast to reject');
+    expect(error).toMatchObject({ data: { reason: 'coverage_gap' } });
+    expect(error.message).toContain('47.6, -122.3');
+    expect(error.message).toContain('Switch to a model whose domain includes this coordinate');
+    expect(error.message).not.toContain("dataset's grid does not cover this coordinate");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends the forecast models list with a literal comma, and omits it when absent (#80)', async () => {
+    respondWith('{"latitude":47.6,"longitude":-122.3,"elevation":59}');
+    const ctx = createMockContext();
+    const service = getOpenMeteoService();
+
+    await service.getForecast(47.6, -122.3, { hourly: ['temperature_2m'] }, ctx);
+    await service.getForecast(
+      47.6,
+      -122.3,
+      { hourly: ['temperature_2m'], models: ['gfs_seamless', 'ecmwf_ifs025'] },
+      ctx,
+    );
+
+    const [withoutModels, withModels] = fetchMock.mock.calls.map(([url]) => new URL(String(url)));
+    expect(withoutModels?.searchParams.has('models')).toBe(false);
+    expect(withModels?.searchParams.get('models')).toBe('gfs_seamless,ecmwf_ifs025');
+    expect(withModels?.search).not.toContain('%2C');
+  });
+
+  it('sends the flood models list with a literal comma, and omits it when absent (#79)', async () => {
+    respondWith('{"latitude":47.475006,"longitude":-122.22499}');
+    const ctx = createMockContext();
+    const service = getOpenMeteoService();
+
+    await service.getFlood(47.48, -122.21, { daily: ['river_discharge'], forecast_days: 2 }, ctx);
+    await service.getFlood(
+      47.48,
+      -122.21,
+      {
+        daily: ['river_discharge'],
+        forecast_days: 2,
+        models: ['consolidated_v4', 'forecast_v4'],
+      },
+      ctx,
+    );
+
+    const [withoutModels, withModels] = fetchMock.mock.calls.map(([url]) => new URL(String(url)));
+    expect(withoutModels?.searchParams.has('models')).toBe(false);
+    expect(withModels?.searchParams.get('models')).toBe('consolidated_v4,forecast_v4');
+    expect(withModels?.search).not.toContain('%2C');
+  });
+
+  it('keeps the grid wording on flood although it takes models — every GloFAS model shares one grid (#79)', async () => {
+    // Live: models=seamless_v4,consolidated_v4 at the South Pole answers with the same
+    // nan body as no models at all, so switching models cannot reach the point.
+    respondWith(
+      '{"latitude":nan,"longitude":nan,"generationtime_ms":0.01,"utc_offset_seconds":0,"timezone":"GMT","timezone_abbreviation":"GMT"}',
+    );
+
+    const error = await getOpenMeteoService()
+      .getFlood(
+        -90,
+        0,
+        { daily: ['river_discharge'], models: ['seamless_v4', 'consolidated_v4'] },
+        createMockContext(),
+      )
+      .catch((e: Error) => e);
+
+    if (!(error instanceof Error)) throw new Error('Expected getFlood to reject');
+    expect(error).toMatchObject({ data: { reason: 'coverage_gap' } });
+    expect(error.message).toContain("flood dataset's grid does not cover this coordinate");
+    expect(error.message).not.toMatch(/switch/i);
+  });
 
   it.each([
     [
@@ -580,7 +653,336 @@ describe('OpenMeteoService HTTP 429 (#49, #56, #75)', () => {
     const error = (outcome as { error: Error & { code?: number; data?: unknown } }).error;
     expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(error.message).toBe('Open-Meteo API unavailable after 3 attempts.');
-    expect(error.data).toEqual({ retryAttempts: 3 });
+    expect(error.data).toEqual({ reason: 'upstream_unavailable', retryAttempts: 3 });
+  });
+});
+
+describe('OpenMeteoService failure reasons (#77)', () => {
+  const NAN_BODY =
+    '{"latitude":nan,"longitude":nan,"generationtime_ms":0.01,"utc_offset_seconds":0,"timezone":"GMT","timezone_abbreviation":"GMT"}';
+  const NO_DATA = '{"error":true,"reason":"No data is available for this location"}';
+  const EXHAUSTED = 'Open-Meteo API unavailable after 3 attempts.';
+
+  type Step = () => Promise<Response>;
+  const timedOut: Step = () =>
+    Promise.reject(new DOMException('The operation timed out.', 'TimeoutError'));
+  const down: Step = () =>
+    Promise.resolve(new Response('{"error":true,"reason":"upstream down"}', { status: 503 }));
+  const html: Step = () =>
+    Promise.resolve(new Response('<!DOCTYPE html><html><body>502</body></html>', { status: 502 }));
+  const unreachable: Step = () => Promise.reject(new TypeError('fetch failed'));
+
+  /** Answer each request with the next step in turn, the last one repeating. */
+  const ladder = (...steps: Step[]): void => {
+    let call = 0;
+    fetchMock.mockImplementation(() => (steps[Math.min(call++, steps.length - 1)] ?? down)());
+  };
+
+  /** Run a forecast call to settlement, with the clock moved well past the whole backoff. */
+  const settleForecast = async () => {
+    const pending = getOpenMeteoService()
+      .getForecast(47.6, -122.3, { hourly: ['temperature_2m'] }, createMockContext())
+      .then(
+        () => undefined,
+        (error: unknown) => error as Error & { code?: number; data?: unknown },
+      );
+    await vi.advanceTimersByTimeAsync(10_000);
+    return pending;
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', fetchMock);
+    initOpenMeteoService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    [
+      'ensemble, nan body',
+      NAN_BODY,
+      200,
+      (ctx: ReturnType<typeof createMockContext>) =>
+        getOpenMeteoService().getEnsemble(
+          47.6,
+          -122.3,
+          { hourly: ['temperature_2m'], models: 'icon_d2_eps' },
+          ctx,
+        ),
+    ],
+    [
+      'historical, no-data envelope',
+      NO_DATA,
+      400,
+      (ctx: ReturnType<typeof createMockContext>) =>
+        getOpenMeteoService().getHistorical(
+          47.6,
+          -122.3,
+          {
+            start_date: '2024-07-01',
+            end_date: '2024-07-02',
+            hourly: ['temperature_2m'],
+            models: ['cerra'],
+          },
+          ctx,
+        ),
+    ],
+    [
+      'marine, no-data envelope',
+      NO_DATA,
+      400,
+      (ctx: ReturnType<typeof createMockContext>) =>
+        getOpenMeteoService().getMarine(-90, 0, { hourly: ['wave_height'] }, ctx),
+    ],
+    [
+      'flood, nan body',
+      NAN_BODY,
+      200,
+      (ctx: ReturnType<typeof createMockContext>) =>
+        getOpenMeteoService().getFlood(-90, 0, { daily: ['river_discharge'] }, ctx),
+    ],
+  ])(
+    'tags a coverage gap (%s) coverage_gap and nothing else, after one request',
+    async (_label, body, status, call) => {
+      fetchMock.mockImplementation(() => Promise.resolve(new Response(body, { status })));
+
+      const error = await call(createMockContext()).catch((e: unknown) => e);
+
+      expect(error).toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+      expect((error as { data?: unknown }).data).toEqual({ reason: 'coverage_gap' });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('tags three timeouts upstream_timeout, keeping the outage code and message', async () => {
+    ladder(timedOut);
+    const error = await settleForecast();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error?.message).toBe(EXHAUSTED);
+    expect(error?.data).toEqual({ reason: 'upstream_timeout', retryAttempts: 3 });
+  });
+
+  it.each([
+    ['three 503s', [down]],
+    ['three CDN HTML pages', [html]],
+    ['three unreachable attempts', [unreachable]],
+    ['a timeout, then two 503s', [timedOut, down]],
+    ['a timeout, an unreachable host, then HTML', [timedOut, unreachable, html]],
+  ])('tags %s upstream_unavailable — the last attempt decides', async (_label, steps) => {
+    ladder(...steps);
+    const error = await settleForecast();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error?.message).toBe(EXHAUSTED);
+    expect(error?.data).toEqual({ reason: 'upstream_unavailable', retryAttempts: 3 });
+  });
+
+  it.each([
+    ['two 503s, then a timeout', [down, down, timedOut]],
+    ['HTML, an unreachable host, then a timeout', [html, unreachable, timedOut]],
+  ])('tags %s upstream_timeout — the last attempt decides', async (_label, steps) => {
+    ladder(...steps);
+    const error = await settleForecast();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(error?.data).toEqual({ reason: 'upstream_timeout', retryAttempts: 3 });
+  });
+
+  it('hands back the caller abort untouched when cancelled during a timeout backoff', async () => {
+    ladder(timedOut);
+    const controller = new AbortController();
+    const pending = getOpenMeteoService()
+      .getForecast(
+        47.6,
+        -122.3,
+        { hourly: ['temperature_2m'] },
+        createMockContext({ signal: controller.signal }),
+      )
+      .catch((e: unknown) => e);
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(10_000);
+    const error = await pending;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The caller's own abort reason, neither tagged nor rewrapped as an outage.
+    expect(error).toBe(controller.signal.reason);
+  });
+});
+
+/**
+ * The per-attempt timeout covers the body read as well as the wait for headers. These
+ * run the real `fetch` against a loopback server that sends headers and the first bytes
+ * of a body, then stalls. `AbortSignal.timeout` is replaced by a controller the test
+ * fires once the response is in hand, with the reason the real timer aborts with, so the
+ * timeout lands mid-body every time rather than racing the headers. The retry backoff
+ * (500 ms, then 1 s) runs on a faked clock: only `setTimeout` and `clearTimeout` are
+ * faked, so the socket I/O and `setImmediate` stay real, and {@link drive} moves the
+ * clock between turns of the event loop.
+ */
+describe('OpenMeteoService body-read failures (#77)', () => {
+  const OK_FORECAST_BODY = JSON.stringify({
+    latitude: 47.6,
+    longitude: -122.3,
+    hourly_units: { time: 'iso8601', temperature_2m: '°C' },
+    hourly: { time: ['2026-07-30T00:00'], temperature_2m: [15.2] },
+  });
+  const realFetch = globalThis.fetch;
+
+  let server: Server;
+  let origin: string;
+  /** What the server does with each request in turn; the last entry repeats. */
+  let plan: ('stall' | 'reset' | 'ok')[];
+  let requestCount: number;
+  const open = new Set<ServerResponse>();
+  /** One per attempt, standing in for that attempt's `AbortSignal.timeout`. */
+  let attemptTimers: AbortController[];
+  /** Runs after each response's headers arrive and before the service reads its body. */
+  let onHeaders: () => void;
+
+  beforeAll(async () => {
+    server = createServer((_req, res) => {
+      const step = plan[Math.min(requestCount, plan.length - 1)];
+      requestCount += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (step === 'ok') {
+        res.end(OK_FORECAST_BODY);
+        return;
+      }
+      res.write('{"latitude":47.6,');
+      if (step === 'reset') {
+        res.destroy();
+        return;
+      }
+      open.add(res);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  beforeEach(() => {
+    plan = ['stall'];
+    requestCount = 0;
+    attemptTimers = [];
+    onHeaders = () => undefined;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => {
+      const timer = new AbortController();
+      attemptTimers.push(timer);
+      return timer.signal;
+    });
+    // The service's URL, re-pointed at the loopback server; the response is the real one.
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      const { pathname, search } = new URL(url);
+      const response = await realFetch(`${origin}${pathname}${search}`, init);
+      onHeaders();
+      return response;
+    });
+    initOpenMeteoService();
+  });
+
+  afterEach(() => {
+    for (const res of open) res.destroy();
+    open.clear();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Settles `pending`, yielding one real event-loop turn (socket I/O included) before each
+   * 100 ms step of the faked clock, so each retry backoff elapses only once the attempt
+   * before it has failed.
+   */
+  const drive = async <T>(pending: Promise<T>): Promise<T> => {
+    const settled = pending.then(
+      () => true,
+      () => true,
+    );
+    const turn = () => new Promise<false>((resolve) => setImmediate(resolve, false));
+    while (!(await Promise.race([settled, turn()]))) await vi.advanceTimersByTimeAsync(100);
+    return pending;
+  };
+
+  /** Fire the current attempt's timer the way `AbortSignal.timeout` would. */
+  const fireAttemptTimeout = () =>
+    setImmediate(() =>
+      attemptTimers.at(-1)?.abort(new DOMException('The operation timed out.', 'TimeoutError')),
+    );
+
+  const forecast = (ctx = createMockContext()) =>
+    getOpenMeteoService().getForecast(47.6, -122.3, { hourly: ['temperature_2m'] }, ctx);
+
+  it('retries a timeout that fires mid-body and exhausts as upstream_timeout', async () => {
+    onHeaders = fireAttemptTimeout;
+
+    const error = await drive(
+      forecast().then(
+        () => undefined,
+        (e: unknown) => e as Error & { code?: number; data?: unknown },
+      ),
+    );
+
+    expect(requestCount).toBe(3);
+    expect(error).toBeInstanceOf(McpError);
+    expect(error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error?.message).toBe('Open-Meteo API unavailable after 3 attempts.');
+    expect(error?.data).toEqual({ reason: 'upstream_timeout', retryAttempts: 3 });
+    // A fresh 15 s per-attempt timeout armed for each of the three attempts.
+    expect(vi.mocked(AbortSignal.timeout).mock.calls).toEqual([[15_000], [15_000], [15_000]]);
+  });
+
+  it('returns the next attempt’s body after one mid-body timeout', async () => {
+    plan = ['stall', 'ok'];
+    onHeaders = () => {
+      if (requestCount === 1) fireAttemptTimeout();
+    };
+
+    await expect(drive(forecast())).resolves.toEqual(JSON.parse(OK_FORECAST_BODY));
+    expect(requestCount).toBe(2);
+  });
+
+  it('retries a connection reset mid-body and exhausts as upstream_unavailable', async () => {
+    plan = ['reset'];
+
+    const error = await drive(
+      forecast().then(
+        () => undefined,
+        (e: unknown) => e as Error & { code?: number; data?: unknown },
+      ),
+    );
+
+    expect(requestCount).toBe(3);
+    expect(error).toBeInstanceOf(McpError);
+    expect(error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error?.data).toEqual({ reason: 'upstream_unavailable', retryAttempts: 3 });
+  });
+
+  it('hands back the caller abort untouched when the caller cancels mid-body', async () => {
+    const controller = new AbortController();
+    onHeaders = () => setImmediate(() => controller.abort());
+
+    const error = await drive(
+      forecast(createMockContext({ signal: controller.signal })).catch((e: unknown) => e),
+    );
+
+    expect(error).toBe(controller.signal.reason);
+    expect(requestCount).toBe(1);
   });
 });
 
@@ -617,6 +1019,53 @@ describe('OpenMeteoService request encoding', () => {
     expect(airQualityUrl).toContain('current=pm2_5,european_aqi');
     expect(airQualityUrl).not.toContain('hourly=');
     expect(forecastUrl).not.toContain('%2C');
+  });
+
+  it('sends a marine call that names no current or unit input exactly as before (#81)', async () => {
+    // Characterization: the request every existing marine caller makes, end to end
+    // through the tool's schema defaults and the URL builder.
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      latitude: 47.8,
+      longitude: -122.5,
+      hourly_variables: ['wave_height'],
+      daily_variables: ['wave_height_max'],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(requestedUrls()).toEqual([
+      'https://marine-api.open-meteo.com/v1/marine?latitude=47.8&longitude=-122.5&hourly=wave_height&daily=wave_height_max&past_days=0&timezone=auto',
+    ]);
+  });
+
+  it('sends explicit default marine units as no parameter, the same request as omitting them (#81)', async () => {
+    await runToolContract(openmeteoGetMarineTool, {
+      latitude: 47.8,
+      longitude: -122.5,
+      hourly_variables: ['wave_height'],
+      daily_variables: ['wave_height_max'],
+      length_unit: 'metric',
+      wind_speed_unit: 'kmh',
+      temperature_unit: 'celsius',
+    });
+    expect(requestedUrls()).toEqual([
+      'https://marine-api.open-meteo.com/v1/marine?latitude=47.8&longitude=-122.5&hourly=wave_height&daily=wave_height_max&past_days=0&timezone=auto',
+    ]);
+  });
+
+  it('forwards marine current and unit inputs onto the marine URL (#81)', async () => {
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      latitude: 46.9,
+      longitude: -124.6,
+      current_variables: ['wave_height', 'ocean_current_velocity', 'sea_surface_temperature'],
+      length_unit: 'imperial',
+      wind_speed_unit: 'mph',
+      temperature_unit: 'fahrenheit',
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(requestedUrls()).toEqual([
+      'https://marine-api.open-meteo.com/v1/marine?latitude=46.9&longitude=-124.6&current=wave_height,ocean_current_velocity,sea_surface_temperature&start_date=2024-07-01&end_date=2024-07-02&temperature_unit=fahrenheit&wind_speed_unit=mph&length_unit=imperial&timezone=auto',
+    ]);
   });
 
   it('omits the current parameter when no current variables were requested (#42)', async () => {

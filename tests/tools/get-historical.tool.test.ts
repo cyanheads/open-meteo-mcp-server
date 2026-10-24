@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetHistoricalTool } from '@/mcp-server/tools/definitions/get-historical.tool.js';
+import { ARCHIVE_MODELS } from '@/mcp-server/tools/model-catalog.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
@@ -347,15 +348,44 @@ describe('openmeteoGetHistoricalTool', () => {
       end_date: '2024-07-02',
       hourly_variables: ['bogus_historical_var'],
     });
-    await expect(wireError(openmeteoGetHistoricalTool, input)).resolves.toMatchObject({
+    const error = await wireError(openmeteoGetHistoricalTool, input);
+    expect(error).toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       // The tool now takes models too, so the framing covers both kinds of name (#37).
       message: expect.stringMatching(/^Unknown variable or model name: bogus_historical_var\./),
       data: {
         reason: 'invalid_variable',
-        recovery: { hint: expect.stringContaining('Open-Meteo docs') },
+        recovery: {
+          hint: expect.stringMatching(/^Check the variable name against Open-Meteo docs\./),
+        },
       },
     });
+    // No models went upstream, so the rejected name is a variable: the hint lists no models.
+    expect(error.data?.recovery?.hint).not.toContain('Documented models');
+    for (const model of ARCHIVE_MODELS)
+      expect(error.data?.recovery?.hint).not.toContain(model.name);
+  });
+
+  it('lists the archive models in the invalid_variable hint when models were sent', async () => {
+    mockGetHistorical.mockResolvedValue({
+      error: true,
+      reason: 'Cannot initialize MultiDomains from invalid String value bogus_model',
+    });
+    const error = await wireError(openmeteoGetHistoricalTool, {
+      latitude: 47.6,
+      longitude: -122.3,
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      daily_variables: ['temperature_2m_max'],
+      models: ['era5', 'bogus_model'],
+    });
+    expect(error.data?.reason).toBe('invalid_variable');
+    expect(error.data?.recovery?.hint).toMatch(
+      /^Check the variable name against Open-Meteo docs\./,
+    );
+    expect(error.data?.recovery?.hint).toContain(
+      `Documented models: ${ARCHIVE_MODELS.map((m) => m.name).join(', ')}.`,
+    );
   });
 
   it('classifies the upstream too-much-data rejection as request_too_large (#50)', async () => {
@@ -792,7 +822,7 @@ describe('openmeteoGetHistoricalTool', () => {
   });
   it('bounds the preview and sets truncated=true when the payload is oversized and canvas is disabled', async () => {
     // #28: the budget check used to act only inside the `if (canvas)` branch, so a
-    // default deployment (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
+    // deployment with DataCanvas off (CANVAS_PROVIDER_TYPE=none) fell through to an unbounded
     // inline return carrying truncated: false — the field a client reads to decide
     // whether anything is missing.
     const hourlyTime = hourlyTimes(43_848);
@@ -1298,6 +1328,147 @@ describe('openmeteoGetHistoricalTool archive model selection (#37)', () => {
     const text = firstText(openmeteoGetHistoricalTool.format!(result));
     expect(text).toContain('era5');
     expect(text).toContain('cerra');
+  });
+
+  it('adds no notice for a single model or an omitted models list (#83)', async () => {
+    // One model answers with plain column names, and so does Best Match: nothing to attribute.
+    for (const extra of [{ models: ['era5'] }, {}]) {
+      mockGetHistorical.mockResolvedValue(MOCK_RESPONSE);
+      const result = await runToolContract(openmeteoGetHistoricalTool, {
+        latitude: 47.6,
+        longitude: -122.3,
+        start_date: '2024-07-01',
+        end_date: '2024-07-02',
+        daily_variables: ['temperature_2m_max', 'precipitation_sum'],
+        ...extra,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).not.toHaveProperty('notice');
+    }
+  });
+
+  /** Live archive shape for era5,cerra at Seattle: cerra dropped, plain column names. */
+  const ERA5_CERRA_SEATTLE = {
+    ...MOCK_RESPONSE,
+    latitude: 47.5,
+    longitude: -122.25,
+    daily_units: { time: 'iso8601', temperature_2m_max: '°C' },
+    daily: { time: ['2024-01-01', '2024-01-02'], temperature_2m_max: [8.1, 8.2] },
+  };
+
+  const seattleCall = (models: string[]) =>
+    runToolContract(openmeteoGetHistoricalTool, {
+      latitude: 47.6,
+      longitude: -122.33,
+      start_date: '2024-01-01',
+      end_date: '2024-01-02',
+      daily_variables: ['temperature_2m_max'],
+      models,
+    });
+
+  it('says the unsuffixed columns of a multi-model request are unattributable, naming cerra (#83)', async () => {
+    mockGetHistorical.mockResolvedValue(ERA5_CERRA_SEATTLE);
+
+    const result = await seattleCall(['era5', 'cerra']);
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      daily: Record<string, unknown>[];
+      models: string[];
+      notice?: string;
+    };
+    // The data and the echo are untouched — the notice is what tells the caller.
+    expect(structured.models).toEqual(['era5', 'cerra']);
+    expect(structured.daily).toEqual([
+      { time: '2024-01-01', temperature_2m_max: 8.1 },
+      { time: '2024-01-02', temperature_2m_max: 8.2 },
+    ]);
+    expect(structured.notice).toContain(
+      'temperature_2m_max came back without a model suffix although 2 models were requested',
+    );
+    expect(structured.notice).toContain('unattributable');
+    expect(structured.notice).toContain('one of era5, cerra');
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain('unattributable');
+    expect(text).toContain('one of era5, cerra');
+  });
+
+  it('names only the dropped model when the others come back suffixed (#83)', async () => {
+    mockGetHistorical.mockResolvedValue({
+      ...ERA5_CERRA_SEATTLE,
+      daily_units: {
+        time: 'iso8601',
+        temperature_2m_max_era5: '°C',
+        temperature_2m_max_era5_land: '°C',
+      },
+      daily: {
+        time: ['2024-01-01', '2024-01-02'],
+        temperature_2m_max_era5: [8.1, 8.2],
+        temperature_2m_max_era5_land: [7.9, 8.0],
+      },
+    });
+
+    const result = await seattleCall(['era5', 'era5_land', 'cerra']);
+
+    const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+    expect(notice).toContain('Open-Meteo returned no columns for cerra');
+    expect(notice).toContain('compares only era5, era5_land');
+    expect(notice).not.toContain('unattributable');
+  });
+
+  it('says which model does not serve a variable rather than blaming the cadence (#83)', async () => {
+    mockGetHistorical.mockResolvedValue({
+      ...ERA5_CERRA_SEATTLE,
+      daily_units: {
+        time: 'iso8601',
+        temperature_2m_max_era5: '°C',
+        temperature_2m_max_era5_land: 'undefined',
+      },
+      daily: {
+        time: ['2024-01-01', '2024-01-02'],
+        temperature_2m_max_era5: [8.1, 8.2],
+        temperature_2m_max_era5_land: [null, null],
+      },
+    });
+
+    const result = await seattleCall(['era5', 'era5_land']);
+
+    const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+    expect(notice).toContain('era5_land does not serve temperature_2m_max');
+    expect(notice).not.toContain('cadence');
+  });
+
+  it('names the selected model as a cause of an "undefined" unit on a single-model call (#83)', async () => {
+    mockGetHistorical.mockResolvedValue({
+      ...ERA5_CERRA_SEATTLE,
+      daily_units: { time: 'iso8601', temperature_2m_max: 'undefined' },
+      daily: { time: ['2024-01-01', '2024-01-02'], temperature_2m_max: [null, null] },
+    });
+
+    const result = await seattleCall(['era5_land']);
+
+    const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+    expect(notice).toContain('or the selected model (era5_land) does not serve it');
+  });
+
+  it('adds no dropped-model notice when every requested model covers the point (#83)', async () => {
+    mockGetHistorical.mockResolvedValue({
+      ...ERA5_CERRA_SEATTLE,
+      daily_units: {
+        time: 'iso8601',
+        temperature_2m_max_era5: '°C',
+        temperature_2m_max_era5_land: '°C',
+      },
+      daily: {
+        time: ['2024-01-01', '2024-01-02'],
+        temperature_2m_max_era5: [8.1, 8.2],
+        temperature_2m_max_era5_land: [7.9, 8.0],
+      },
+    });
+
+    const result = await seattleCall(['era5', 'era5_land']);
+
+    expect(result.structuredContent).not.toHaveProperty('notice');
   });
 
   it('names the Best Match blend on content[] when no model was selected', async () => {

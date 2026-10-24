@@ -1,6 +1,7 @@
 /**
- * @fileoverview Documented model sets for the three tools that take a `models` input
- * (openmeteo_get_ensemble, openmeteo_get_climate, openmeteo_get_historical).
+ * @fileoverview Documented model sets for the tools that take a `models` input
+ * (openmeteo_get_forecast, openmeteo_get_ensemble, openmeteo_get_climate,
+ * openmeteo_get_historical, openmeteo_get_flood).
  *
  * These are NOT allowlists. Nothing here is checked, before a request or after: a model
  * name the catalog does not carry goes upstream untouched, so a model Open-Meteo adds
@@ -19,9 +20,11 @@
  *
  * Provenance: each set is the model list published on the matching Open-Meteo
  * documentation page:
+ *   forecast — https://open-meteo.com/en/docs (read 2026-10-24)
  *   ensemble — https://open-meteo.com/en/docs/ensemble-api (read 2026-07-30)
  *   climate  — https://open-meteo.com/en/docs/climate-api (read 2026-07-30)
  *   archive  — https://open-meteo.com/en/docs/historical-weather-api (read 2026-09-09)
+ *   flood    — https://open-meteo.com/en/docs/flood-api (read 2026-10-24; spans measured live)
  * The ensemble names are the values that page emits in its own `models=` URL, plus
  * `bom_access_global_ensemble`, which the page lists in its model table (as ACCESS-GE)
  * without offering a selector for it — the value is served all the same. Older
@@ -118,6 +121,133 @@ export const ARCHIVE_MODEL_LIST = ARCHIVE_MODELS.map((m) => `${m.name} (${m.note
 
 /** The advertised archive names alone, for a recovery hint with no room for notes. */
 export const ARCHIVE_MODEL_NAMES = ARCHIVE_MODELS.map((m) => m.name).join(', ');
+
+/**
+ * Documented deterministic forecast models (57), in the order the forecast documentation
+ * page groups them by provider. `best_match` is the value an omitted `models` selects.
+ *
+ * These are the provider-prefixed spellings the page now publishes (`ncep_gfs_seamless`,
+ * `dwd_icon_seamless`, `cmc_gem_seamless`). The older short spellings (`gfs_seamless`,
+ * `icon_seamless`, `icon_d2`, `gfs_hrrr`) still resolve upstream and suffix columns with
+ * the name as sent, so a caller carrying one is not broken by advertising these.
+ *
+ * Global and regional models share one list: a regional model outside its domain is
+ * either dropped from a multi-model response or, when every requested model misses the
+ * coordinate, rejected as a coverage gap — upstream decides, not this list.
+ */
+export const FORECAST_MODELS: readonly string[] = [
+  'best_match',
+  'ecmwf_ifs',
+  'ecmwf_ifs025',
+  'ecmwf_aifs025_single',
+  'cma_grapes_global',
+  'bom_access_global',
+  'ncep_gfs_seamless',
+  'ncep_gfs_global',
+  'ncep_hrrr_conus',
+  'ncep_nbm_conus',
+  'ncep_nam_conus',
+  'ncep_aigfs025',
+  'ncep_hgefs025_ensemble_mean',
+  'jma_seamless',
+  'jma_msm',
+  'jma_gsm',
+  'kma_seamless',
+  'kma_ldps',
+  'kma_gdps',
+  'dwd_icon_seamless',
+  'dwd_icon_global',
+  'dwd_icon_global_native',
+  'dwd_aicon_global_native',
+  'dwd_icon_eu',
+  'dwd_icon_eu_native',
+  'dwd_icon_d2',
+  'dwd_icon_d2_native',
+  'dwd_icon_d2_ruc_native',
+  'cmc_gem_seamless',
+  'cmc_gem_gdps',
+  'cmc_gem_rdps',
+  'cmc_gem_hrdps',
+  'cmc_gem_hrdps_west',
+  'meteofrance_seamless',
+  'meteofrance_arpege_world',
+  'meteofrance_arpege_europe',
+  'meteofrance_arome_france',
+  'meteofrance_arome_france_hd',
+  'italia_meteo_arpae_icon_2i',
+  'metno_seamless',
+  'metno_nordic',
+  'knmi_seamless',
+  'knmi_harmonie_arome_europe',
+  'knmi_harmonie_arome_netherlands',
+  'dmi_seamless',
+  'dmi_harmonie_arome_europe',
+  'ukmo_seamless',
+  'ukmo_global_deterministic_10km',
+  'ukmo_uk_deterministic_2km',
+  'meteoswiss_icon_seamless',
+  'meteoswiss_icon_ch1',
+  'meteoswiss_icon_ch2',
+  'geosphere_seamless',
+  'geosphere_arome_austria',
+  'chmi_aladin_seamless',
+  'chmi_aladin_central_europe_2km',
+  'chmi_aladin_cz_1km',
+];
+
+/** The advertised forecast names, comma-joined — the input description and recovery hint. */
+export const FORECAST_MODEL_NAMES = FORECAST_MODELS.join(', ');
+
+/**
+ * First day the default `seamless_v4` serves `forecast_v4` run data instead of
+ * `consolidated_v4` reanalysis, as a GMT model date (a timezone east of GMT labels it a
+ * day later). Measured live 2026-10-24 at two points: identical to `consolidated_v4`
+ * through 2023-08-04, identical to `forecast_v4` from here on.
+ */
+export const FLOOD_SEAMLESS_SWITCH_DATE = '2023-08-05';
+
+/**
+ * Last day `consolidated_v4` carries reanalysis; it answers later dates with HTTP 200 and
+ * null rows. Measured live 2026-10-24 — the docs page's source table still says "1984 –
+ * July 2022", which is stale.
+ */
+export const FLOOD_CONSOLIDATED_END_DATE = '2025-05-31';
+
+/**
+ * The GloFAS model an omitted `models` selects — upstream's own default, so the tool sends
+ * nothing and names this model and its two spans when the caller sent none.
+ */
+export const DEFAULT_FLOOD_MODEL: CatalogModel = {
+  name: 'seamless_v4',
+  note: `default — consolidated_v4 reanalysis before ${FLOOD_SEAMLESS_SWITCH_DATE}, forecast_v4 runs from ${FLOOD_SEAMLESS_SWITCH_DATE} into the live forecast`,
+};
+
+/**
+ * Documented GloFAS version 4 models (3): {@link DEFAULT_FLOOD_MODEL} first, then the two
+ * sources it stitches together, each with the span it serves.
+ *
+ * The page also lists the `_v3` trio. It is left out on purpose: a frozen 0.1° dataset
+ * that resolves a coordinate to a different river reach than v4 and serves no recent or
+ * forecast days, so advertising it invites a silent wrong-reach comparison. The names
+ * still pass through upstream for a caller who asks for them.
+ */
+export const FLOOD_MODELS: readonly CatalogModel[] = [
+  DEFAULT_FLOOD_MODEL,
+  {
+    name: 'consolidated_v4',
+    note: `reanalysis from 1984 through ${FLOOD_CONSOLIDATED_END_DATE}; null after it and on every forecast_days call`,
+  },
+  {
+    name: 'forecast_v4',
+    note: 'forecast runs from 2023-06-01 into the live forecast; null before',
+  },
+];
+
+/** The advertised flood list — `name (span)`, comma-joined. */
+export const FLOOD_MODEL_LIST = FLOOD_MODELS.map((m) => `${m.name} (${m.note})`).join(', ');
+
+/** The advertised flood names alone, for a recovery hint with no room for notes. */
+export const FLOOD_MODEL_NAMES = FLOOD_MODELS.map((m) => m.name).join(', ');
 
 /** Documented CMIP6 climate models (7). */
 export const CLIMATE_MODELS: readonly string[] = [

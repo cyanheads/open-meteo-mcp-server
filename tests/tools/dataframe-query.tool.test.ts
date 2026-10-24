@@ -16,8 +16,9 @@ import {
 import { JsonRpcErrorCode, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { openmeteoDataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 import { openmeteoDataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
-import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
+import { INLINE_CHARS, stageSpill } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { wireError } from '../helpers/wire-error.js';
 
@@ -518,9 +519,9 @@ describe('openmeteoDataframeQueryTool content[] cell encoding (#66)', () => {
   });
 });
 
-/** Hourly timestamps for a leap year, as Open-Meteo stages them: `YYYY-MM-DDTHH:MM`. */
-function hourlyTimes(count: number): string[] {
-  const start = Date.UTC(2024, 0, 1);
+/** Hourly timestamps as Open-Meteo stages them (`YYYY-MM-DDTHH:MM`), from 2024-01-01 by default. */
+function hourlyTimes(count: number, from = '2024-01-01T00:00'): string[] {
+  const start = Date.parse(`${from}:00Z`);
   return Array.from({ length: count }, (_, i) =>
     new Date(start + i * 3_600_000).toISOString().slice(0, 16),
   );
@@ -736,6 +737,167 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
         expect(s.structured).toMatchObject({ rows: [], row_count: 0 });
         expect(s.text).toContain('No rows returned');
       }
+    });
+  });
+
+  /**
+   * Every example SQL in the `sql` description, read from the description itself and run
+   * through the tool on tables staged the way the spilling tools stage them
+   * (`stageSpill`), so `time` is the VARCHAR the real union table carries (#78).
+   */
+  describe('the sql description examples (#78)', () => {
+    const description = openmeteoDataframeQueryTool.input.shape.sql.description ?? '';
+    const examples = [...description.matchAll(/`(SELECT [^`]+)`/g)].map((m) => m[1] as string);
+    const dateExample = examples.find((sql) => sql.includes('strftime'));
+    const memberExample = examples.find((sql) => sql.includes('COLUMNS('));
+    const tables: Record<'daily' | 'hourly' | 'mixed' | 'members', string> = {
+      daily: '',
+      hourly: '',
+      mixed: '',
+      members: '',
+    };
+
+    /** Two days either side of a month boundary; each month holds one value per column. */
+    const dailyRecords = ['2024-01-30', '2024-01-31', '2024-02-01', '2024-02-02'].map(
+      (time, i) => ({
+        time,
+        temperature_2m_max: [4, 6, 7, 9][i],
+        sunrise: `${time}T07:4${i}`,
+        sunset: `${time}T17:0${i}`,
+      }),
+    );
+    const hourlyRecords = hourlyTimes(48, '2024-01-31T00:00').map((time) => ({
+      time,
+      temperature_2m: time.startsWith('2024-01') ? 1.5 : 3.5,
+    }));
+
+    /** Members 01–05 beside the control run and a temperature member the pattern must skip. */
+    const memberRows: [number | null, (number | null)[]][] = [
+      [9, [0, 0.6, 0.7, 0.2, 1]], // control > 0.5 is not counted: 3 of 5
+      [0, [0.5, 0.5, 0.5, 0.5, 0.5]], // strictly greater: 0 of 5
+      [2, [0.6, null, 0.9, null, 0.1]], // partial reporting: 2 of 3
+      [0.6, [1.2, 1.4, 1.1, 1.3, 1.6]], // all over: 5 of 5
+      [null, [null, null, null, null, null]], // past the last forecast hour
+      [null, [null, null, null, null, null]],
+    ];
+    const memberRecords = hourlyTimes(memberRows.length, '2026-07-30T00:00').map((time, i) => {
+      const [control, members] = memberRows[i] as [number | null, (number | null)[]];
+      const row: Record<string, unknown> = {
+        time,
+        precipitation: control,
+        temperature_2m_member01: control === null ? null : 20,
+      };
+      members.forEach((value, m) => {
+        row[`precipitation_member0${m + 1}`] = value;
+      });
+      return row;
+    });
+
+    beforeAll(async () => {
+      const instance = await canvas.acquire(canvasId, createMockContext({ tenantId: TENANT }));
+      const stage = async (records: readonly Record<string, unknown>[]) =>
+        (await stageSpill(instance, records as Parameters<typeof stageSpill>[1])).tableName;
+      tables.daily = await stage(dailyRecords);
+      tables.hourly = await stage(hourlyRecords);
+      tables.mixed = await stage([...hourlyRecords, ...dailyRecords]);
+      tables.members = await stage(memberRecords);
+    });
+
+    const runExample = (sql: string, table: string, column?: string) =>
+      run(sql.replaceAll('<table_name>', table).replaceAll('<column>', column ?? '<column>'));
+
+    it('gives exactly two examples — the monthly cast and the ensemble member count', () => {
+      expect(examples).toHaveLength(2);
+      expect(dateExample).toBeDefined();
+      expect(memberExample).toBeDefined();
+      expect(dateExample).toContain("strftime(CAST(time AS TIMESTAMP), '%Y-%m')");
+    });
+
+    it.each([
+      ['daily-only', 'daily', 'temperature_2m_max', [5, 8]],
+      ['hourly-only', 'hourly', 'temperature_2m', [1.5, 3.5]],
+      ['mixed, an hourly column', 'mixed', 'temperature_2m', [1.5, 3.5]],
+      ['mixed, a daily column', 'mixed', 'temperature_2m_max', [5, 8]],
+    ] as const)('runs the monthly example on a %s table', async (_label, table, column, means) => {
+      const result = await runExample(dateExample as string, tables[table], column);
+
+      expect(result.isError).toBeFalsy();
+      expect((result.structuredContent as Structured).rows).toEqual([
+        { month: '2024-01', mean: means[0] },
+        { month: '2024-02', mean: means[1] },
+      ]);
+    });
+
+    it('runs the member example: counts members only, with a per-row denominator', async () => {
+      const result = await runExample(memberExample as string, tables.members);
+
+      expect(result.isError).toBeFalsy();
+      const rows = (result.structuredContent as Structured).rows.map((row) => ({
+        time: row.time,
+        over: Number(row.members_over),
+        reporting: Number(row.members_reporting),
+      }));
+      expect(rows).toEqual([
+        { time: '2026-07-30T00:00', over: 3, reporting: 5 },
+        { time: '2026-07-30T01:00', over: 0, reporting: 5 },
+        { time: '2026-07-30T02:00', over: 2, reporting: 3 },
+        { time: '2026-07-30T03:00', over: 5, reporting: 5 },
+        { time: '2026-07-30T04:00', over: 0, reporting: 0 },
+        { time: '2026-07-30T05:00', over: 0, reporting: 0 },
+      ]);
+    });
+
+    it('runs the member example on the 51-member ensemble, matching all 50 members', async () => {
+      const result = await run(
+        `SELECT DISTINCT members_reporting FROM (${(memberExample as string).replaceAll('<table_name>', 'ens')})`,
+      );
+
+      expect(result.isError).toBeFalsy();
+      expect(
+        (result.structuredContent as Structured).rows.map((r) => Number(r.members_reporting)),
+      ).toEqual([50]);
+    });
+
+    it('casts daily sunrise and sunset the way the description says', async () => {
+      const result = await run(
+        `SELECT strftime(CAST(sunrise AS TIMESTAMP), '%H:%M') AS rise, strftime(CAST(sunset AS TIMESTAMP), '%H:%M') AS set FROM ${tables.daily} ORDER BY time LIMIT 1`,
+      );
+      expect((result.structuredContent as Structured).rows).toEqual([
+        { rise: '07:40', set: '17:00' },
+      ]);
+    });
+
+    it('keeps time VARCHAR, so LIKE still separates hourly from daily rows', async () => {
+      mockCanvasInstance = canvas;
+      const described = await runToolContract(
+        openmeteoDataframeDescribeTool,
+        { canvas_id: canvasId },
+        { context: { tenantId: TENANT } },
+      );
+      const staged = (
+        described.structuredContent as {
+          tables: { name: string; columns: { name: string; type: string }[] }[];
+        }
+      ).tables.find((t) => t.name === tables.mixed);
+      expect(staged?.columns.find((c) => c.name === 'time')?.type).toBe('VARCHAR');
+
+      const split = await run(
+        `SELECT count(*) FILTER (WHERE time LIKE '%T%') AS hourly, count(*) FILTER (WHERE time NOT LIKE '%T%') AS daily FROM ${tables.mixed}`,
+      );
+      const [counts] = (split.structuredContent as Structured).rows;
+      expect([Number(counts?.hourly), Number(counts?.daily)]).toEqual([48, 4]);
+    });
+
+    it('fails strftime on the uncast text column, which is why the examples cast', async () => {
+      const error = await wireError(
+        openmeteoDataframeQueryTool,
+        {
+          canvas_id: canvasId,
+          sql: `SELECT strftime(time, '%Y-%m') AS month FROM ${tables.daily}`,
+        },
+        { context: { tenantId: TENANT } },
+      );
+      expect(error.message).toContain('strftime(VARCHAR, STRING_LITERAL)');
     });
   });
 

@@ -33,7 +33,7 @@
  */
 
 /** The input field a variable arrived in, and the one it may belong in. */
-export type VariableField = 'hourly_variables' | 'daily_variables';
+export type VariableField = 'current_variables' | 'hourly_variables' | 'daily_variables';
 
 /** The two documented variable sets of one Open-Meteo endpoint. */
 export interface CadenceCatalog {
@@ -530,18 +530,28 @@ function collect(
 
 /**
  * Every requested variable that is documented in the opposite cadence bucket, in the
- * order the caller listed them (hourly field first). A name valid in the bucket it was
- * passed in is never reported, so a variable both sets publish — `weather_code`, or
- * the ensemble endpoint's `temperature_2m_max` — passes either way.
+ * order the caller listed them (hourly field first, then daily, then current). A name
+ * valid in the bucket it was passed in is never reported, so a variable both sets
+ * publish — `weather_code`, or the ensemble endpoint's `temperature_2m_max` — passes
+ * either way.
+ *
+ * `current` takes the hourly names, so it is checked against the hourly set and a
+ * daily-only name is pointed at daily_variables. Only a tool whose endpoint rejects
+ * that case passes it: the marine endpoint answers `current=wave_height_max` with an
+ * HTTP 400 the unknown-name framing would misreport, while the forecast endpoint
+ * answers the same misplacement with HTTP 200 and an "undefined" unit, which
+ * {@link undefinedUnitColumns} already reports.
  */
 export function findCadenceMismatches(
   catalog: CadenceCatalog,
   hourly: readonly string[] | undefined,
   daily: readonly string[] | undefined,
+  current?: readonly string[],
 ): CadenceMismatch[] {
   return [
     ...collect(hourly, 'hourly_variables', 'daily_variables', catalog.hourly, catalog.daily),
     ...collect(daily, 'daily_variables', 'hourly_variables', catalog.daily, catalog.hourly),
+    ...collect(current, 'current_variables', 'daily_variables', catalog.hourly, catalog.daily),
   ];
 }
 

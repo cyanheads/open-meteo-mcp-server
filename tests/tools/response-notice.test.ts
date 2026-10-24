@@ -2,7 +2,9 @@
  * @fileoverview Tests for the composed response notice and the temporal
  * coverage-gap analysis behind it. Fixtures mirror shapes verified against the live
  * endpoints: a CAMS archive range that opens before the product begins, and an
- * ncep_gefs025 window that runs past the model's horizon.
+ * ncep_gefs025 window that runs past the model's horizon. The model-attribution
+ * fixtures mirror multi-model forecast and archive responses: per-model suffixed
+ * columns, a model upstream dropped, and the plain names left when only one survives.
  * @module tests/tools/response-notice.test
  */
 
@@ -10,9 +12,12 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   byEnsembleVariable,
   type CoverageGap,
+  columnModel,
   composeNotice,
   describeCoverageGaps,
   describeCurrentGaps,
+  describeDroppedModels,
+  describeModelUnserved,
   findCoverageGaps,
   findCurrentGaps,
 } from '@/mcp-server/tools/response-notice.js';
@@ -466,5 +471,127 @@ describe('describeCurrentGaps (#63)', () => {
 
   it('returns undefined when there is nothing to report', () => {
     expect(describeCurrentGaps([])).toBeUndefined();
+  });
+});
+
+describe('columnModel (#80, #83)', () => {
+  // `seamless` leads, so a bare suffix match would claim the `gfs_seamless` columns for it.
+  const selection = {
+    models: ['seamless', 'era5', 'era5_land', 'gfs_seamless'],
+    variables: ['temperature_2m', 'temperature_2m_max'],
+  };
+
+  it('attributes a `<variable>_<model>` column to its requested model', () => {
+    expect(columnModel('temperature_2m_era5', selection)).toBe('era5');
+    expect(columnModel('temperature_2m_max_era5_land', selection)).toBe('era5_land');
+  });
+
+  it('keys on the exact variable–model pair, not a bare name suffix', () => {
+    // `seamless` is a suffix of `gfs_seamless`, but `temperature_2m_gfs` is no requested variable.
+    expect(columnModel('temperature_2m_gfs_seamless', selection)).toBe('gfs_seamless');
+    expect(columnModel('temperature_2m_max_gfs_seamless', selection)).toBe('gfs_seamless');
+    expect(columnModel('temperature_2m_seamless', selection)).toBe('seamless');
+  });
+
+  it('attributes nothing to a bare column, an unknown pair, or a single-model selection', () => {
+    expect(columnModel('temperature_2m', selection)).toBeUndefined();
+    expect(columnModel('wind_speed_10m_era5', selection)).toBeUndefined();
+    expect(columnModel('temperature_2m_era5', { ...selection, models: ['era5'] })).toBeUndefined();
+    expect(columnModel('temperature_2m_era5', { ...selection, models: undefined })).toBeUndefined();
+  });
+});
+
+describe('describeDroppedModels (#80, #83)', () => {
+  const variables = ['temperature_2m'];
+  const block = (...columns: string[]): ColumnarBlock => ({
+    time: ['2026-10-24T00:00'],
+    ...Object.fromEntries(columns.map((c) => [c, [1]])),
+  });
+
+  it('says nothing when every requested model has a column', () => {
+    const selection = { models: ['gfs_seamless', 'ecmwf_ifs025'], variables };
+    expect(
+      describeDroppedModels(
+        selection,
+        block('temperature_2m_gfs_seamless', 'temperature_2m_ecmwf_ifs025'),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('names each model with no suffixed column and the models the response does compare', () => {
+    const selection = { models: ['gfs_seamless', 'icon_d2', 'ecmwf_ifs025', 'arome'], variables };
+    expect(
+      describeDroppedModels(
+        selection,
+        block('temperature_2m_gfs_seamless', 'temperature_2m_ecmwf_ifs025'),
+      ),
+    ).toBe(
+      'Open-Meteo returned no columns for icon_d2, arome — it leaves a requested model out of the ' +
+        'response when it has no data at this coordinate (typically a regional model outside its ' +
+        'domain), so this response compares only gfs_seamless, ecmwf_ifs025.',
+    );
+  });
+
+  it('finds a model across both cadences, so a column in either block counts', () => {
+    const selection = { models: ['a', 'b'], variables: ['temperature_2m', 'precipitation_sum'] };
+    expect(
+      describeDroppedModels(selection, block('temperature_2m_a'), block('precipitation_sum_b')),
+    ).toBeUndefined();
+  });
+
+  it('calls unsuffixed columns from a multi-model request unattributable, naming every candidate', () => {
+    const selection = { models: ['era5', 'cerra'], variables: ['temperature_2m', 'precipitation'] };
+    expect(describeDroppedModels(selection, block('temperature_2m', 'precipitation'))).toBe(
+      'temperature_2m, precipitation came back without a model suffix although 2 models were ' +
+        'requested (era5, cerra) — Open-Meteo leaves out a requested model that has no data at this ' +
+        'coordinate (typically a regional model outside its domain), and the columns of the one left ' +
+        'carry plain names, so these values are unattributable: they come from one of era5, cerra, ' +
+        'and the response does not say which. Request one model at a time to attribute them.',
+    );
+  });
+
+  it('counts a model requested twice once', () => {
+    const selection = { models: ['era5', 'era5', 'cerra'], variables };
+    expect(describeDroppedModels(selection, block('temperature_2m'))).toContain(
+      'although 2 models were requested (era5, cerra)',
+    );
+  });
+
+  it('says nothing for fewer than two models, or when no requested column came back', () => {
+    expect(
+      describeDroppedModels({ models: ['era5'], variables }, block('temperature_2m')),
+    ).toBeUndefined();
+    expect(
+      describeDroppedModels({ models: undefined, variables }, block('temperature_2m')),
+    ).toBeUndefined();
+    expect(
+      describeDroppedModels({ models: ['a', 'b'], variables }, undefined, block()),
+    ).toBeUndefined();
+  });
+});
+
+describe('describeModelUnserved (#80)', () => {
+  const selection = {
+    models: ['gfs_hrrr', 'icon_seamless', 'gem_seamless'],
+    variables: ['lightning_potential', 'cape'],
+  };
+
+  it('names the model that does not serve each "undefined"-unit suffixed column', () => {
+    expect(
+      describeModelUnserved(
+        ['lightning_potential_gfs_hrrr', 'lightning_potential_gem_seamless', 'cape_gfs_hrrr'],
+        selection,
+      ),
+    ).toBe(
+      'lightning_potential_gfs_hrrr, lightning_potential_gem_seamless, cape_gfs_hrrr returned no ' +
+        'data — Open-Meteo reported the unit as "undefined", which on a model-suffixed column means ' +
+        'that model does not serve the variable: gfs_hrrr does not serve lightning_potential, cape; ' +
+        'gem_seamless does not serve lightning_potential. Read those variables from a model that serves them.',
+    );
+  });
+
+  it('leaves bare columns to the caller and says nothing without an attributable column', () => {
+    expect(describeModelUnserved(['lightning_potential'], selection)).toBeUndefined();
+    expect(describeModelUnserved([], selection)).toBeUndefined();
   });
 });
