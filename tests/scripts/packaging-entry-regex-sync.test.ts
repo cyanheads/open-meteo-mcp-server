@@ -9,37 +9,36 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  AGENT_DOC_ENTRY as CLEAN_AGENT_DOC_ENTRY,
-  NATIVE_BINDING_ENTRY as CLEAN_NATIVE_BINDING_ENTRY,
+  AGENT_DOC_ENTRY,
+  BUILD_ONLY_ENTRY,
+  NATIVE_BINDING_ENTRY,
+  NODE_GYP_OUTPUT,
 } from '../../scripts/clean-mcpb.js';
-import {
-  AGENT_DOC_ENTRY as LINT_AGENT_DOC_ENTRY,
-  NATIVE_BINDING_ENTRY as LINT_NATIVE_BINDING_ENTRY,
-} from '../../scripts/lint-packaging.js';
+
+// Loaded by URL so tsc never follows lint-packaging.ts into its framework-repo-only fallback import.
+const lint: Record<string, unknown> = await import(
+  new URL('../../scripts/lint-packaging.ts', import.meta.url).href
+);
+
+const cleanPatterns = { AGENT_DOC_ENTRY, BUILD_ONLY_ENTRY, NATIVE_BINDING_ENTRY, NODE_GYP_OUTPUT };
 
 describe('bundle-entry pattern sync', () => {
-  it('AGENT_DOC_ENTRY is identical in clean-mcpb and lint-packaging', () => {
-    expect(CLEAN_AGENT_DOC_ENTRY.source).toBe(LINT_AGENT_DOC_ENTRY.source);
-    expect(CLEAN_AGENT_DOC_ENTRY.flags).toBe(LINT_AGENT_DOC_ENTRY.flags);
-  });
-
-  it('NATIVE_BINDING_ENTRY is identical in clean-mcpb and lint-packaging', () => {
-    expect(CLEAN_NATIVE_BINDING_ENTRY.source).toBe(LINT_NATIVE_BINDING_ENTRY.source);
-    expect(CLEAN_NATIVE_BINDING_ENTRY.flags).toBe(LINT_NATIVE_BINDING_ENTRY.flags);
-  });
+  it.each(Object.entries(cleanPatterns))(
+    '%s is identical in clean-mcpb and lint-packaging',
+    (name, cleanPattern) => {
+      const lintPattern = lint[name];
+      expect(lintPattern).toBeInstanceOf(RegExp);
+      expect(cleanPattern.source).toBe((lintPattern as RegExp).source);
+      expect(cleanPattern.flags).toBe((lintPattern as RegExp).flags);
+    },
+  );
 
   it('matches the entries each pattern exists to strip', () => {
-    expect(CLEAN_AGENT_DOC_ENTRY.test('node_modules/@scope/pkg/skills/add-tool/SKILL.md')).toBe(
-      true,
-    );
-    expect(CLEAN_AGENT_DOC_ENTRY.test('dist/index.js')).toBe(false);
+    expect(AGENT_DOC_ENTRY.test('node_modules/@scope/pkg/skills/add-tool/SKILL.md')).toBe(true);
+    expect(AGENT_DOC_ENTRY.test('dist/index.js')).toBe(false);
     expect(
-      CLEAN_NATIVE_BINDING_ENTRY.test(
-        'node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node',
-      ),
+      NATIVE_BINDING_ENTRY.test('node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node'),
     ).toBe(true);
-    expect(CLEAN_NATIVE_BINDING_ENTRY.test('node_modules/@duckdb/node-bindings/duckdb.js')).toBe(
-      false,
-    );
+    expect(NATIVE_BINDING_ENTRY.test('node_modules/@duckdb/node-bindings/duckdb.js')).toBe(false);
   });
 });

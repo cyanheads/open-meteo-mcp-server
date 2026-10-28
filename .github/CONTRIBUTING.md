@@ -2,7 +2,7 @@
 
 Thanks for using `open-meteo-mcp-server`. Bugs, feature requests, and documentation gaps all belong in an issue — that's where they get read and picked up.
 
-Open one from the **Issues** tab and pick the **Bug Report** or **Feature Request** form. Both are structured, and filling in the fields is what makes an issue actionable.
+Open one from the **Issues** tab and pick the **Bug Report** or **Feature Request** form. Both are structured, and filling in the fields is what makes an issue actionable. Anything that fits neither can be a plain issue — a half-formed idea in your own words is fine.
 
 ## Server bug or framework bug?
 
@@ -22,7 +22,7 @@ If you're not sure, file here and it'll get routed.
 ## What makes an issue actionable
 
 - Server version, `mcp-ts-core` version, runtime (Bun / Node / Workers), and transport (stdio / HTTP).
-- The tool involved and the arguments you called it with.
+- The tool, resource, or prompt involved, and the arguments you called it with.
 - Actual vs expected behavior, verbatim: error messages and stack traces as they appeared.
 - For features: the use case first, then the API as you'd want to call it.
 
