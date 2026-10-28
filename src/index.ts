@@ -57,6 +57,7 @@ await createApp({
   ],
   resources: [],
   prompts: [],
+  skills: 'skills',
   setup(core) {
     initOpenMeteoService();
     setCanvas(core.canvas);
@@ -72,7 +73,7 @@ await createApp({
     '5. openmeteo_get_air_quality — CAMS modeled PM2.5, PM10, ozone, AQI; current_variables for values right now, up to 7 forecast days, past_days, or a start_date+end_date archive range; the CAMS global archive begins in August 2022\n' +
     '6. openmeteo_get_elevation — Copernicus DEM terrain elevation; accepts up to 1,000 coordinate pairs and samples the first 100 per call — resubmit latitudes.slice(next_offset) and longitudes.slice(next_offset) until next_offset is null; each sampled pair counts as one call against the per-IP limits below\n' +
     '7. openmeteo_get_ensemble — probabilistic ensemble forecast (up to 64 members, up to 35 days; most models end within 16, and the response notice names where the data ends); use for exceedance probabilities and uncertainty quantification. Omitting models selects ecmwf_ifs025_ensemble. A regional model queried outside its coverage area fails as a coverage_gap input error naming the gap — switch to a global model, do not retry\n' +
-    '8. openmeteo_get_flood — GloFAS river discharge: forecast_days (the current run reaches about six months; later days are null) OR a date range from 1984 (start_date+end_date together); the two modes are mutually exclusive. Omitting models reads seamless_v4 — consolidated_v4 reanalysis before 2023-08-05, forecast-run data from then on — so set models: ["consolidated_v4"] for reanalysis through 2025-05-31. Coordinate-based — discharge comes from the largest modeled river within 5 km of the point, not necessarily the closest; vary the coordinate by ~0.1° and compare when a result looks unrepresentative\n' +
+    '8. openmeteo_get_flood — GloFAS river discharge: forecast_days (the current run reaches about six months; later days are null) OR a date range from 1984 (start_date+end_date together); the two modes are mutually exclusive. Omitting models reads seamless_v4 — consolidated_v4 reanalysis before 2023-08-05, forecast-run data from then on — so set models: ["consolidated_v4"] for reanalysis through 2025-05-31. Coordinate-based — discharge comes from the GloFAS 0.05° grid cell nearest the point (the response latitude/longitude names it), which is not reliably on the river you mean; when the value is far below what the named river carries, step the coordinate 0.05° across the channel and compare\n' +
     '9. openmeteo_get_climate — bias-corrected daily CMIP6 climate projections (1950–2050, up to 7 models); use for multi-decade "what will conditions look like" questions\n\n' +
     'DataCanvas workflow (on by default; CANVAS_PROVIDER_TYPE=none disables it):\n' +
     '- openmeteo_get_forecast, openmeteo_get_historical, openmeteo_get_marine, openmeteo_get_air_quality, openmeteo_get_ensemble, openmeteo_get_flood, or openmeteo_get_climate with a large query returns canvas_id + truncated: true\n' +
@@ -83,8 +84,9 @@ await createApp({
       : '') +
     '\n' +
     'Notes:\n' +
+    '- The open-meteo-guide skill (skill://open-meteo-guide/SKILL.md) carries the gates for exceedance odds, frost, comparisons to a normal, climate-shift questions, surf spots, river cells, and AQI timing\n' +
     '- All weather tools take latitude/longitude — use openmeteo_search_locations first for place names\n' +
-    '- The archive default is the Best Match blend, so its provenance varies by date; its ERA5 components lag ~1–5 days while IFS HRES does not. For recent history, use openmeteo_get_forecast with past_days, or request models: ["ecmwf_ifs"] on openmeteo_get_historical\n' +
+    '- The archive default is the Best Match blend, so its provenance varies by date; its ERA5 components lag about a week while IFS HRES does not. For recent history, use openmeteo_get_forecast with past_days, or request models: ["ecmwf_ifs"] on openmeteo_get_historical\n' +
     '- current_variables on openmeteo_get_forecast, openmeteo_get_marine, and openmeteo_get_air_quality answers "right now" — a current object plus current_units, and no hourly series needed. The block\'s interval field is its aggregation interval in seconds (900 on the forecast and marine endpoints, 3600 on air quality): summed or averaged values cover the interval ending at current.time, instantaneous values are valid at current.time\n' +
     '- All responses use timezone=auto by default (localizes to the location)\n' +
     '- Variable names are exact API names: temperature_2m, pm2_5, wave_height, river_discharge, etc.\n' +

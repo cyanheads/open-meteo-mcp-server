@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/open-meteo-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/open-meteo-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/open-meteo-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -48,6 +48,8 @@ Global weather from Open-Meteo: forecasts, history back to 1940, marine conditio
 | `openmeteo_dataframe_query` | Run a read-only SQL `SELECT` against staged tables |
 | `openmeteo_dataframe_drop` | Remove one staged table or view from a DataCanvas (opt-in) |
 
+The server also publishes an agent skill, `open-meteo-guide` (`skill://open-meteo-guide/SKILL.md`, source in `skills/open-meteo-guide/`): which tool answers which question, plus the gates for exceedance odds, frost, comparisons to a normal, climate shifts, surf spots, river cells, and AQI timing.
+
 ## Capability reference
 
 ### `openmeteo_search_locations` <sub>tool</sub>
@@ -65,14 +67,14 @@ Global weather from Open-Meteo: forecasts, history back to 1940, marine conditio
 - Per-timestamp `hourly` / `daily` records with `hourly_units` / `daily_units`; `current_variables` adds a `current` object from 15-minute data (`interval` 900) plus `current_units`
 - Omitting `models` reads Open-Meteo `best_match`; `models` compares deterministic models (e.g. `ncep_gfs_seamless`, `ecmwf_ifs025`, `dwd_icon_seamless`; older spellings like `gfs_seamless` still resolve). With 2+ models each hourly and daily column carries a model-name suffix, and `models` is echoed. `current_variables` takes at most one model (`current_multi_model`)
 - A regional model with no data at the point is dropped from a multi-model response: the `notice` names it, or, when one model is left with unsuffixed columns, says the values cannot be attributed to a model; when every requested model misses, the call fails as `coverage_gap`
-- Prefer `past_days` over `openmeteo_get_historical` for the last ~5 days, where the archive's ERA5 components lag
+- Prefer `past_days` over `openmeteo_get_historical` for the last week, where the archive's ERA5 components lag
 
 ---
 
 ### `openmeteo_get_historical` <sub>tool</sub>
 
 - `start_date` and `end_date` required (YYYY-MM-DD, from 1940-01-01), plus at least one of `hourly_variables` / `daily_variables`, named as on the forecast tool
-- Omitting `models` reads Best Match (IFS HRES + ERA5 + ERA5-Land, source varies by date); up to 8 `models` pin a source. The ERA5 family runs ~5 days behind, `ecmwf_ifs` has no delay, and `cerra` covers Europe only
+- Omitting `models` reads Best Match (IFS HRES + ERA5 + ERA5-Land, source varies by date); up to 8 `models` pin a source. The ERA5 family runs about a week behind, `ecmwf_ifs` has no delay, and `cerra` covers Europe only
 - Output echoes `models` and the returned `date_range`; with 2+ models each column carries a model-name suffix. A model with no data at the point (`cerra` outside Europe) is dropped from a multi-model response; the `notice` names it, or, when one model is left with unsuffixed columns (`era5,cerra`), says the values cannot be attributed to a model
 
 ---
@@ -80,7 +82,7 @@ Global weather from Open-Meteo: forecasts, history back to 1940, marine conditio
 ### `openmeteo_get_marine` <sub>tool</sub>
 
 - One window per call: `forecast_days` 1–8 (upstream default 7) with `past_days` 0–92, or a `start_date` / `end_date` archive range back to at least 2022. Mixing them fails as `forecast_window_conflict`, a lone date as `date_range_incomplete`
-- At least one of `current_variables`, `hourly_variables`, or `daily_variables` (wave height, period, and direction, swell, sea-surface temperature); sheltered water returns near-zero waves, a land point returns nulls (named in the `notice`), and `ocean_current_velocity` is null off the open ocean
+- At least one of `current_variables`, `hourly_variables`, or `daily_variables` (wave height, period, and direction, swell, sea-surface temperature); sheltered water returns near-zero waves, a point well inland returns nulls (named in the `notice`), a land point near the coast is answered from a nearby sea cell with real values and no notice (check the response's `latitude` / `longitude` is the water you meant), and `ocean_current_velocity` is null off the open ocean
 - `current_variables` takes the hourly names and adds a `current` object from 15-minute data (`interval` 900) plus `current_units`, alongside either window; a daily name there fails as `variable_wrong_cadence`
 - `length_unit` (`metric` / `imperial`) sets every height, `sea_level_height_msl` included, in m or ft; `wind_speed_unit` (`kmh`, `mph`, `ms`, `kn`) sets `ocean_current_velocity`; `temperature_unit` (`celsius` / `fahrenheit`) sets `sea_surface_temperature`. Open-Meteo converts the values, and the `*_units` maps label them (`mph` reads `mp/h`)
 
@@ -115,7 +117,7 @@ Global weather from Open-Meteo: forecasts, history back to 1940, marine conditio
 - `daily_variables` required (up to 20), all in m³/s: `river_discharge` plus the statistics `river_discharge_mean` / `_median` / `_min` / `_max` / `_p25` / `_p75`, which carry ensemble spread on forecast-run days and repeat `river_discharge` on reanalysis days
 - One mode per call: `forecast_days` 1–210 (the current GloFAS run reaches about six months; later days are null), or a `start_date` / `end_date` range from 1984-01-01. Mixing them fails as `forecast_days_conflict`, a lone date as `date_range_incomplete`
 - Omitting `models` reads `seamless_v4`: `consolidated_v4` reanalysis before 2023-08-05, `forecast_v4` runs from then on. `models: ["consolidated_v4"]` reads the reanalysis through 2025-05-31 (null after, and on `forecast_days`); `forecast_v4` starts 2023-06-01. Output echoes `models`; with 2+ models each column carries a model-name suffix, and the `notice` names null spans
-- Discharge comes from the largest modeled river within 5 km, not always the closest; vary the coordinate by ~0.1° when a value looks off. Null outside GloFAS coverage
+- Discharge comes from the GloFAS 0.05° grid cell nearest the coordinate, not reliably the cell on the river you mean; when the value is far below what the river carries, step the coordinate 0.05° across the channel and compare. Null outside GloFAS coverage
 
 ---
 
@@ -167,105 +169,32 @@ Agent-friendly output:
 
 ## Getting started
 
-### Public Hosted Instance
+Connect to the hosted instance, no install:
 
-A public instance is available at `https://open-meteo.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "open-meteo-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://open-meteo.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add --transport http open-meteo-mcp-server https://open-meteo.caseyjhand.com/mcp
 ```
 
-### Self-Hosted / Local
+Or run it locally:
 
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "open-meteo-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/open-meteo-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
-    }
-  }
-}
+```sh
+claude mcp add open-meteo-mcp-server -- npx -y @cyanheads/open-meteo-mcp-server
 ```
 
-Or with npx (no Bun required):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "open-meteo-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/open-meteo-mcp-server@latest"],
-      "env": {
-        "MCP_TRANSPORT_TYPE": "stdio",
-        "MCP_LOG_LEVEL": "info"
-      }
+      "args": ["-y", "@cyanheads/open-meteo-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "open-meteo-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/open-meteo-mcp-server:latest"]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- No API key required. Non-commercial use is free and keyless.
-- Commercial use requires [Open-Meteo's paid API tier](https://open-meteo.com/en/pricing).
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/open-meteo-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd open-meteo-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
+No API key is required for non-commercial use; commercial use requires [Open-Meteo's paid API tier](https://open-meteo.com/en/pricing). For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -298,33 +227,42 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-- **Build and run the production version:**
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/open-meteo-mcp-server.git
+  cd open-meteo-mcp-server && bun install
+  ```
+
+- **Build and run:**
 
   ```sh
   # One-time build
   bun run rebuild
 
   # Run the built server
-  bun run start:http
-  # or
   bun run start:stdio
+  # or
+  bun run start:http
   ```
 
 - **Run checks and tests:**
 
   ```sh
-  bun run devcheck  # Lint, format, typecheck, security
-  bun run test      # Vitest test suite
+  bun run devcheck   # Lint, format, typecheck, security
+  bun run test       # Vitest test suite
+  bun run lint:mcp   # Validate MCP definitions against spec
   ```
 
 ### Docker
 
 ```sh
-docker build -t open-meteo-mcp-server .
-docker run --rm -p 3010:3010 open-meteo-mcp-server
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/open-meteo-mcp-server:latest
 ```
 
-The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/open-meteo-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
+The image defaults to HTTP transport, stateless session mode, and logs to `/var/log/open-meteo-mcp-server`. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/open-meteo-mcp-server:latest"]`. To build locally, `docker build -t open-meteo-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
 
 ## Project structure
 
@@ -336,6 +274,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/mcp-server/tools` | Shared tool helpers — model catalog, cadence validation, columnar reshape, spillover, response notices. |
 | `src/services/open-meteo` | HTTP client for the Open-Meteo APIs — retry, error classification, coverage-gap rejection. |
 | `src/services/canvas-accessor.ts` | DataCanvas accessor shared by the spill-capable tools. |
+| `skills/` | Agent skill published over MCP and in the npm package, Docker image, and `.mcpb` bundle (`open-meteo-guide`). |
 | `tests/` | Unit, integration, fuzz, and smoke tests. |
 
 ## Development guide
