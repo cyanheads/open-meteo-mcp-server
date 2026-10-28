@@ -110,9 +110,9 @@ export const ARCHIVE_MODELS: readonly CatalogModel[] = [
   { name: 'ecmwf_ifs', note: 'global 9 km, updated every 6 hours, no delay' },
   { name: 'ecmwf_ifs_analysis_long_window', note: 'global 9 km, daily, 2 days delay' },
   { name: 'era5_seamless', note: 'ERA5 and ERA5-Land combined' },
-  { name: 'era5', note: 'global 0.25° (~25 km), daily, 5 days delay' },
-  { name: 'era5_land', note: 'global 0.1° (~11 km), daily, 5 days delay' },
-  { name: 'era5_ensemble', note: 'global 0.5° (~55 km), daily, 5 days delay' },
+  { name: 'era5', note: 'global 0.25° (~25 km), daily, about a week delay' },
+  { name: 'era5_land', note: 'global 0.1° (~11 km), daily, about a week delay' },
+  { name: 'era5_ensemble', note: 'global 0.5° (~55 km), daily, about a week delay' },
   { name: 'cerra', note: 'Europe only, 5 km, no real-time updates' },
 ];
 

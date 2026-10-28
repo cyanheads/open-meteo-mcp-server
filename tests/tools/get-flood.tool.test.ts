@@ -1019,8 +1019,8 @@ describe('openmeteoGetFloodTool unserved-variable notice', () => {
 
 describe('openmeteoGetFloodTool river-selection wording (#43)', () => {
   /*
-   * GloFAS returns discharge for the LARGEST river within a 5 km area of the
-   * coordinate, which is not always the closest one. Every surface that used to say
+   * GloFAS returns discharge for the 0.05° grid cell nearest the coordinate, which is
+   * not reliably the cell on the river intended. Every surface that used to say
    * "snaps to the nearest river/stream" told a caller near a confluence or a pair of
    * parallel channels to trust a reach the API never promised.
    */
@@ -1036,18 +1036,17 @@ describe('openmeteoGetFloodTool river-selection wording (#43)', () => {
     expect(read()).not.toMatch(/nearest (river|stream)/i);
   });
 
-  it('the tool description states the largest-river-within-5-km rule', () => {
+  it('the tool description states the nearest-0.05°-cell rule', () => {
     const text = openmeteoGetFloodTool.description;
-    expect(text).toMatch(/largest/i);
-    expect(text).toMatch(/5\s?km/i);
-    expect(text).toMatch(/not (always|necessarily) the closest/i);
+    expect(text).toMatch(/0\.05° grid cell nearest/i);
+    expect(text).toMatch(/not reliably on the river/i);
     expect(text).toMatch(/confluence/i);
   });
 
-  it('the tool description carries Open-Meteo’s ±0.1° coordinate-variation guidance', () => {
+  it('the tool description tells a caller to step the coordinate 0.05° across the channel', () => {
     const text = openmeteoGetFloodTool.description;
-    expect(text).toMatch(/0\.1°/);
-    expect(text).toMatch(/vary|varying/i);
+    expect(text).toMatch(/step the coordinate 0\.05° across the channel/i);
+    expect(text).not.toMatch(/0\.1°/);
   });
 
   it.each([
@@ -1055,13 +1054,13 @@ describe('openmeteoGetFloodTool river-selection wording (#43)', () => {
     ['longitude', () => openmeteoGetFloodTool.input.shape.longitude.description ?? ''],
   ])('the %s input description states the selection rule', (_field, read) => {
     const text = read();
-    expect(text).toMatch(/largest/i);
-    expect(text).toMatch(/5\s?km/i);
+    expect(text).toMatch(/0\.05° grid cell/i);
+    expect(text).toMatch(/not reliably on the river/i);
   });
 
-  it('the snapped output coordinates are described as the selected river’s grid point', () => {
+  it('the snapped output coordinates are described as the grid cell the discharge comes from', () => {
     expect(openmeteoGetFloodTool.output.shape.latitude.description ?? '').toMatch(
-      /selected river/i,
+      /grid cell the discharge comes from/i,
     );
   });
 

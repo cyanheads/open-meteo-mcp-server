@@ -76,7 +76,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     'archive answers from Best Match, which blends IFS HRES, ERA5, and ERA5-Land seamlessly — ' +
     'so the source varies by date and no single update lag describes the response. Set models ' +
     'to pin a consistent source for a multi-decade series: the ERA5 family updates daily with ' +
-    'about a 5-day delay, while IFS HRES has none, so for the last few days either request ' +
+    'about a week of delay, while IFS HRES has none, so for the last week either request ' +
     `models: ["ecmwf_ifs"] or use openmeteo_get_forecast with past_days. Available models: ${ARCHIVE_MODEL_LIST}. ` +
     'Uses the same variable names as the forecast API for direct comparison. Large date ranges ' +
     '(multi-year hourly) produce thousands of records — these spill to a DataCanvas when canvas ' +
@@ -92,7 +92,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'start_date predates 1940-01-01, or the requested dates fall outside the coverage of the selected model.',
       recovery:
-        'Use start_date >= 1940-01-01. A selected ERA5-family model updates daily with roughly a 5-day delay, so for the last few days request models: ["ecmwf_ifs"], drop models to use the Best Match blend, or use openmeteo_get_forecast with past_days instead.',
+        'Use start_date >= 1940-01-01. A selected ERA5-family model updates daily with about a week of delay, so for the last week request models: ["ecmwf_ifs"], drop models to use the Best Match blend, or use openmeteo_get_forecast with past_days instead.',
       retryable: false,
     },
     {
@@ -155,7 +155,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
     start_date: CalendarDateSchema.describe(
-      'Start date (YYYY-MM-DD, e.g., "2024-07-01"). The archive covers from 1940-01-01; how close to today it reaches depends on the model — the ERA5 family runs about 5 days behind, IFS HRES is current.',
+      'Start date (YYYY-MM-DD, e.g., "2024-07-01"). The archive covers from 1940-01-01; how close to today it reaches depends on the model — the ERA5 family runs about a week behind, IFS HRES is current.',
     ),
     end_date: CalendarDateSchema.describe(
       'End date (YYYY-MM-DD, inclusive). Must be on or after start_date. For the last few days, either request models: ["ecmwf_ifs"] or use openmeteo_get_forecast with past_days.',

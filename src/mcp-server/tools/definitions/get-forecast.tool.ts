@@ -78,8 +78,8 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
   description:
     'Weather forecast for coordinates: hourly and/or daily variables for up to 16 days ahead, ' +
     'with optional past_days (up to 92) for recent history. Use past_days instead of ' +
-    'openmeteo_get_historical for dates within the last 1–5 days, since the archive’s ERA5 ' +
-    'components lag by up to ~5 days. ' +
+    'openmeteo_get_historical for dates within the last week, since the archive’s ERA5 ' +
+    'components lag by about a week. ' +
     'Returns per-timestamp records — each hourly entry contains a "time" field (ISO 8601) plus one key per requested variable; each daily entry contains a "time" field (YYYY-MM-DD) plus requested variables. ' +
     'Common hourly variables: temperature_2m, precipitation, wind_speed_10m, ' +
     'relative_humidity_2m, cloud_cover, uv_index, apparent_temperature, ' +
@@ -207,7 +207,7 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
       .max(92)
       .default(0)
       .describe(
-        'Include this many days of past data before today (0–92). Use for recent history — the archive’s ERA5 components lag by up to ~5 days. Default 0.',
+        'Include this many days of past data before today (0–92). Use for recent history — the archive’s ERA5 components lag by about a week. Default 0.',
       ),
     temperature_unit: z
       .enum(['celsius', 'fahrenheit'])

@@ -78,7 +78,9 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     'ends — a lone start_date or end_date is rejected. ' +
     'Returns per-timestamp records — each entry contains a "time" field plus one key per requested variable. Best for open-ocean ' +
     'and coastal exposed points — sheltered water such as a sound or bay returns near-zero wave ' +
-    'values, and a land point returns null values, which the notice reports. ' +
+    'values, and a land point well inland returns null values, which the notice reports. A land point ' +
+    'near the coast is answered from a nearby sea cell with real values and no notice, so check the ' +
+    'response latitude and longitude is the water you meant. ' +
     'Common hourly variables: wave_height, wave_direction, wave_period, wind_wave_height, ' +
     'wind_wave_direction, wind_wave_period, swell_wave_height, swell_wave_direction, ' +
     'swell_wave_period. Common daily: wave_height_max, wave_direction_dominant, wave_period_max. ' +
@@ -171,7 +173,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .min(-90)
       .max(90)
       .describe(
-        'Latitude of a coastal or ocean point. Use openmeteo_search_locations to resolve a place name. Sheltered water returns near-zero wave values; a land point returns null values, which the notice reports.',
+        'Latitude of a coastal or ocean point. Use openmeteo_search_locations to resolve a place name. Sheltered water returns near-zero wave values; a land point well inland returns null values, which the notice reports, while one near the coast is answered from a nearby sea cell with no notice — check the response latitude and longitude is the water you meant.',
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
     current_variables: z
@@ -318,7 +320,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); current values that are null under a real unit (no coverage at this location, such as a land point); recognized variables whose requested window or location falls outside the data\'s coverage (a land point returns nulls), with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); current values that are null under a real unit (no coverage at this location, such as a point well inland); recognized variables whose requested window or location falls outside the data\'s coverage (a point well inland returns nulls), with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
 

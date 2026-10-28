@@ -3,8 +3,8 @@
  * forecast outlook or a date range from 1984. Omitting `models` reads upstream's
  * `seamless_v4`, which stitches `consolidated_v4` reanalysis to `forecast_v4` run data at
  * a fixed switch date, so a date range is reanalysis only up to that date; a `models`
- * selection pins the source. Coordinate-based — the API selects the largest modeled river
- * within 5 km of the point, which is not always the closest one. Wide ranges spill to
+ * selection pins the source. Coordinate-based — discharge comes from the GloFAS 0.05° grid
+ * cell nearest the point, which is not reliably the cell on the river intended. Wide ranges spill to
  * DataCanvas when canvas is enabled, and return a bounded preview with truncated: true when
  * it is not.
  * @module mcp-server/tools/definitions/get-flood
@@ -71,7 +71,7 @@ const VARIABLE_RECOVERY =
 const STATISTICS_SPANS = `on forecast-run days — the forecast_days outlook, and date-range days from ${FLOOD_SEAMLESS_SWITCH_DATE} under seamless_v4 or forecast_v4. On reanalysis days (seamless_v4 before ${FLOOD_SEAMLESS_SWITCH_DATE}, consolidated_v4 through ${FLOOD_CONSOLIDATED_END_DATE}) they repeat river_discharge and are not uncertainty estimates`;
 
 export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
-  description: `GloFAS (Global Flood Awareness System) daily river discharge (m³/s) for the largest modeled river within 5 km of the given coordinates — no river ID needed. That river is not always the closest one: at 5 km resolution a point near a confluence or a pair of parallel channels can resolve to an unintended reach. When the returned discharge looks unrepresentative for the intended river, Open-Meteo suggests varying the coordinate by about 0.1° and comparing the values. One mode per call: forecast_days for the outlook, or start_date and end_date together for a date range from 1984-01-01. The two modes are mutually exclusive, and a date range needs both ends — a lone start_date or end_date is rejected. forecast_days accepts up to 210, but the current GloFAS run sets how far the data reaches (about six months ahead); later days come back null and the notice names where the data ends. What a date range holds depends on the model. Omitting models reads seamless_v4: consolidated_v4 reanalysis before ${FLOOD_SEAMLESS_SWITCH_DATE}, then forecast-run discharge from ${FLOOD_SEAMLESS_SWITCH_DATE} on, so a range crossing that date changes source mid-series. Set models to pin a source: ${FLOOD_MODEL_LIST}. consolidated_v4 is the only way to read reanalysis for ${FLOOD_SEAMLESS_SWITCH_DATE} through ${FLOOD_CONSOLIDATED_END_DATE}. With 2+ models every daily column is suffixed with the model name (river_discharge_consolidated_v4). Available daily variables: "river_discharge" (the daily discharge value; the mean across ensemble members is "river_discharge_mean"), and the ensemble statistics "river_discharge_mean", "river_discharge_median", "river_discharge_min", "river_discharge_max", "river_discharge_p25" (25th percentile), and "river_discharge_p75" (75th percentile). The statistics carry spread across ensemble members ${STATISTICS_SPANS}. Returns null for coordinates far from any river or in areas without GloFAS coverage. A wide date range produces thousands of daily records and spills to a DataCanvas when canvas is enabled, returning canvas_id and table_name with truncated: true — inspect the staged columns with openmeteo_dataframe_describe, then query the full set with openmeteo_dataframe_query. With canvas disabled it returns a bounded preview instead.`,
+  description: `GloFAS (Global Flood Awareness System) daily river discharge (m³/s) from the GloFAS 0.05° grid cell nearest the given coordinates — no river ID needed. The response's latitude and longitude name that cell. It is not reliably on the river intended: a point near a confluence, a pair of parallel channels, or a bank can resolve to a cell with little flow. When the value is far below what the named river carries, step the coordinate 0.05° across the channel and compare the values. One mode per call: forecast_days for the outlook, or start_date and end_date together for a date range from 1984-01-01. The two modes are mutually exclusive, and a date range needs both ends — a lone start_date or end_date is rejected. forecast_days accepts up to 210, but the current GloFAS run sets how far the data reaches (about six months ahead); later days come back null and the notice names where the data ends. What a date range holds depends on the model. Omitting models reads seamless_v4: consolidated_v4 reanalysis before ${FLOOD_SEAMLESS_SWITCH_DATE}, then forecast-run discharge from ${FLOOD_SEAMLESS_SWITCH_DATE} on, so a range crossing that date changes source mid-series. Set models to pin a source: ${FLOOD_MODEL_LIST}. consolidated_v4 is the only way to read reanalysis for ${FLOOD_SEAMLESS_SWITCH_DATE} through ${FLOOD_CONSOLIDATED_END_DATE}. With 2+ models every daily column is suffixed with the model name (river_discharge_consolidated_v4). Available daily variables: "river_discharge" (the daily discharge value; the mean across ensemble members is "river_discharge_mean"), and the ensemble statistics "river_discharge_mean", "river_discharge_median", "river_discharge_min", "river_discharge_max", "river_discharge_p25" (25th percentile), and "river_discharge_p75" (75th percentile). The statistics carry spread across ensemble members ${STATISTICS_SPANS}. Returns null for coordinates far from any river or in areas without GloFAS coverage. A wide date range produces thousands of daily records and spills to a DataCanvas when canvas is enabled, returning canvas_id and table_name with truncated: true — inspect the staged columns with openmeteo_dataframe_describe, then query the full set with openmeteo_dataframe_query. With canvas disabled it returns a bounded preview instead.`,
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -147,14 +147,14 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       .min(-90)
       .max(90)
       .describe(
-        'Latitude in decimal degrees. Discharge is returned for the largest modeled river within 5 km of this point — no river ID required, and not necessarily the closest river. Vary the coordinate by about 0.1° and compare when the result looks unrepresentative. Use openmeteo_search_locations to resolve a place name.',
+        'Latitude in decimal degrees. Discharge is returned for the GloFAS 0.05° grid cell nearest this point — no river ID required, and that cell is not reliably on the river intended. When the value is far below what the named river carries, step the coordinate 0.05° across the channel and compare. Use openmeteo_search_locations to resolve a place name.',
       ),
     longitude: z
       .number()
       .min(-180)
       .max(180)
       .describe(
-        'Longitude in decimal degrees. With latitude it selects the largest modeled river within 5 km, which is not necessarily the closest one.',
+        'Longitude in decimal degrees. With latitude it selects the nearest GloFAS 0.05° grid cell, which is not reliably on the river intended.',
       ),
     daily_variables: z
       .array(z.string())
@@ -193,8 +193,12 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
   }),
 
   output: z.object({
-    latitude: z.number().describe('Snapped latitude — grid point of the selected river'),
-    longitude: z.number().describe('Snapped longitude — grid point of the selected river'),
+    latitude: z
+      .number()
+      .describe('Snapped latitude — the GloFAS grid cell the discharge comes from'),
+    longitude: z
+      .number()
+      .describe('Snapped longitude — the GloFAS grid cell the discharge comes from'),
     timezone: z.string().describe('Resolved IANA timezone'),
     models: z
       .array(z.string())
