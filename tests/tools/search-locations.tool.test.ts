@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoSearchLocationsTool } from '@/mcp-server/tools/definitions/search-locations.tool.js';
+import { renderedText } from '../helpers/commonmark.js';
 import { firstText } from '../helpers/content.js';
 import { wireError } from '../helpers/wire-error.js';
 
@@ -354,6 +355,31 @@ describe('openmeteoSearchLocationsTool', () => {
     expect(text).not.toContain('undefined');
     expect(text).not.toContain('()');
   });
+
+  it('format renders upstream place text as written under a CommonMark parse', () => {
+    const blocks = openmeteoSearchLocationsTool.format!({
+      results: [
+        {
+          id: 1,
+          name: '*Star* [Town](x)',
+          latitude: 1,
+          longitude: 2,
+          elevation: null,
+          timezone: 'America/Los_Angeles',
+          country: 'Land_',
+          country_code: 'LD',
+          admin1: '`Upper`',
+          admin2: null,
+          population: null,
+          feature_code: 'PPL',
+        },
+      ],
+      count: 1,
+    });
+    const text = renderedText(firstText(blocks));
+    expect(text).toContain('*Star* [Town](x) (LD) — Land_, `Upper` — 1, 2');
+    expect(text).toContain('timezone: America/Los_Angeles');
+  });
 });
 
 describe('openmeteoSearchLocationsTool low-confidence notice (#48)', () => {
@@ -532,8 +558,11 @@ describe('openmeteoSearchLocationsTool effective_language (#69)', () => {
   const structured = (result: SearchResult) =>
     result.structuredContent as { effective_language?: string; notice?: string; count?: number };
 
+  // content[] read as a client renders it, so assertions survive framework escape and code-span changes.
   const allText = (result: SearchResult) =>
-    result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+    renderedText(
+      result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n'),
+    );
 
   it('declares effective_language as an optional enrichment field', () => {
     const field = openmeteoSearchLocationsTool.enrichment?.effective_language;
@@ -550,7 +579,7 @@ describe('openmeteoSearchLocationsTool effective_language (#69)', () => {
 
     expect(result.isError).toBeFalsy();
     expect(structured(result).effective_language).toBe('zh');
-    expect(allText(result)).toContain('**Effective language:** zh');
+    expect(allText(result)).toContain('Effective language: zh');
     // results, count, and notice are unchanged by the new field.
     expect(structured(result).count).toBe(1);
     expect(structured(result).notice).toBeUndefined();
@@ -576,7 +605,7 @@ describe('openmeteoSearchLocationsTool effective_language (#69)', () => {
       expect.anything(),
     );
     expect(structured(result).effective_language).toBe(language);
-    expect(allText(result)).toContain(`**Effective language:** ${language}`);
+    expect(allText(result)).toContain(`Effective language: ${language}`);
   });
 
   it('carries no effective_language on a first-pass hit', async () => {
@@ -622,7 +651,7 @@ describe('openmeteoSearchLocationsTool effective_language (#69)', () => {
 
     expect(structured(result).effective_language).toBe('zh');
     expect(structured(result).notice).toContain('Low-confidence match');
-    expect(allText(result)).toContain('**Effective language:** zh');
+    expect(allText(result)).toContain('Effective language: zh');
     expect(allText(result)).toContain('Low-confidence match');
   });
 

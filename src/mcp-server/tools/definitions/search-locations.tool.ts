@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import type { GeocodingResult } from '@/services/open-meteo/types.js';
 import {
@@ -261,14 +262,17 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
   format: (result) => {
     const lines = [`## Geocoding results for search`];
     for (const r of result.results) {
-      const cc = r.country_code ? ` (${r.country_code})` : '';
-      const place = [r.country, r.admin1, r.admin2].filter(Boolean).join(', ');
+      // Place names are GeoNames community data: escaped so a `*` or `[` reads back as written.
+      const cc = r.country_code ? ` (${escapeMarkdownInline(r.country_code)})` : '';
+      const place = escapeMarkdownInline(
+        [r.country, r.admin1, r.admin2].filter(Boolean).join(', '),
+      );
       const pop = r.population != null ? ` | pop. ${r.population.toLocaleString()}` : '';
       const elev = r.elevation != null ? ` | ${r.elevation}m` : '';
       lines.push(
-        `**${r.name}**${cc}${place ? ` — ${place}` : ''} — ` +
+        `**${escapeMarkdownInline(r.name)}**${cc}${place ? ` — ${place}` : ''} — ` +
           `${r.latitude}, ${r.longitude}${elev}${pop}`,
-        `  id: ${r.id} | timezone: ${r.timezone ?? 'unknown'} | feature: ${r.feature_code}`,
+        `  id: ${r.id} | timezone: ${r.timezone ? escapeMarkdownInline(r.timezone) : 'unknown'} | feature: ${escapeMarkdownInline(r.feature_code)}`,
       );
     }
     lines.push(
