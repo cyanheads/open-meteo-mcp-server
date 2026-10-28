@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-10-28
+
+Publishes the open-meteo-guide agent skill over MCP and in every package, corrects the flood, marine, and ERA5-lag guidance in tool descriptions, and moves to mcp-ts-core 0.13.18 with DuckDB 2 and an .mcpb that no longer ships tests, coverage, sources, or scripts.
+
 ## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-10-24
 
 openmeteo_get_forecast and openmeteo_get_flood take a models input, openmeteo_get_marine adds current_variables and unit inputs, openmeteo_get_elevation accepts up to 1,000 pairs, and DataCanvas is on by default (CANVAS_PROVIDER_TYPE=none disables it).

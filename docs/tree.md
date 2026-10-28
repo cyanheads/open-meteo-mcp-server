@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-10-24 09:34:28
+Generated on: 2026-10-28 18:11:43
 
 ```text
 open-meteo-mcp-server/
@@ -28,6 +28,7 @@ open-meteo-mcp-server/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
+│   ├── 0.5.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -40,6 +41,8 @@ open-meteo-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -137,6 +140,11 @@ open-meteo-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── open-meteo-guide/
+│       ├── references/
+│       │   └── weather-codes.md
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -182,6 +190,7 @@ open-meteo-mcp-server/
 │   ├── fuzz/
 │   │   └── search-locations.tool.fuzz.test.ts
 │   ├── helpers/
+│   │   ├── commonmark.ts
 │   │   ├── content.ts
 │   │   ├── inline-surface.ts
 │   │   ├── marker-config.ts
@@ -195,6 +204,7 @@ open-meteo-mcp-server/
 │   ├── prompts/
 │   ├── resources/
 │   ├── scripts/
+│   │   ├── bundle-agent-docs.test.ts
 │   │   └── packaging-entry-regex-sync.test.ts
 │   ├── services/
 │   │   ├── open-meteo-service-redaction.test.ts
@@ -242,7 +252,9 @@ open-meteo-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
