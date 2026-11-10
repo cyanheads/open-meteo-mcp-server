@@ -6,18 +6,21 @@
  * with `data.reason` — a 429, a coverage gap, and a retry ladder that runs out — so the
  * handler boundary fills each declaring tool's `recovery` onto the wire.
  *
- * The framing covers the two rejections every time-series tool has to tell apart: an
- * unknown variable or model name, and a request whose sheer volume upstream refuses.
- * Both arrive in the same `{"error":true,"reason":…}` envelope with no machine-readable
- * code, so the reason string is all there is to classify on.
+ * The framing covers the rejections a time-series tool has to tell apart: an unknown
+ * variable or model name, a request whose sheer volume upstream refuses, and — for the
+ * tools that take a date range — a date outside the range the endpoint accepts. All
+ * three arrive in the same `{"error":true,"reason":…}` envelope with no machine-readable
+ * code, so the reason string is all there is to classify on. The volume and date
+ * predicates match upstream's own wording at the head of the reason; an unknown name is
+ * whatever neither claims.
  *
- * The forecast/archive-family endpoints reject unknown variable names with
- * an internal Swift type-init message ("Data corrupted at path ''. Cannot initialize
- * <Type> from invalid String value <value>.") that neither leads with the fix nor cleanly
- * names the problem. This helper leads with actionable guidance, names the offending
- * value(s) when the upstream message embeds them, and demotes the raw upstream string
- * to a trailing parenthetical. No client-side variable allowlist — the API stays the
- * authority on what is valid; this only reframes its rejection.
+ * The forecast/archive-family endpoints reject unknown variable names with an internal
+ * Swift type-init message ("Invalid value: Cannot initialize <Type> from invalid String
+ * value <value>") that neither leads with the fix nor cleanly names the problem. This
+ * helper leads with actionable guidance, names the offending value(s) when the upstream
+ * message embeds them, and demotes the raw upstream string to a trailing parenthetical.
+ * No client-side variable allowlist — the API stays the authority on what is valid; this
+ * only reframes its rejection.
  * @module mcp-server/tools/upstream-error
  */
 
@@ -168,6 +171,21 @@ const TOO_MUCH_DATA_REASON = /^your api call requests too much data/i;
 
 export function isRequestTooLargeReason(upstreamReason: string | undefined): boolean {
   return TOO_MUCH_DATA_REASON.test((upstreamReason ?? '').trim());
+}
+
+/**
+ * Upstream's date rejections — HTTP 400 with `Parameter 'start_date' is out of allowed
+ * range from <first> to <last>` (or `'end_date'`), and `Invalid date`, verified against
+ * `/v1/archive`, `/v1/climate`, `/v1/flood`, `/v1/marine`, and `/v1/air-quality`.
+ * Anchored at the head for the reason {@link TOO_MUCH_DATA_REASON} is: an unknown-name
+ * rejection quotes the caller's name, so a name such as `temperature_2m_range` or
+ * `era5_update` puts "range" or "date" in a reason that is not about dates at all.
+ */
+const DATE_REJECTION_REASON =
+  /^(?:parameter '(?:start|end)_date' is out of allowed range|invalid date\b)/i;
+
+export function isDateOutOfRangeReason(upstreamReason: string | undefined): boolean {
+  return DATE_REJECTION_REASON.test((upstreamReason ?? '').trim());
 }
 
 /**

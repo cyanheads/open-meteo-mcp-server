@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   boundedPreview,
   boundedPreviewByCadence,
+  CANVAS_PREVIEW_CHARS,
   canvasPointerLine,
   canvasPointerNotice,
   deriveSpillSchema,
@@ -418,7 +419,7 @@ describe('boundedPreview', () => {
   it('starts at the first row carrying data, skipping the leading all-null run', () => {
     // Upstream leads with nulls in three shapes — ensemble past_days placeholders, a
     // forecast past_days window longer than the API serves, and a GloFAS range that
-    // starts before the coordinate's record. A chronological head would spend the
+    // starts before GloFAS discharge begins. A chronological head would spend the
     // whole budget inside that run and carry no data at all.
     const nullRow = (i: number): TimeRecord => ({
       time: `2023-01-${String((i % 28) + 1).padStart(2, '0')}`,
@@ -658,6 +659,120 @@ describe('boundedPreviewByCadence', () => {
     expect(boundedPreviewByCadence(hourly, undefined, BARE_BUDGET).hourly).toEqual(
       boundedPreviewByCadence(hourly, [], BARE_BUDGET).hourly,
     );
+  });
+});
+
+describe('CANVAS_PREVIEW_CHARS (#95)', () => {
+  /** A daily row costing 33: 30 characters of JSON, a character per field, and the separator. */
+  const daily33: TimeRecord = { time: '2026-04-30', d: 12.5 };
+  /** An hourly row costing 39 in the same measure. */
+  const hourly39: TimeRecord = { time: '2026-04-30T00:00', h: 12.5 };
+  const repeat = (row: TimeRecord, count: number): TimeRecord[] =>
+    Array.from({ length: count }, () => ({ ...row }));
+
+  /** A units map of `entries` member columns. */
+  const memberUnits = (entries: number): UnitsMap => {
+    const units: UnitsMap = { time: 'iso8601' };
+    for (let i = 0; i < entries; i++)
+      units[`temperature_2m_member${String(i).padStart(3, '0')}`] = '°C';
+    return units;
+  };
+
+  it('is 8,000 characters, a tenth of the 80,000-character spill ceiling', () => {
+    expect(CANVAS_PREVIEW_CHARS).toBe(8_000);
+    expect(INLINE_CHARS).toBe(80_000);
+  });
+
+  it('never exceeds the row budget that ruled a result oversized', () => {
+    // The floor inlineBudget guarantees: a trimmed units map leaves rows exactly 8,000,
+    // and every other shape leaves them more.
+    const current: TimeRecord = { time: '2026-05-30T14:15', interval: 900 };
+    for (let i = 0; i < 50; i++) current[`current_variable_number_${i}`] = 100.5 + i;
+    const budgets = [
+      inlineBudget(undefined).rowBudget,
+      inlineBudget(undefined, memberUnits(400)).rowBudget,
+      inlineBudget(current, memberUnits(400)).rowBudget,
+      inlineBudget(undefined, memberUnits(2500)).rowBudget,
+      inlineBudget(current, memberUnits(2500)).rowBudget,
+    ];
+
+    for (const budget of budgets) expect(budget).toBeGreaterThanOrEqual(CANVAS_PREVIEW_CHARS);
+    expect(budgets.slice(3)).toEqual([8_000, 8_000]);
+  });
+
+  it('leaves the spill decision on the row budget, not on the preview size', () => {
+    // 600 rows at 33 cost 19,800: four times the canvas preview, a quarter of the row
+    // budget. They still return whole.
+    expect(exceedsInlineBudget(repeat(daily33, 600), BARE_BUDGET)).toBe(false);
+    expect(
+      exceedsInlineBudget(repeat(daily33, Math.floor(BARE_BUDGET / 33) + 1), BARE_BUDGET),
+    ).toBe(true);
+  });
+
+  it('holds 242 rows costing 33 each (7,986 of 8,000) in a single-cadence preview', () => {
+    expect(boundedPreview(repeat(daily33, 5000), CANVAS_PREVIEW_CHARS)).toHaveLength(242);
+  });
+
+  it('returns one whole row when the first row alone is wider than the budget', () => {
+    const wide: TimeRecord = { time: '2026-04-30', blob: 'x'.repeat(9_000) };
+    expect(boundedPreview([wide, wide, { ...daily33 }], CANVAS_PREVIEW_CHARS)).toEqual([wide]);
+  });
+
+  it('still starts at the first row carrying data', () => {
+    const nullRow: TimeRecord = { time: '2026-04-29', d: null };
+    const records = [
+      ...repeat(nullRow, 500),
+      { time: '2026-04-30', d: 1.5 },
+      ...repeat(daily33, 500),
+    ];
+
+    const preview = boundedPreview(records, CANVAS_PREVIEW_CHARS);
+
+    expect(preview[0]).toEqual({ time: '2026-04-30', d: 1.5 });
+    expect(preview.every((row) => row.d !== null)).toBe(true);
+  });
+
+  it('splits 102 hourly and 121 daily rows across two cadences (7,971 of 8,000)', () => {
+    /*
+     * Daily first claims its half: 121 rows at 33 = 3,993 of 4,000. Hourly takes what
+     * that leaves: 102 rows at 39 = 3,978 of 4,007. Daily is re-taken against the 4,022
+     * hourly left, which still holds 121.
+     */
+    const preview = boundedPreviewByCadence(
+      repeat(hourly39, 1000),
+      repeat(daily33, 1000),
+      CANVAS_PREVIEW_CHARS,
+    );
+
+    expect(preview.hourly).toHaveLength(102);
+    expect(preview.daily).toHaveLength(121);
+  });
+
+  it('returns one row per cadence when each row is wider than its share', () => {
+    // The widest staged ensemble shape: about 7.5k per hourly row, 4.5k per daily row.
+    const hourly: TimeRecord = { time: '2026-04-30T00:00', blob: 'x'.repeat(7_400) };
+    const daily: TimeRecord = { time: '2026-04-30', blob: 'x'.repeat(4_400) };
+
+    const preview = boundedPreviewByCadence(
+      repeat(hourly, 300),
+      repeat(daily, 15),
+      CANVAS_PREVIEW_CHARS,
+    );
+
+    expect(preview.hourly).toHaveLength(1);
+    expect(preview.daily).toHaveLength(1);
+  });
+
+  it('leaves an unrequested cadence undefined', () => {
+    const preview = boundedPreviewByCadence(
+      repeat(hourly39, 1000),
+      undefined,
+      CANVAS_PREVIEW_CHARS,
+    );
+
+    expect(preview.daily).toBeUndefined();
+    // With no daily share to reserve, hourly takes the whole budget: 205 rows at 39 = 7,995.
+    expect(preview.hourly).toHaveLength(205);
   });
 });
 

@@ -19,16 +19,18 @@ import {
   ENSEMBLE_MODEL_NAMES,
   ENSEMBLE_MODELS,
 } from '../model-catalog.js';
-import { cleanName, cleanNames } from '../name-input.js';
+import { cleanName, cleanNames, nameList } from '../name-input.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
   byEnsembleVariable,
   composeNotice,
   describeCoverageGaps,
   findCoverageGaps,
+  renderNotice,
 } from '../response-notice.js';
 import {
   boundedPreviewByCadence,
+  CANVAS_PREVIEW_CHARS,
   canvasPointerLine,
   canvasPointerNotice,
   exceedsInlineBudget,
@@ -188,6 +190,9 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
     UPSTREAM_TIMEOUT_ERROR,
   ],
 
+  // Open-Meteo's own parameter names for the two variable lists.
+  inputAliases: { hourly: 'hourly_variables', daily: 'daily_variables' },
+
   input: z.object({
     latitude: z
       .number()
@@ -197,20 +202,12 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         'Latitude in decimal degrees. Use openmeteo_search_locations to resolve a place name to coordinates.',
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
-    hourly_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Hourly variables to fetch across all ensemble members (e.g., ["temperature_2m", "precipitation", "wind_speed_10m"]). Each variable appears as temperature_2m_member01, temperature_2m_member02, … in the output. Hourly names only — a daily-only aggregate such as precipitation_sum or wind_speed_10m_max belongs in daily_variables and is rejected here; temperature_2m_max and temperature_2m_min are an exception, published here as 3-hourly aggregations as well as daily. At least one of hourly_variables or daily_variables required.',
-      ),
-    daily_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Daily variables to fetch across all ensemble members (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum"]). Each variable appears as temperature_2m_max_member01, … Daily names only — an hourly name such as precipitation or temperature_2m belongs in hourly_variables and is rejected here; for a daily summary use its published aggregate (precipitation_sum, temperature_2m_max). At least one of hourly_variables or daily_variables required.',
-      ),
+    hourly_variables: nameList(50).describe(
+      'Hourly variables to fetch across all ensemble members (e.g., ["temperature_2m", "precipitation", "wind_speed_10m"]). Each variable appears as temperature_2m_member01, temperature_2m_member02, … in the output. Hourly names only — a daily-only aggregate such as precipitation_sum or wind_speed_10m_max belongs in daily_variables and is rejected here; temperature_2m_max and temperature_2m_min are an exception, published here as 3-hourly aggregations as well as daily. At least one of hourly_variables or daily_variables required.',
+    ),
+    daily_variables: nameList(50).describe(
+      'Daily variables to fetch across all ensemble members (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum"]). Each variable appears as temperature_2m_max_member01, … Daily names only — an hourly name such as precipitation or temperature_2m belongs in hourly_variables and is rejected here; for a daily summary use its published aggregate (precipitation_sum, temperature_2m_max). At least one of hourly_variables or daily_variables required.',
+    ),
     models: z
       .string()
       .optional()
@@ -245,6 +242,12 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       .enum(['mm', 'inch'])
       .default('mm')
       .describe('Precipitation unit. Default "mm".'),
+    cell_selection: z
+      .enum(['land', 'sea', 'nearest'])
+      .optional()
+      .describe(
+        'Which grid cell answers the coordinate. Omitted, Open-Meteo picks a land cell, so a point offshore reads conditions on shore. Set "sea" for a point on the water — wind for sailing, surf, or offshore wind — so a water cell answers; keep the default for a point on land, which "sea" moves onto the water. "nearest" takes the closest cell, land or water. The response latitude and longitude name the cell that answered.',
+      ),
     timezone: z
       .string()
       .default('auto')
@@ -257,9 +260,15 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
   }),
 
   output: z.object({
-    latitude: z.number().describe('Snapped latitude (Open-Meteo snaps to nearest grid point)'),
-    longitude: z.number().describe('Snapped longitude'),
-    elevation: z.number().describe('Terrain elevation at grid point (meters)'),
+    latitude: z
+      .number()
+      .describe(
+        'Latitude of the grid cell that answered, picked by cell_selection (a land cell when omitted)',
+      ),
+    longitude: z.number().describe('Longitude of the grid cell that answered'),
+    elevation: z
+      .number()
+      .describe('Terrain elevation of the requested coordinate (meters), whichever cell answered'),
     timezone: z.string().describe('Resolved IANA timezone'),
     model: z
       .string()
@@ -329,6 +338,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
       ),
   },
 
+  enrichmentTrailer: { notice: { render: renderNotice } },
+
   async handler(args, ctx) {
     const input = {
       ...args,
@@ -383,6 +394,7 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
         temperature_unit: input.temperature_unit,
         wind_speed_unit: input.wind_speed_unit,
         precipitation_unit: input.precipitation_unit,
+        cell_selection: input.cell_selection,
         timezone: input.timezone,
       },
       ctx,
@@ -500,9 +512,11 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
          * every other tool, on the widest payload the server serves. Each cadence still
          * favors rows with data, which past_days responses need: they lead with all-null
          * placeholder rows the models don't hindcast, so a raw chronological head can be
-         * entirely null. The canvas holds every row in chronological order regardless.
+         * entirely null. The canvas holds every row in chronological order regardless, so
+         * the budget is the canvas preview's, not the row budget that decided the spill:
+         * the preview only has to show the columns and the leading rows.
          */
-        const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
+        const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, CANVAS_PREVIEW_CHARS);
 
         return {
           latitude: data.latitude,
@@ -526,7 +540,8 @@ export const openmeteoGetEnsembleTool = tool('openmeteo_get_ensemble', {
        * No canvas (CANVAS_PROVIDER_TYPE=none): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
        * multi-megabyte member fan-out. Same per-cadence preview selection the canvas
-       * branch uses, so both paths return the same rows for the same records.
+       * branch uses, but against the whole row budget: here the preview is everything
+       * the caller gets.
        *
        * The full disclosure is composed into `notice`, for the reason the canvas pointer
        * is: a structuredContent-only client reads one surface, and on this branch the

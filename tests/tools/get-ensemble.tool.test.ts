@@ -527,7 +527,7 @@ describe('openmeteoGetEnsembleTool', () => {
       ...MOCK_RESPONSE,
       error: true,
       reason:
-        "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_ens_xyz.",
+        'Invalid value: Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_ens_xyz.',
     });
     const input = openmeteoGetEnsembleTool.input.parse({
       latitude: 47.6,
@@ -580,7 +580,7 @@ describe('openmeteoGetEnsembleTool', () => {
       ...MOCK_RESPONSE,
       error: true,
       reason:
-        "Data corrupted at path ''. Cannot initialize MultiDomains from invalid String value not_a_model.",
+        'Invalid value: Cannot initialize MultiDomains from invalid String value not_a_model.',
     });
     const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
     const input = openmeteoGetEnsembleTool.input.parse({

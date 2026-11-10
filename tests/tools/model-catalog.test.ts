@@ -11,6 +11,7 @@ import {
   ENSEMBLE_MODEL_LIST,
   ENSEMBLE_MODEL_NAMES,
   ENSEMBLE_MODELS,
+  FLOOD_DISCHARGE_START_DATE,
   FLOOD_MODEL_LIST,
   FLOOD_MODEL_NAMES,
   FLOOD_MODELS,
@@ -84,7 +85,15 @@ describe('catalog contents', () => {
     expect(FLOOD_MODEL_LIST).toContain(
       'seamless_v4 (default — consolidated_v4 reanalysis before 2023-08-05, forecast_v4 runs from 2023-08-05 into the live forecast)',
     );
-    expect(FLOOD_MODEL_LIST).toContain('consolidated_v4 (reanalysis from 1984 through 2025-05-31');
+    expect(FLOOD_MODEL_LIST).toContain(
+      'consolidated_v4 (reanalysis from 1997-01-01 through 2025-05-31',
+    );
     expect(FLOOD_MODEL_LIST).toContain('forecast_v4 (forecast runs from 2023-06-01');
+  });
+
+  it('dates GloFAS discharge from 1997-01-01, not the 1984 request floor (#92)', () => {
+    // Every reanalysis model answers 1984-01-01 through 1996-12-31 with null.
+    expect(FLOOD_DISCHARGE_START_DATE).toBe('1997-01-01');
+    expect(FLOOD_MODEL_LIST).not.toContain('1984');
   });
 });

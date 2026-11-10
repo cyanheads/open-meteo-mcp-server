@@ -406,7 +406,7 @@ describe('openmeteoGetClimateTool', () => {
       ...MOCK_MULTI_MODEL_RESPONSE,
       error: true,
       reason:
-        "Data corrupted at path ''. Cannot initialize MultiDomains from invalid String value BOGUS_MODEL.",
+        'Invalid value: Cannot initialize MultiDomains from invalid String value BOGUS_MODEL.',
     });
     const input = openmeteoGetClimateTool.input.parse({
       latitude: 47.6,
@@ -469,7 +469,7 @@ describe('openmeteoGetClimateTool', () => {
       ...MOCK_MULTI_MODEL_RESPONSE,
       error: true,
       reason:
-        "Data corrupted at path ''. Cannot initialize MultiDomains from invalid String value BOGUS_MODEL.",
+        'Invalid value: Cannot initialize MultiDomains from invalid String value BOGUS_MODEL.',
     });
     const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
@@ -500,7 +500,7 @@ describe('openmeteoGetClimateTool', () => {
       ...MOCK_MULTI_MODEL_RESPONSE,
       error: true,
       reason:
-        "Data corrupted at path ''. Cannot initialize ForecastVariableDaily from invalid String value bogus_var.",
+        'Invalid value: Cannot initialize ForecastVariableDaily from invalid String value bogus_var.',
     });
     const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
@@ -566,7 +566,7 @@ describe('openmeteoGetClimateTool', () => {
       ...MOCK_MULTI_MODEL_RESPONSE,
       error: true,
       reason:
-        "Data corrupted at path ''. Cannot initialize ForecastVariableDaily from invalid String value bogus_var.",
+        'Invalid value: Cannot initialize ForecastVariableDaily from invalid String value bogus_var.',
     });
     const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
@@ -609,7 +609,7 @@ describe('openmeteoGetClimateTool', () => {
     });
   });
 
-  it('throws date_out_of_range when API error reason contains "range"', async () => {
+  it("throws date_out_of_range for the climate endpoint's start_date range rejection", async () => {
     // Real upstream reason for start_date before 1950-01-01.
     mockGetClimate.mockResolvedValue({
       ...MOCK_MULTI_MODEL_RESPONSE,

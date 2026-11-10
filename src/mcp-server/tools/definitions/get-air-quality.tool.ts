@@ -18,7 +18,7 @@ import {
 } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { CalendarDateSchema } from '../date-input.js';
-import { cleanNames } from '../name-input.js';
+import { cleanNames, nameList } from '../name-input.js';
 import { formatCurrent, formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
   composeNotice,
@@ -26,9 +26,11 @@ import {
   describeCurrentGaps,
   findCoverageGaps,
   findCurrentGaps,
+  renderNotice,
 } from '../response-notice.js';
 import {
   boundedPreview,
+  CANVAS_PREVIEW_CHARS,
   canvasPointerLine,
   canvasPointerNotice,
   exceedsInlineBudget,
@@ -46,6 +48,7 @@ import {
 import {
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
+  isDateOutOfRangeReason,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
@@ -127,6 +130,14 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       retryable: false,
     },
     {
+      reason: 'date_out_of_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Upstream rejected start_date or end_date as outside the range the air-quality endpoint accepts; its message names that range.',
+      recovery:
+        'Move start_date and end_date inside the range the message names — from the first day the endpoint accepts to the last day of its forecast — and retry. The CAMS global archive begins in August 2022, so earlier days return rows of nulls.',
+      retryable: false,
+    },
+    {
       reason: 'invalid_timezone',
       code: JsonRpcErrorCode.ValidationError,
       when: 'timezone was blank, or upstream did not recognize the requested time zone.',
@@ -146,6 +157,9 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
     UPSTREAM_TIMEOUT_ERROR,
   ],
 
+  // Open-Meteo's own parameter names for the two variable lists.
+  inputAliases: { current: 'current_variables', hourly: 'hourly_variables' },
+
   input: z.object({
     latitude: z
       .number()
@@ -155,20 +169,12 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
         'Latitude in decimal degrees. Use openmeteo_search_locations to resolve a place name.',
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
-    current_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Air quality variables to return for the current instant (e.g., ["pm2_5", "pm10", "european_aqi", "us_aqi"]). Uses Open-Meteo\'s current-conditions data, so it answers "what is the AQI now?" without requesting an hourly series and picking a row; the returned interval is the block\'s aggregation interval, 3600 seconds on this endpoint. Satisfies the variable requirement on its own.',
-      ),
-    hourly_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Hourly air quality variables (e.g., ["pm2_5", "pm10", "ozone", "nitrogen_dioxide", "european_aqi", "us_aqi"]). At least one of current_variables or hourly_variables is required.',
-      ),
+    current_variables: nameList(50).describe(
+      'Air quality variables to return for the current instant (e.g., ["pm2_5", "pm10", "european_aqi", "us_aqi"]). Uses Open-Meteo\'s current-conditions data, so it answers "what is the AQI now?" without requesting an hourly series and picking a row; the returned interval is the block\'s aggregation interval, 3600 seconds on this endpoint. Satisfies the variable requirement on its own.',
+    ),
+    hourly_variables: nameList(50).describe(
+      'Hourly air quality variables (e.g., ["pm2_5", "pm10", "ozone", "nitrogen_dioxide", "european_aqi", "us_aqi"]). At least one of current_variables or hourly_variables is required.',
+    ),
     forecast_days: z
       .number()
       .int()
@@ -273,6 +279,8 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       ),
   },
 
+  enrichmentTrailer: { notice: { render: renderNotice } },
+
   async handler(args, ctx) {
     const input = {
       ...args,
@@ -369,6 +377,10 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
           frameRequestTooLargeMessage(data.reason, PAYLOAD_NARROWING),
         );
       }
+      // An archive range outside what upstream accepts — its message names the range.
+      if (isDateOutOfRangeReason(data.reason)) {
+        throw ctx.fail('date_out_of_range', data.reason);
+      }
       throw ctx.fail('invalid_variable', frameInvalidVariableMessage(data.reason));
     }
 
@@ -429,10 +441,12 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
           timezone: data.timezone,
           record_count: handle.rowCount,
           current: data.current,
-          // Same selection the canvas-less branch makes, so both paths return the same
-          // rows for the same records — and both start at the first row carrying data,
-          // which an archive range opening before CAMS coverage needs.
-          hourly: boundedPreview(hourlyRecords, rowBudget),
+          /*
+           * The canvas preview budget, since every row is staged: the leading rows, starting
+           * at the first one carrying data, which an archive range opening before CAMS
+           * coverage needs.
+           */
+          hourly: boundedPreview(hourlyRecords, CANVAS_PREVIEW_CHARS),
           current_units: currentUnits,
           hourly_units: hourlyUnits,
           data_source: 'CAMS' as const,
@@ -445,7 +459,8 @@ export const openmeteoGetAirQualityTool = tool('openmeteo_get_air_quality', {
       /*
        * No canvas (CANVAS_PROVIDER_TYPE=none): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
-       * 92-day hourly window.
+       * 92-day hourly window. The preview takes the whole row budget, not the canvas
+       * preview's: here it is everything the caller gets.
        *
        * The full disclosure is composed into `notice`, for the reason the canvas pointer
        * is: a structuredContent-only client reads one surface, and on this branch the

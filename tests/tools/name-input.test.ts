@@ -251,3 +251,156 @@ describe('padded names and the cadence check', () => {
     expect(error.message).not.toContain('  temperature_2m_max');
   });
 });
+
+/** `count` distinct names, `name_0` … `name_{count-1}`. */
+const names = (count: number): string[] => Array.from({ length: count }, (_, i) => `name_${i}`);
+
+describe('list forms the framework already accepts', () => {
+  it.each([
+    ['a JSON-stringified array', '["temperature_2m","precipitation"]'],
+    ['a JSON-stringified array after leading whitespace', ' ["temperature_2m","precipitation"]'],
+  ])('reads %s as its two names', async (_label, hourly_variables) => {
+    await callTool(openmeteoGetForecastTool, { ...SEATTLE, hourly_variables });
+
+    expect(sentParams().hourly).toEqual(['temperature_2m', 'precipitation']);
+  });
+
+  it('sends an array element holding a comma as that one element (#98)', async () => {
+    await callTool(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m,precipitation'],
+    });
+
+    expect(sentParams().hourly).toEqual(['temperature_2m,precipitation']);
+  });
+
+  it('reads null as not provided', async () => {
+    await callTool(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: null,
+      daily_variables: ['temperature_2m_max'],
+    });
+
+    expect(sentParams().hourly).toBeUndefined();
+    expect(sentParams().daily).toEqual(['temperature_2m_max']);
+  });
+
+  it('accepts 50 names in an array and rejects 51 as too big', async () => {
+    await callTool(openmeteoGetForecastTool, { ...SEATTLE, hourly_variables: names(50) });
+    expect(sentParams().hourly).toEqual(names(50));
+
+    upstream.mockReset();
+    const error = await wireError(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: names(51),
+    } as never);
+    expect(error.code).toBe(-32602);
+    expect(error.message).toBe(
+      'Input validation error: Invalid arguments for tool openmeteo_get_forecast: hourly_variables: Too big: expected array to have <=50 items',
+    );
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('drops an underscore-prefixed spelling of the field, as for any undeclared _ key', async () => {
+    await callTool(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      _hourly_variables: ['temperature_2m'],
+      daily_variables: ['temperature_2m_max'],
+    });
+
+    expect(sentParams().hourly).toBeUndefined();
+    expect(sentParams().daily).toEqual(['temperature_2m_max']);
+  });
+
+  it('reaches the field from a case-folded spelling of its key', async () => {
+    await callTool(openmeteoGetForecastTool, { ...SEATTLE, Hourly_Variables: ['temperature_2m'] });
+
+    expect(sentParams().hourly).toEqual(['temperature_2m']);
+  });
+
+  it('advertises a name list as a plain optional string array', () => {
+    const advertised = openmeteoGetAirQualityTool.input['~standard'].jsonSchema.input({
+      target: 'draft-2020-12',
+    }) as { properties: Record<string, unknown>; required?: string[] };
+
+    expect(advertised.properties.hourly_variables).toStrictEqual({
+      description:
+        'Hourly air quality variables (e.g., ["pm2_5", "pm10", "ozone", "nitrogen_dioxide", "european_aqi", "us_aqi"]). At least one of current_variables or hourly_variables is required.',
+      maxItems: 50,
+      type: 'array',
+      items: { type: 'string' },
+    });
+    expect(advertised.required).not.toContain('hourly_variables');
+  });
+});
+
+describe('comma-joined name lists (#96)', () => {
+  it.each([
+    ['a comma-joined pair', 'temperature_2m,precipitation'],
+    ['padded names and a trailing comma', ' temperature_2m , precipitation ,'],
+    ['an empty segment', 'temperature_2m,,precipitation'],
+  ])('splits %s into the names it joins', async (_label, hourly_variables) => {
+    await callTool(openmeteoGetForecastTool, { ...SEATTLE, hourly_variables });
+
+    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(sentParams().hourly).toEqual(['temperature_2m', 'precipitation']);
+  });
+
+  it.each(['', ' , ,'])(
+    'reads %j as not provided, so the call fails no_variables_requested',
+    async (hourly_variables) => {
+      const error = await wireError(openmeteoGetForecastTool, {
+        ...SEATTLE,
+        hourly_variables,
+      } as never);
+
+      expect(error.data?.reason).toBe('no_variables_requested');
+      expect(upstream).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts 50 joined names and rejects 51 as too big', async () => {
+    await callTool(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: names(50).join(','),
+    });
+    expect(sentParams().hourly).toEqual(names(50));
+
+    upstream.mockReset();
+    const error = await wireError(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      hourly_variables: names(51).join(','),
+    } as never);
+    expect(error.code).toBe(-32602);
+    expect(error.message).toBe(
+      'Input validation error: Invalid arguments for tool openmeteo_get_forecast: hourly_variables: Too big: expected array to have <=50 items',
+    );
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [true, 'hourly_variables: Send an array of names, not a boolean.'],
+    [2.5, 'hourly_variables: Send an array of names, not a number.'],
+    [{ name: 'temperature_2m' }, 'hourly_variables: Send an array of names, not an object.'],
+    [
+      '["temperature_2m",',
+      'hourly_variables: Send an array of names; this string is not a well-formed JSON array.',
+    ],
+    [
+      ' {"name":"temperature_2m"}',
+      'hourly_variables: Send an array of names; this string is not a well-formed JSON array.',
+    ],
+  ])('rejects %j with the remedy on every surface', async (hourly_variables, line) => {
+    const result = await callTool(openmeteoGetForecastTool, { ...SEATTLE, hourly_variables });
+
+    expect(result.isError).toBe(true);
+    const { error } = result.structuredContent as { error: WireError };
+    expect(error.code).toBe(-32602);
+    expect(error.message).toBe(
+      `Input validation error: Invalid arguments for tool openmeteo_get_forecast: ${line}`,
+    );
+    expect(error.data?.recovery?.hint).toBe(line);
+    expect(firstText(result.content)).toContain(`openmeteo_get_forecast: ${line}`);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+});

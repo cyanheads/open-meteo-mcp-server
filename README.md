@@ -42,7 +42,7 @@ Global weather from Open-Meteo: forecasts, history back to 1940, marine conditio
 | `openmeteo_get_air_quality` | Modeled CAMS pollutants, pollen, and AQI: current, up to 7 forecast days, or an archive range |
 | `openmeteo_get_elevation` | Copernicus DEM terrain elevation: up to 1,000 coordinate pairs, the first 100 sampled per call with the rest reported for resubmission |
 | `openmeteo_get_ensemble` | Per-member ensemble forecast (up to 64 members, up to 35 days) for exceedance and uncertainty |
-| `openmeteo_get_flood` | GloFAS river discharge: a ~6-month forecast or a date range from 1984, from seamless or chosen v4 models |
+| `openmeteo_get_flood` | GloFAS river discharge: a ~6-month forecast or a date range (accepted from 1984-01-01; discharge begins 1997-01-01), from seamless or chosen v4 models |
 | `openmeteo_get_climate` | Bias-corrected daily CMIP6 projections, 1950–2050, across up to 7 models |
 | `openmeteo_dataframe_describe` | List the tables and columns staged on a DataCanvas |
 | `openmeteo_dataframe_query` | Run a read-only SQL `SELECT` against staged tables |
@@ -54,7 +54,7 @@ The server also publishes an agent skill, `open-meteo-guide` (`skill://open-mete
 
 ### `openmeteo_search_locations` <sub>tool</sub>
 
-- A bare place `name` ("Paris", not "Paris, France"), with optional `country` (ISO 3166-1 alpha-2) and `language` (default `en`); `count` 1–10, default 5
+- A bare place `name` ("Paris", not "Paris, France"), with optional `country` (ISO 3166-1 alpha-2: two letters, any case, never a country name) and `language` (default `en`); `count` 1–10, default 5
 - Each result carries coordinates, an IANA `timezone`, `country` / `country_code`, `admin1` / `admin2`, `population`, and `feature_code`; no match fails as `no_results`
 - A `notice` flags a top match with null or sub-100,000 population, which often means a historic exonym ("Bangalore", "Calcutta")
 - A native-script query that misses under `en` is retried once in the language its script implies; `effective_language` names it when the retry succeeds (`上海` → `zh`), and results come back localized
@@ -63,7 +63,8 @@ The server also publishes an agent skill, `open-meteo-guide` (`skill://open-mete
 
 ### `openmeteo_get_forecast` <sub>tool</sub>
 
-- At least one of `current_variables`, `hourly_variables`, or `daily_variables` (up to 50 each); `forecast_days` 1–16 (default 7), `past_days` 0–92 (default 0)
+- At least one of `current_variables`, `hourly_variables`, or `daily_variables` (up to 50 each), each also accepted as one comma-joined string and under Open-Meteo's own keys `current`, `hourly`, `daily`; `forecast_days` 1–16 (default 7), `past_days` 0–92 (default 0)
+- `cell_selection` (`land`, `sea`, `nearest`) picks the grid cell that answers: omitted, Open-Meteo answers from a land cell, so a point offshore reads on-shore conditions. Set `sea` for a point on the water (wind for sailing, surf, or offshore wind); a point on land keeps the default. The response `latitude` / `longitude` name the cell that answered
 - Per-timestamp `hourly` / `daily` records with `hourly_units` / `daily_units`; `current_variables` adds a `current` object from 15-minute data (`interval` 900) plus `current_units`
 - Omitting `models` reads Open-Meteo `best_match`; `models` compares deterministic models (e.g. `ncep_gfs_seamless`, `ecmwf_ifs025`, `dwd_icon_seamless`; older spellings like `gfs_seamless` still resolve). With 2+ models each hourly and daily column carries a model-name suffix, and `models` is echoed. `current_variables` takes at most one model (`current_multi_model`)
 - A regional model with no data at the point is dropped from a multi-model response: the `notice` names it, or, when one model is left with unsuffixed columns, says the values cannot be attributed to a model; when every requested model misses, the call fails as `coverage_gap`
@@ -73,7 +74,8 @@ The server also publishes an agent skill, `open-meteo-guide` (`skill://open-mete
 
 ### `openmeteo_get_historical` <sub>tool</sub>
 
-- `start_date` and `end_date` required (YYYY-MM-DD, from 1940-01-01), plus at least one of `hourly_variables` / `daily_variables`, named as on the forecast tool
+- `start_date` and `end_date` required (YYYY-MM-DD, from 1940-01-01), plus at least one of `hourly_variables` / `daily_variables`, named as on the forecast tool (a list or one comma-joined string, also under `hourly` / `daily`)
+- `cell_selection` (`land`, `sea`, `nearest`) works as on the forecast tool: omitted, a land cell answers, so a point offshore reads on-shore conditions; `sea` moves it onto the water
 - Omitting `models` reads Best Match (IFS HRES + ERA5 + ERA5-Land, source varies by date); up to 8 `models` pin a source. The ERA5 family runs about a week behind, `ecmwf_ifs` has no delay, and `cerra` covers Europe only
 - Output echoes `models` and the returned `date_range`; with 2+ models each column carries a model-name suffix. A model with no data at the point (`cerra` outside Europe) is dropped from a multi-model response; the `notice` names it, or, when one model is left with unsuffixed columns (`era5,cerra`), says the values cannot be attributed to a model
 
@@ -81,7 +83,7 @@ The server also publishes an agent skill, `open-meteo-guide` (`skill://open-mete
 
 ### `openmeteo_get_marine` <sub>tool</sub>
 
-- One window per call: `forecast_days` 1–8 (upstream default 7) with `past_days` 0–92, or a `start_date` / `end_date` archive range back to at least 2022. Mixing them fails as `forecast_window_conflict`, a lone date as `date_range_incomplete`
+- One window per call: `forecast_days` 1–8 (upstream default 7) with `past_days` 0–92, or a `start_date` / `end_date` archive range back to at least 2022. Mixing them fails as `forecast_window_conflict`, a lone date as `date_range_incomplete`, and a date outside the range upstream accepts as `date_out_of_range`
 - At least one of `current_variables`, `hourly_variables`, or `daily_variables` (wave height, period, and direction, swell, sea-surface temperature); sheltered water returns near-zero waves, a point well inland returns nulls (named in the `notice`), a land point near the coast is answered from a nearby sea cell with real values and no notice (check the response's `latitude` / `longitude` is the water you meant), and `ocean_current_velocity` is null off the open ocean
 - `current_variables` takes the hourly names and adds a `current` object from 15-minute data (`interval` 900) plus `current_units`, alongside either window; a daily name there fails as `variable_wrong_cadence`
 - `length_unit` (`metric` / `imperial`) sets every height, `sea_level_height_msl` included, in m or ft; `wind_speed_unit` (`kmh`, `mph`, `ms`, `kn`) sets `ocean_current_velocity`; `temperature_unit` (`celsius` / `fahrenheit`) sets `sea_surface_temperature`. Open-Meteo converts the values, and the `*_units` maps label them (`mph` reads `mp/h`)
@@ -90,7 +92,7 @@ The server also publishes an agent skill, `open-meteo-guide` (`skill://open-mete
 
 ### `openmeteo_get_air_quality` <sub>tool</sub>
 
-- One window per call: `forecast_days` 1–7 (upstream default 5) with `past_days` 0–92, or a `start_date` / `end_date` archive range from August 2022 (`us_aqi` starts a day later). Same `forecast_window_conflict` and `date_range_incomplete` rejections as the marine tool
+- One window per call: `forecast_days` 1–7 (upstream default 5) with `past_days` 0–92, or a `start_date` / `end_date` archive range from August 2022 (`us_aqi` starts a day later). Same `forecast_window_conflict`, `date_range_incomplete`, and `date_out_of_range` rejections as the marine tool
 - At least one of `current_variables` (a `current` object, `interval` 3600) or `hourly_variables`: PM2.5, PM10, NO2, SO2, O3, CO, dust, pollen, European and US AQI. Pollen is modeled for Europe only, in pollen season; elsewhere it comes back null and the `notice` names it
 - `data_source: "CAMS"` marks every response as modeled grid data, not station measurements
 
@@ -108,6 +110,7 @@ The server also publishes an agent skill, `open-meteo-guide` (`skill://open-mete
 
 - At least one of `hourly_variables` / `daily_variables`; `forecast_days` 1–35 (default 7), `past_days` 0–92. Most models end within 16 days (`ncep_gefs05` runs to about day 34); past that, columns are null and the `notice` says where data ends
 - `models` takes one ensemble name (e.g. `ecmwf_ifs025_ensemble`, 51 members; `gem_global_ensemble`, 21); omitted or blank selects `ecmwf_ifs025_ensemble`, echoed in `model`
+- `cell_selection` (`land`, `sea`, `nearest`) works as on the forecast tool: omitted, a land cell answers; the response `latitude` / `longitude` name the cell that answered
 - Each variable returns per-member columns (`temperature_2m_member01`, …) across up to 64 members; `member_count` excludes the control run. A regional model queried outside its coverage fails as a non-retryable input error; switch to a global model
 
 ---
@@ -115,8 +118,8 @@ The server also publishes an agent skill, `open-meteo-guide` (`skill://open-mete
 ### `openmeteo_get_flood` <sub>tool</sub>
 
 - `daily_variables` required (up to 20), all in m³/s: `river_discharge` plus the statistics `river_discharge_mean` / `_median` / `_min` / `_max` / `_p25` / `_p75`, which carry ensemble spread on forecast-run days and repeat `river_discharge` on reanalysis days
-- One mode per call: `forecast_days` 1–210 (the current GloFAS run reaches about six months; later days are null), or a `start_date` / `end_date` range from 1984-01-01. Mixing them fails as `forecast_days_conflict`, a lone date as `date_range_incomplete`
-- Omitting `models` reads `seamless_v4`: `consolidated_v4` reanalysis before 2023-08-05, `forecast_v4` runs from then on. `models: ["consolidated_v4"]` reads the reanalysis through 2025-05-31 (null after, and on `forecast_days`); `forecast_v4` starts 2023-06-01. Output echoes `models`; with 2+ models each column carries a model-name suffix, and the `notice` names null spans
+- One mode per call: `forecast_days` 1–210 (the current GloFAS run reaches about six months; later days are null), or a `start_date` / `end_date` range accepted from 1984-01-01, though discharge begins 1997-01-01 and earlier days are null. Mixing them fails as `forecast_days_conflict`, a lone date as `date_range_incomplete`, a date outside the range upstream accepts as `date_out_of_range`
+- Omitting `models` reads `seamless_v4`: `consolidated_v4` reanalysis before 2023-08-05, `forecast_v4` runs from then on. `models: ["consolidated_v4"]` reads the reanalysis from 1997-01-01 through 2025-05-31 (null outside that span, and on `forecast_days`); `forecast_v4` starts 2023-06-01. Output echoes `models`; with 2+ models each column carries a model-name suffix, and the `notice` names null spans
 - Discharge comes from the GloFAS 0.05° grid cell nearest the coordinate, not reliably the cell on the river you mean; when the value is far below what the river carries, step the coordinate 0.05° across the channel and compare. Null outside GloFAS coverage
 
 ---
@@ -125,6 +128,7 @@ The server also publishes an agent skill, `open-meteo-guide` (`skill://open-mete
 
 - `start_date` / `end_date` within 1950-01-01 to 2050-12-31 and `daily_variables` required (the API is daily-only); up to 7 CMIP6 `models`, e.g. `CMCC_CM2_VHR4`, `MRI_AGCM3_2_S`
 - With 2+ models each variable is suffixed with the model name; a single or omitted model returns plain names. A variable a model doesn't carry comes back null
+- `cell_selection` (`land`, `sea`, `nearest`) works as on the forecast tool, except that the response `latitude` / `longitude` can stay the same while the values change with it, so they do not show which cell answered
 
 ---
 
@@ -137,9 +141,10 @@ The server also publishes an agent skill, `open-meteo-guide` (`skill://open-mete
 
 ### `openmeteo_dataframe_query` <sub>tool</sub>
 
-- `canvas_id` plus a read-only `SELECT` against the staged `table_name`; `rows` holds up to 100 rows, fewer when wide rows would pass the 80,000-character inline ceiling (values are never cut). `row_count` is the exact total; page with `OFFSET <rows.length>` under an `ORDER BY`
+- `canvas_id` plus a read-only `SELECT` against the staged `table_name`; `rows` holds the first `limit` rows (default 25, each whole, values never cut). A larger `limit` returns at most 10,000 rows (or `CANVAS_DEFAULT_ROW_LIMIT` when lower) and a `notice` says so. `row_count` is the exact total and `truncated` is `true` when it exceeds `rows`; page with `OFFSET <rows.length>` under an `ORDER BY`
+- A page's size rests on `limit` and the columns selected, so from a member-suffixed ensemble table select the columns the question needs rather than `SELECT *`. One response carries at most 8,000,000 characters of row data (the rows written as JSON, a character that needs escaping counted at its escaped length); a larger page is refused as `result_too_large`, never cut, and the message says how many leading rows fit
 - If the count fails or runs past 5 seconds, rows still return, `row_count` is a lower bound, and `count_error` names the reason (e.g. `count_timeout`)
-- Fails as `canvas_not_enabled`, `canvas_not_found`, `missing_table`, `system_catalog_access` (system catalogs are blocked), or `row_too_large` (the first row alone exceeds the ceiling: select fewer columns, or shorten values with `left()`, `substr()`, or `list_slice()`)
+- Fails as `canvas_not_enabled`, `canvas_not_found`, `missing_table`, `system_catalog_access` (system catalogs are blocked), or `result_too_large`. An error message relayed from the query engine is cut to 2,000 characters, keeping its code and `reason`
 
 ---
 
@@ -163,7 +168,8 @@ Open-Meteo-specific:
 Agent-friendly output:
 
 - Location-first workflow: `openmeteo_search_locations` returns the IANA `timezone` alongside coordinates, ready for any weather tool's `timezone` input (default `auto`)
-- Typed rejections: `variable_wrong_cadence` (names the correct field), `request_too_large` (names the inputs to narrow), `coverage_gap` (a coordinate outside the dataset's grid or the model's domain), and `rate_limited`; only `Too many concurrent requests` is retried first. An outage that outlasts three attempts fails as `upstream_unavailable`, or `upstream_timeout` when the last attempt timed out
+- Variable and model lists take an array or one comma-joined string (`"temperature_2m,precipitation"`); the `*_variables` fields also answer to Open-Meteo's own `current`, `hourly`, and `daily` keys where the tool has the field
+- Typed rejections: `variable_wrong_cadence` (names the correct field), `request_too_large` (names the inputs to narrow), `coverage_gap` (a coordinate outside the dataset's grid or the model's domain), `date_out_of_range` (a date outside the range the archive, marine, air-quality, climate, or flood endpoint accepts), and `rate_limited`; only `Too many concurrent requests` is retried first. An outage that outlasts three attempts fails as `upstream_unavailable`, or `upstream_timeout` when the last attempt timed out
 - Request URLs never appear in error data or client-visible logs
 - One `notice` per response for what the data alone won't show: unserved variable names, nulls outside a dataset's coverage, and where spilled rows went
 
@@ -212,6 +218,7 @@ Every variable is optional.
 | `OPEN_METEO_CLIMATE_BASE_URL` | CMIP6 climate API base URL. | `https://climate-api.open-meteo.com` |
 | `CANVAS_PROVIDER_TYPE` | `duckdb` stages over-budget weather results on a DataCanvas and enables the dataframe tools; `none` returns a bounded preview. | `duckdb` |
 | `OPENMETEO_DATAFRAME_DROP_ENABLED` | `true` makes `openmeteo_dataframe_drop` callable; otherwise it is listed as disabled. | `false` |
+| `OPENMETEO_CLAMP_LIMITS` | `true` lowers an `openmeteo_dataframe_query` `limit` above its per-call cap to the cap, with a notice; `false` advertises the cap as a maximum and rejects a larger value. | `true` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
@@ -227,7 +234,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 
 - **Clone and install:**
 

@@ -15,7 +15,7 @@ import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { CalendarDateSchema } from '../date-input.js';
 import { ARCHIVE_MODEL_LIST, ARCHIVE_MODEL_NAMES } from '../model-catalog.js';
-import { cleanNames } from '../name-input.js';
+import { cleanNames, nameList } from '../name-input.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
   composeNotice,
@@ -23,9 +23,11 @@ import {
   describeDroppedModels,
   describeUnservedColumns,
   findCoverageGaps,
+  renderNotice,
 } from '../response-notice.js';
 import {
   boundedPreviewByCadence,
+  CANVAS_PREVIEW_CHARS,
   canvasPointerLine,
   canvasPointerNotice,
   exceedsInlineBudget,
@@ -44,6 +46,7 @@ import {
   coverageGapContract,
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
+  isDateOutOfRangeReason,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
@@ -90,9 +93,9 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     {
       reason: 'date_out_of_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'start_date predates 1940-01-01, or the requested dates fall outside the coverage of the selected model.',
+      when: 'start_date predates 1940-01-01, or end_date falls after the last day the archive accepts (about today, whatever models selects), which upstream rejects with a message naming that day.',
       recovery:
-        'Use start_date >= 1940-01-01. A selected ERA5-family model updates daily with about a week of delay, so for the last week request models: ["ecmwf_ifs"], drop models to use the Best Match blend, or use openmeteo_get_forecast with past_days instead.',
+        'Keep start_date on or after 1940-01-01 and end_date on or before the last day the archive accepts — about today, and named in the message when end_date was the one rejected — then retry. For days after today, use openmeteo_get_forecast instead.',
       retryable: false,
     },
     {
@@ -145,6 +148,9 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     UPSTREAM_TIMEOUT_ERROR,
   ],
 
+  // Open-Meteo's own parameter names for the two variable lists.
+  inputAliases: { hourly: 'hourly_variables', daily: 'daily_variables' },
+
   input: z.object({
     latitude: z
       .number()
@@ -160,27 +166,15 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     end_date: CalendarDateSchema.describe(
       'End date (YYYY-MM-DD, inclusive). Must be on or after start_date. For the last few days, either request models: ["ecmwf_ifs"] or use openmeteo_get_forecast with past_days.',
     ),
-    hourly_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Hourly archive variables (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "relative_humidity_2m", "cloud_cover", "soil_moisture_0_to_7cm"]). Hourly names only — a daily aggregate such as temperature_2m_max or precipitation_sum belongs in daily_variables and is rejected here. At least one of hourly_variables or daily_variables required.',
-      ),
-    daily_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Daily summary variables (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_max"]). Daily names only — an hourly name such as cloud_cover or temperature_2m belongs in hourly_variables and is rejected here; for a daily summary of an hourly variable use its published aggregate (cloud_cover_max, cloud_cover_mean, cloud_cover_min). At least one of hourly_variables or daily_variables required.',
-      ),
-    models: z
-      .array(z.string())
-      .max(8)
-      .optional()
-      .describe(
-        `Archive models to read from: ${ARCHIVE_MODEL_LIST}. Omit to use Open-Meteo's Best Match default, which blends IFS HRES, ERA5, and ERA5-Land — pin a model instead when a consistent source matters across the range. With 2+ models each variable column is suffixed with the model name. cerra covers Europe only: requested alone elsewhere it is rejected as a coverage gap, and beside another model the archive drops it and the notice says so. A name outside this list is sent upstream rather than rejected here.`,
-      ),
+    hourly_variables: nameList(50).describe(
+      'Hourly archive variables (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "relative_humidity_2m", "cloud_cover", "soil_moisture_0_to_7cm"]). Hourly names only — a daily aggregate such as temperature_2m_max or precipitation_sum belongs in daily_variables and is rejected here. At least one of hourly_variables or daily_variables required.',
+    ),
+    daily_variables: nameList(50).describe(
+      'Daily summary variables (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_max"]). Daily names only — an hourly name such as cloud_cover or temperature_2m belongs in hourly_variables and is rejected here; for a daily summary of an hourly variable use its published aggregate (cloud_cover_max, cloud_cover_mean, cloud_cover_min). At least one of hourly_variables or daily_variables required.',
+    ),
+    models: nameList(8).describe(
+      `Archive models to read from: ${ARCHIVE_MODEL_LIST}. Omit to use Open-Meteo's Best Match default, which blends IFS HRES, ERA5, and ERA5-Land — pin a model instead when a consistent source matters across the range. With 2+ models each variable column is suffixed with the model name. cerra covers Europe only: requested alone elsewhere it is rejected as a coverage gap, and beside another model the archive drops it and the notice says so. A name outside this list is sent upstream rather than rejected here.`,
+    ),
     temperature_unit: z
       .enum(['celsius', 'fahrenheit'])
       .default('celsius')
@@ -193,6 +187,12 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .enum(['mm', 'inch'])
       .default('mm')
       .describe('Precipitation unit. Default "mm".'),
+    cell_selection: z
+      .enum(['land', 'sea', 'nearest'])
+      .optional()
+      .describe(
+        'Which grid cell answers the coordinate. Omitted, Open-Meteo picks a land cell, so a point offshore reads conditions on shore. Set "sea" for a point on the water — wind for sailing, surf, or offshore wind — so a water cell answers; keep the default for a point on land, which "sea" moves onto the water. "nearest" takes the closest cell, land or water. The response latitude and longitude name the cell that answered.',
+      ),
     timezone: z.string().default('auto').describe('IANA timezone or "auto". Default "auto".'),
     canvas_id: CanvasIdSchema.optional().describe(
       'DataCanvas token for multi-year or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
@@ -200,9 +200,15 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
   }),
 
   output: z.object({
-    latitude: z.number().describe('Snapped latitude'),
-    longitude: z.number().describe('Snapped longitude'),
-    elevation: z.number().describe('Elevation at grid point (meters)'),
+    latitude: z
+      .number()
+      .describe(
+        'Latitude of the grid cell that answered, picked by cell_selection (a land cell when omitted)',
+      ),
+    longitude: z.number().describe('Longitude of the grid cell that answered'),
+    elevation: z
+      .number()
+      .describe('Terrain elevation of the requested coordinate (meters), whichever cell answered'),
     timezone: z.string().describe('Resolved IANA timezone'),
     models: z
       .array(z.string())
@@ -269,9 +275,11 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the archive returned with the unit "undefined" (a name it parsed but does not serve in the requested cadence, or — on a model-suffixed column — a variable that model does not serve); requested models the archive left out for having no data at this coordinate, or the plain-named columns a multi-model request cannot attribute to one model; recognized variables whose requested window falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the archive returned with the unit "undefined" (a name it parsed but does not serve in the requested cadence, or — on a model-suffixed column — a variable that model does not serve); requested models the archive left out for having no data at this coordinate, or the plain-named columns a multi-model request cannot attribute to one model; recognized variables that came back null under a real unit, with the timestamps that do carry values — a variable null across the whole window is attributed to the selected model that returned it empty when another selected model returned values for it, and otherwise to the location, the window, or the selected models; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
+
+  enrichmentTrailer: { notice: { render: renderNotice } },
 
   async handler(args, ctx) {
     const input = {
@@ -341,6 +349,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
         temperature_unit: input.temperature_unit,
         wind_speed_unit: input.wind_speed_unit,
         precipitation_unit: input.precipitation_unit,
+        cell_selection: input.cell_selection,
         timezone: input.timezone,
       },
       ctx,
@@ -360,8 +369,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       if (isRequestTooLargeReason(reason)) {
         throw ctx.fail('request_too_large', frameRequestTooLargeMessage(reason, PAYLOAD_NARROWING));
       }
-      if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
-        throw ctx.fail('date_out_of_range', reason || 'Date out of archive range.');
+      if (isDateOutOfRangeReason(reason)) {
+        throw ctx.fail('date_out_of_range', reason);
       }
       /*
        * The models array goes out with a literal comma, so upstream parses it as a list
@@ -422,11 +431,13 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
      * Temporal coverage, the case the check above cannot see: the archive leaves a
      * recognized variable null wherever the reanalysis carries nothing for the grid
      * point, with the unit intact — success and emptiness look identical without this.
+     * A selected model that does not carry a variable answers the same way (era5_land
+     * has no precipitation), so the selection decides whom an empty column is put on.
      */
     notice.add(
       describeCoverageGaps(
-        findCoverageGaps('hourly', data.hourly, rawHourlyUnits),
-        findCoverageGaps('daily', data.daily, rawDailyUnits),
+        findCoverageGaps('hourly', data.hourly, rawHourlyUnits, undefined, selection),
+        findCoverageGaps('daily', data.daily, rawDailyUnits, undefined, selection),
       ),
     );
     notice.add(
@@ -456,9 +467,11 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
          * spillover()'s previewRows: those are drained from the head of the concatenated
          * array, so a wide hourly window fills them before a single daily row and the
          * daily summary comes back empty. The staged table is unaffected — it holds
-         * every row of both cadences, in chronological order.
+         * every row of both cadences, in chronological order. The budget is the canvas
+         * preview's, not the row budget that decided the spill: every row is on the
+         * canvas, so the preview only has to show the columns and the leading rows.
          */
-        const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
+        const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, CANVAS_PREVIEW_CHARS);
 
         return {
           latitude: data.latitude,
@@ -481,8 +494,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       /*
        * No canvas (CANVAS_PROVIDER_TYPE=none): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
-       * multi-megabyte payload. Same per-cadence selection the canvas branch uses, so
-       * both paths return the same rows for the same records.
+       * multi-megabyte payload. Same per-cadence selection the canvas branch uses, but
+       * against the whole row budget: here the preview is everything the caller gets.
        *
        * The full disclosure is composed into `notice`, for the reason the canvas pointer
        * is: a structuredContent-only client reads one surface, and on this branch the

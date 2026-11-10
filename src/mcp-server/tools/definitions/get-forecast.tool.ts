@@ -17,7 +17,7 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { FORECAST_MODEL_NAMES, FORECAST_MODELS } from '../model-catalog.js';
-import { cleanNames } from '../name-input.js';
+import { cleanNames, nameList } from '../name-input.js';
 import { formatCurrent, formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
   composeNotice,
@@ -27,9 +27,11 @@ import {
   describeUnservedColumns,
   findCoverageGaps,
   findCurrentGaps,
+  renderNotice,
 } from '../response-notice.js';
 import {
   boundedPreviewByCadence,
+  CANVAS_PREVIEW_CHARS,
   canvasPointerLine,
   canvasPointerNotice,
   exceedsInlineBudget,
@@ -152,6 +154,13 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
     UPSTREAM_TIMEOUT_ERROR,
   ],
 
+  // Open-Meteo's own parameter names for the three variable lists.
+  inputAliases: {
+    current: 'current_variables',
+    hourly: 'hourly_variables',
+    daily: 'daily_variables',
+  },
+
   input: z.object({
     latitude: z
       .number()
@@ -165,34 +174,18 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
       .min(-180)
       .max(180)
       .describe('Longitude in decimal degrees (e.g., -122.3321 for Seattle).'),
-    current_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Variables to return for the current instant (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "weather_code"]). Uses Open-Meteo\'s 15-minute current-conditions data, so it answers "what is it doing right now?" without requesting an hourly series and picking a row. Takes the hourly variable names; a daily-only name such as temperature_2m_max comes back null with the unit "undefined" and is reported in the notice. Satisfies the variable requirement on its own.',
-      ),
-    hourly_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Hourly variables to fetch (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "relative_humidity_2m", "cloud_cover", "uv_index", "apparent_temperature"]). Hourly names only — a daily aggregate such as temperature_2m_max or precipitation_sum belongs in daily_variables and is rejected here. At least one of current_variables, hourly_variables, or daily_variables is required.',
-      ),
-    daily_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Daily summary variables (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_max", "sunrise", "sunset", "uv_index_max"]). Daily names only — an hourly name such as cloud_cover or temperature_2m belongs in hourly_variables and is rejected here; for a daily summary of an hourly variable use its published aggregate (cloud_cover_max, cloud_cover_mean, cloud_cover_min). At least one of current_variables, hourly_variables, or daily_variables is required.',
-      ),
-    models: z
-      .array(z.string())
-      .max(FORECAST_MODELS.length)
-      .optional()
-      .describe(
-        `Deterministic forecast models to read from, to compare modeling centers side by side. Documented: ${FORECAST_MODEL_NAMES}. Older spellings such as gfs_seamless, icon_seamless, icon_d2, and gfs_hrrr still resolve. Omit to use Open-Meteo's best_match blend. With 2+ models every hourly and daily column and unit key is suffixed with the model name (temperature_2m_max_ecmwf_ifs025); one model keeps plain names. Regional models serve only their own domain: when every requested model misses the coordinate the call fails as coverage_gap, and when only some do, Open-Meteo drops those and the notice names them, or, when one model is left with unsuffixed columns, says the values cannot be attributed to a model. current_variables takes at most one model. A name outside this list is sent upstream rather than rejected here.`,
-      ),
+    current_variables: nameList(50).describe(
+      'Variables to return for the current instant (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "weather_code"]). Uses Open-Meteo\'s 15-minute current-conditions data, so it answers "what is it doing right now?" without requesting an hourly series and picking a row. Takes the hourly variable names; a daily-only name such as temperature_2m_max comes back null with the unit "undefined" and is reported in the notice. Satisfies the variable requirement on its own.',
+    ),
+    hourly_variables: nameList(50).describe(
+      'Hourly variables to fetch (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "relative_humidity_2m", "cloud_cover", "uv_index", "apparent_temperature"]). Hourly names only — a daily aggregate such as temperature_2m_max or precipitation_sum belongs in daily_variables and is rejected here. At least one of current_variables, hourly_variables, or daily_variables is required.',
+    ),
+    daily_variables: nameList(50).describe(
+      'Daily summary variables (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_max", "sunrise", "sunset", "uv_index_max"]). Daily names only — an hourly name such as cloud_cover or temperature_2m belongs in hourly_variables and is rejected here; for a daily summary of an hourly variable use its published aggregate (cloud_cover_max, cloud_cover_mean, cloud_cover_min). At least one of current_variables, hourly_variables, or daily_variables is required.',
+    ),
+    models: nameList(FORECAST_MODELS.length).describe(
+      `Deterministic forecast models to read from, to compare modeling centers side by side. Documented: ${FORECAST_MODEL_NAMES}. Older spellings such as gfs_seamless, icon_seamless, icon_d2, and gfs_hrrr still resolve. Omit to use Open-Meteo's best_match blend. With 2+ models every hourly and daily column and unit key is suffixed with the model name (temperature_2m_max_ecmwf_ifs025); one model keeps plain names. Regional models serve only their own domain: when every requested model misses the coordinate the call fails as coverage_gap, and when only some do, Open-Meteo drops those and the notice names them, or, when one model is left with unsuffixed columns, says the values cannot be attributed to a model. current_variables takes at most one model. A name outside this list is sent upstream rather than rejected here.`,
+    ),
     forecast_days: z
       .number()
       .int()
@@ -223,6 +216,12 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
       .enum(['mm', 'inch'])
       .default('mm')
       .describe('Precipitation unit: "mm" or "inch". Default "mm".'),
+    cell_selection: z
+      .enum(['land', 'sea', 'nearest'])
+      .optional()
+      .describe(
+        'Which grid cell answers the coordinate. Omitted, Open-Meteo picks a land cell, so a point offshore reads conditions on shore. Set "sea" for a point on the water — wind for sailing, surf, or offshore wind — so a water cell answers; keep the default for a point on land, which "sea" moves onto the water. "nearest" takes the closest cell, land or water. The response latitude and longitude name the cell that answered.',
+      ),
     timezone: z
       .string()
       .default('auto')
@@ -238,14 +237,16 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
     latitude: z
       .number()
       .describe(
-        'Snapped latitude (Open-Meteo snaps to nearest grid point — with models set, the grid of the first listed model that covers the coordinate)',
+        'Latitude of the grid cell that answered, picked by cell_selection (a land cell when omitted) — with models set, on the grid of the first listed model that covers the coordinate',
       ),
     longitude: z
       .number()
       .describe(
-        'Snapped longitude (with models set, the grid of the first listed model that covers the coordinate)',
+        'Longitude of the grid cell that answered (with models set, on the grid of the first listed model that covers the coordinate)',
       ),
-    elevation: z.number().describe('Terrain elevation at grid point (meters)'),
+    elevation: z
+      .number()
+      .describe('Terrain elevation of the requested coordinate (meters), whichever cell answered'),
     timezone: z.string().describe('Resolved IANA timezone'),
     utc_offset_seconds: z
       .number()
@@ -329,9 +330,11 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve in the requested cadence, or — on a model-suffixed column — a variable that model does not serve); requested models Open-Meteo left out for having no data at this coordinate, or the plain-named columns a multi-model request cannot attribute to one model; current values that are null under a real unit (no coverage at this location and time); recognized variables whose requested window or location falls outside the data\'s coverage, with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve in the requested cadence, or — on a model-suffixed column — a variable that model does not serve); requested models Open-Meteo left out for having no data at this coordinate, or the plain-named columns a multi-model request cannot attribute to one model; current values that are null under a real unit (no coverage at this location and time); recognized variables that came back null under a real unit, with the timestamps that do carry values — a variable null across the whole window is attributed to the selected model that returned it empty when another selected model returned values for it, and otherwise to the location, the window, or the selected models; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
+
+  enrichmentTrailer: { notice: { render: renderNotice } },
 
   async handler(args, ctx) {
     const input = {
@@ -404,6 +407,7 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
         temperature_unit: input.temperature_unit,
         wind_speed_unit: input.wind_speed_unit,
         precipitation_unit: input.precipitation_unit,
+        cell_selection: input.cell_selection,
         timezone: input.timezone,
       },
       ctx,
@@ -489,13 +493,15 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
      * Coverage, the case the check above cannot see: a recognized variable comes back
      * with a real unit and null values — lightning_potential where the model carries
      * none, or a past_days longer than the forecast archive holds, which opens with a
-     * null head that is otherwise indistinguishable from a populated response.
+     * null head that is otherwise indistinguishable from a populated response. The
+     * selection decides whom an all-null column is put on: dwd_icon_seamless returns
+     * visibility empty under a real unit beside a ncep_hrrr_conus column with values.
      */
     notice.add(describeCurrentGaps(findCurrentGaps(data.current, rawCurrentUnits)));
     notice.add(
       describeCoverageGaps(
-        findCoverageGaps('hourly', data.hourly, rawHourlyUnits),
-        findCoverageGaps('daily', data.daily, rawDailyUnits),
+        findCoverageGaps('hourly', data.hourly, rawHourlyUnits, undefined, selection),
+        findCoverageGaps('daily', data.daily, rawDailyUnits, undefined, selection),
       ),
     );
     notice.add(
@@ -525,9 +531,11 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
          * spillover()'s previewRows: those are drained from the head of the concatenated
          * array, so a wide hourly window fills them before a single daily row and the
          * daily summary comes back empty. The staged table is unaffected — it holds
-         * every row of both cadences, in chronological order.
+         * every row of both cadences, in chronological order. The budget is the canvas
+         * preview's, not the row budget that decided the spill: every row is on the
+         * canvas, so the preview only has to show the columns and the leading rows.
          */
-        const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
+        const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, CANVAS_PREVIEW_CHARS);
 
         return {
           latitude: data.latitude,
@@ -552,8 +560,8 @@ export const openmeteoGetForecastTool = tool('openmeteo_get_forecast', {
       /*
        * No canvas (CANVAS_PROVIDER_TYPE=none): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
-       * 108-day hourly window. Same per-cadence selection the canvas branch uses, so
-       * both paths return the same rows for the same records.
+       * 108-day hourly window. Same per-cadence selection the canvas branch uses, but
+       * against the whole row budget: here the preview is everything the caller gets.
        *
        * The full disclosure is composed into `notice`, for the reason the canvas pointer
        * is: a structuredContent-only client reads one surface, and on this branch the

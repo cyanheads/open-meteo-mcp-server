@@ -194,7 +194,7 @@ describe('openmeteoGetAirQualityTool', () => {
       ...MOCK_RESPONSE,
       error: true,
       reason:
-        "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_aqi.",
+        'Invalid value: Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_aqi.',
     });
     const input = openmeteoGetAirQualityTool.input.parse({
       latitude: 47.6062,

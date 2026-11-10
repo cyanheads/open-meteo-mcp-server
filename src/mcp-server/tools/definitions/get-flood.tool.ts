@@ -1,6 +1,7 @@
 /**
  * @fileoverview Tool: openmeteo_get_flood — GloFAS daily river discharge (m³/s), as a
- * forecast outlook or a date range from 1984. Omitting `models` reads upstream's
+ * forecast outlook or a date range. A range is accepted from 1984-01-01, but discharge
+ * begins 1997-01-01 (`FLOOD_DISCHARGE_START_DATE`). Omitting `models` reads upstream's
  * `seamless_v4`, which stitches `consolidated_v4` reanalysis to `forecast_v4` run data at
  * a fixed switch date, so a date range is reanalysis only up to that date; a `models`
  * selection pins the source. Coordinate-based — discharge comes from the GloFAS 0.05° grid
@@ -20,15 +21,22 @@ import { CalendarDateSchema } from '../date-input.js';
 import {
   DEFAULT_FLOOD_MODEL,
   FLOOD_CONSOLIDATED_END_DATE,
+  FLOOD_DISCHARGE_START_DATE,
   FLOOD_MODEL_LIST,
   FLOOD_MODEL_NAMES,
   FLOOD_SEAMLESS_SWITCH_DATE,
 } from '../model-catalog.js';
-import { cleanNames } from '../name-input.js';
+import { cleanNames, nameList } from '../name-input.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
-import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
+import {
+  composeNotice,
+  describeCoverageGaps,
+  findCoverageGaps,
+  renderNotice,
+} from '../response-notice.js';
 import {
   boundedPreview,
+  CANVAS_PREVIEW_CHARS,
   canvasPointerLine,
   canvasPointerNotice,
   exceedsInlineBudget,
@@ -48,6 +56,7 @@ import {
   coverageGapContract,
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
+  isDateOutOfRangeReason,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
@@ -71,7 +80,7 @@ const VARIABLE_RECOVERY =
 const STATISTICS_SPANS = `on forecast-run days — the forecast_days outlook, and date-range days from ${FLOOD_SEAMLESS_SWITCH_DATE} under seamless_v4 or forecast_v4. On reanalysis days (seamless_v4 before ${FLOOD_SEAMLESS_SWITCH_DATE}, consolidated_v4 through ${FLOOD_CONSOLIDATED_END_DATE}) they repeat river_discharge and are not uncertainty estimates`;
 
 export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
-  description: `GloFAS (Global Flood Awareness System) daily river discharge (m³/s) from the GloFAS 0.05° grid cell nearest the given coordinates — no river ID needed. The response's latitude and longitude name that cell. It is not reliably on the river intended: a point near a confluence, a pair of parallel channels, or a bank can resolve to a cell with little flow. When the value is far below what the named river carries, step the coordinate 0.05° across the channel and compare the values. One mode per call: forecast_days for the outlook, or start_date and end_date together for a date range from 1984-01-01. The two modes are mutually exclusive, and a date range needs both ends — a lone start_date or end_date is rejected. forecast_days accepts up to 210, but the current GloFAS run sets how far the data reaches (about six months ahead); later days come back null and the notice names where the data ends. What a date range holds depends on the model. Omitting models reads seamless_v4: consolidated_v4 reanalysis before ${FLOOD_SEAMLESS_SWITCH_DATE}, then forecast-run discharge from ${FLOOD_SEAMLESS_SWITCH_DATE} on, so a range crossing that date changes source mid-series. Set models to pin a source: ${FLOOD_MODEL_LIST}. consolidated_v4 is the only way to read reanalysis for ${FLOOD_SEAMLESS_SWITCH_DATE} through ${FLOOD_CONSOLIDATED_END_DATE}. With 2+ models every daily column is suffixed with the model name (river_discharge_consolidated_v4). Available daily variables: "river_discharge" (the daily discharge value; the mean across ensemble members is "river_discharge_mean"), and the ensemble statistics "river_discharge_mean", "river_discharge_median", "river_discharge_min", "river_discharge_max", "river_discharge_p25" (25th percentile), and "river_discharge_p75" (75th percentile). The statistics carry spread across ensemble members ${STATISTICS_SPANS}. Returns null for coordinates far from any river or in areas without GloFAS coverage. A wide date range produces thousands of daily records and spills to a DataCanvas when canvas is enabled, returning canvas_id and table_name with truncated: true — inspect the staged columns with openmeteo_dataframe_describe, then query the full set with openmeteo_dataframe_query. With canvas disabled it returns a bounded preview instead.`,
+  description: `GloFAS (Global Flood Awareness System) daily river discharge (m³/s) from the GloFAS 0.05° grid cell nearest the given coordinates — no river ID needed. The response's latitude and longitude name that cell. It is not reliably on the river intended: a point near a confluence, a pair of parallel channels, or a bank can resolve to a cell with little flow. When the value is far below what the named river carries, step the coordinate 0.05° across the channel and compare the values. One mode per call: forecast_days for the outlook, or start_date and end_date together for a date range. A date range accepts dates from 1984-01-01, but GloFAS discharge begins ${FLOOD_DISCHARGE_START_DATE} — every model returns null before it. The two modes are mutually exclusive, and a date range needs both ends — a lone start_date or end_date is rejected. forecast_days accepts up to 210, but the current GloFAS run sets how far the data reaches (about six months ahead); later days come back null and the notice names where the data ends. What a date range holds depends on the model. Omitting models reads seamless_v4: consolidated_v4 reanalysis before ${FLOOD_SEAMLESS_SWITCH_DATE}, then forecast-run discharge from ${FLOOD_SEAMLESS_SWITCH_DATE} on, so a range crossing that date changes source mid-series. Set models to pin a source: ${FLOOD_MODEL_LIST}. consolidated_v4 is the only way to read reanalysis for ${FLOOD_SEAMLESS_SWITCH_DATE} through ${FLOOD_CONSOLIDATED_END_DATE}. With 2+ models every daily column is suffixed with the model name (river_discharge_consolidated_v4). Available daily variables: "river_discharge" (the daily discharge value; the mean across ensemble members is "river_discharge_mean"), and the ensemble statistics "river_discharge_mean", "river_discharge_median", "river_discharge_min", "river_discharge_max", "river_discharge_p25" (25th percentile), and "river_discharge_p75" (75th percentile). The statistics carry spread across ensemble members ${STATISTICS_SPANS}. Returns null for coordinates far from any river or in areas without GloFAS coverage. A wide date range produces thousands of daily records and spills to a DataCanvas when canvas is enabled, returning canvas_id and table_name with truncated: true — inspect the staged columns with openmeteo_dataframe_describe, then query the full set with openmeteo_dataframe_query. With canvas disabled it returns a bounded preview instead.`,
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -109,8 +118,8 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     {
       reason: 'date_out_of_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'start_date predates 1984-01-01 or date range is otherwise invalid.',
-      recovery: 'Use start_date >= 1984-01-01. GloFAS reanalysis covers from 1984-01-01 onward.',
+      when: 'start_date predates 1984-01-01, the earliest date GloFAS accepts, or end_date falls after the last date it accepts, which upstream rejects with a message naming that date.',
+      recovery: `Keep start_date on or after 1984-01-01 — the earliest date GloFAS accepts — and end_date on or before the last date it accepts, named in the message when end_date was the one rejected, then retry. Discharge begins ${FLOOD_DISCHARGE_START_DATE}, so a range opening earlier returns null rows until then.`,
       retryable: false,
     },
     {
@@ -141,6 +150,9 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     UPSTREAM_TIMEOUT_ERROR,
   ],
 
+  // Open-Meteo's own parameter name for the variable list.
+  inputAliases: { daily: 'daily_variables' },
+
   input: z.object({
     latitude: z
       .number()
@@ -156,13 +168,9 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       .describe(
         'Longitude in decimal degrees. With latitude it selects the nearest GloFAS 0.05° grid cell, which is not reliably on the river intended.',
       ),
-    daily_variables: z
-      .array(z.string())
-      .max(20)
-      .optional()
-      .describe(
-        `Daily discharge variables to fetch (e.g., ["river_discharge", "river_discharge_p25", "river_discharge_p75", "river_discharge_min", "river_discharge_max"]). Required. river_discharge is the daily discharge value; the _mean, _median, _min, _max, _p25, and _p75 statistics span the ensemble members ${STATISTICS_SPANS}.`,
-      ),
+    daily_variables: nameList(20).describe(
+      `Daily discharge variables to fetch (e.g., ["river_discharge", "river_discharge_p25", "river_discharge_p75", "river_discharge_min", "river_discharge_max"]). Required. river_discharge is the daily discharge value; the _mean, _median, _min, _max, _p25, and _p75 statistics span the ensemble members ${STATISTICS_SPANS}.`,
+    ),
     forecast_days: z
       .number()
       .int()
@@ -173,19 +181,15 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
         'Number of forecast days ahead (1–210). The API accepts up to 210, but the current GloFAS run sets how far the data reaches (about six months); later days come back null. consolidated_v4 serves no forecast days — with it every row is null. Mutually exclusive with start_date/end_date — omit it entirely when pulling a date range.',
       ),
     start_date: CalendarDateSchema.optional().describe(
-      `Start of a date range (YYYY-MM-DD, e.g., "2023-01-01"), from 1984-01-01. Under the default seamless_v4 a range holds consolidated_v4 reanalysis before ${FLOOD_SEAMLESS_SWITCH_DATE} and forecast-run discharge from ${FLOOD_SEAMLESS_SWITCH_DATE} on; request models: ["consolidated_v4"] for reanalysis through ${FLOOD_CONSOLIDATED_END_DATE}. Requires end_date — the pair must be sent together, and neither combines with forecast_days.`,
+      `Start of a date range (YYYY-MM-DD, e.g., "2023-01-01"). The earliest date accepted is 1984-01-01, but GloFAS discharge begins ${FLOOD_DISCHARGE_START_DATE}, so earlier days come back null. Under the default seamless_v4 a range holds consolidated_v4 reanalysis before ${FLOOD_SEAMLESS_SWITCH_DATE} and forecast-run discharge from ${FLOOD_SEAMLESS_SWITCH_DATE} on; request models: ["consolidated_v4"] for reanalysis through ${FLOOD_CONSOLIDATED_END_DATE}. Requires end_date — the pair must be sent together, and neither combines with forecast_days.`,
     ),
     end_date: CalendarDateSchema.optional().describe(
       `End of the date range (YYYY-MM-DD, inclusive). Must be on or after start_date. Days from ${FLOOD_SEAMLESS_SWITCH_DATE} are forecast-run discharge under the default seamless_v4; consolidated_v4 reanalysis ends ${FLOOD_CONSOLIDATED_END_DATE} and answers later days with null. Requires start_date — the pair must be sent together, and neither combines with forecast_days.`,
     ),
-    models: z
-      .array(z.string())
-      // The six selectors the GloFAS docs page lists: the three advertised v4 models and the v3 trio.
-      .max(6)
-      .optional()
-      .describe(
-        `GloFAS models to read from: ${FLOOD_MODEL_LIST}. Omit to use Open-Meteo's seamless_v4 default. With 2+ models each daily column and unit key is suffixed with the model name (river_discharge_consolidated_v4); one model keeps plain names. A model with no data for the requested days answers with null values rather than an error, and the notice names those columns. A name outside this list (the GloFAS v3 selectors included) is sent upstream rather than rejected here.`,
-      ),
+    // At most the six selectors the GloFAS docs page lists: the three advertised v4 models and the v3 trio.
+    models: nameList(6).describe(
+      `GloFAS models to read from: ${FLOOD_MODEL_LIST}. Omit to use Open-Meteo's seamless_v4 default. With 2+ models each daily column and unit key is suffixed with the model name (river_discharge_consolidated_v4); one model keeps plain names. A model with no data for the requested days answers with null values rather than an error, and the notice names those columns. A name outside this list (the GloFAS v3 selectors included) is sent upstream rather than rejected here.`,
+    ),
     timezone: z.string().default('auto').describe('IANA timezone or "auto". Default "auto".'),
     canvas_id: CanvasIdSchema.optional().describe(
       'DataCanvas token for wide date-range queries. When a result is too large to return inline — driven by total payload size, so a multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
@@ -246,9 +250,11 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns GloFAS returned with the unit "undefined" (a name it parsed but does not serve); recognized columns whose requested days fall outside the coordinate\'s discharge record or the selected model\'s span, with the dates that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
+        `Everything this response needs to say beyond the data, composed into one advisory: columns GloFAS returned with the unit "undefined" (a name it parsed but does not serve); recognized columns that come back null for requested days — days before GloFAS discharge begins on ${FLOOD_DISCHARGE_START_DATE}, days outside the selected model's span, or a cell GloFAS carries no discharge for — with the dates that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.`,
       ),
   },
+
+  enrichmentTrailer: { notice: { render: renderNotice } },
 
   async handler(input, ctx) {
     const dailyVariables = cleanNames(input.daily_variables);
@@ -263,8 +269,8 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     /**
      * GloFAS takes the forecast window or a historical range, never both, and rejects
      * a half-specified range. Guarding here rather than letting upstream reject keeps
-     * both cases off the post-call `reason.includes('date')` branch, which frames every
-     * date complaint as the 1984 coverage floor — advice that fixes neither.
+     * both cases off the post-call branches, which would answer them with date-range or
+     * unknown-name advice — advice that fixes neither.
      */
     const hasStart = input.start_date !== undefined;
     const hasEnd = input.end_date !== undefined;
@@ -297,7 +303,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     if (input.start_date && input.start_date < '1984-01-01') {
       throw ctx.fail(
         'date_out_of_range',
-        `start_date ${input.start_date} predates GloFAS reanalysis coverage (1984-01-01).`,
+        `start_date ${input.start_date} predates 1984-01-01, the earliest date GloFAS accepts.`,
       );
     }
 
@@ -342,8 +348,8 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
           frameRequestTooLargeMessage(reason, narrowingWithModels(PAYLOAD_NARROWING, models)),
         );
       }
-      if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
-        throw ctx.fail('date_out_of_range', reason || 'Date out of GloFAS range.');
+      if (isDateOutOfRangeReason(reason)) {
+        throw ctx.fail('date_out_of_range', reason);
       }
       /*
        * An unknown model arrives through the same envelope as an unknown variable
@@ -396,7 +402,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
 
     /*
      * Temporal coverage, the case the check above cannot see: a range opening before
-     * the selected river's record begins, or reaching past the selected model's span
+     * GloFAS discharge begins, or reaching past the selected model's span
      * (consolidated_v4 after its end date or on any forecast_days call, forecast_v4
      * before its first run), comes back null with the real m³/s unit, which the null
      * column alone cannot distinguish from a coordinate outside GloFAS coverage
@@ -425,10 +431,12 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
           timezone: data.timezone,
           models,
           record_count: handle.rowCount,
-          // Same selection the canvas-less branch makes, so both paths return the same
-          // rows for the same records — and both start at the first row carrying data,
-          // which a range opening before the coordinate's record needs.
-          daily: boundedPreview(dailyRecords, rowBudget),
+          /*
+           * The canvas preview budget, since every row is staged: the leading rows, starting
+           * at the first one carrying data, which a range opening before GloFAS discharge
+           * begins needs.
+           */
+          daily: boundedPreview(dailyRecords, CANVAS_PREVIEW_CHARS),
           daily_units: dailyUnits,
           canvas_id: instance.canvasId,
           table_name: handle.tableName,
@@ -439,7 +447,8 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
       /*
        * No canvas (CANVAS_PROVIDER_TYPE=none): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
-       * multi-decade pull.
+       * multi-decade pull. The preview takes the whole row budget, not the canvas
+       * preview's: here it is everything the caller gets.
        *
        * The full disclosure is composed into `notice`, for the reason the canvas pointer
        * is: a structuredContent-only client reads one surface, and on this branch the

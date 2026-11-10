@@ -15,11 +15,17 @@ import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { CalendarDateSchema } from '../date-input.js';
 import { CLIMATE_MODEL_LIST } from '../model-catalog.js';
-import { cleanNames } from '../name-input.js';
+import { cleanNames, nameList } from '../name-input.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
-import { composeNotice, describeCoverageGaps, findCoverageGaps } from '../response-notice.js';
+import {
+  composeNotice,
+  describeCoverageGaps,
+  findCoverageGaps,
+  renderNotice,
+} from '../response-notice.js';
 import {
   boundedPreview,
+  CANVAS_PREVIEW_CHARS,
   canvasPointerLine,
   canvasPointerNotice,
   exceedsInlineBudget,
@@ -37,6 +43,7 @@ import {
 import {
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
+  isDateOutOfRangeReason,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
@@ -81,7 +88,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'start_date predates 1950-01-01 or end_date is after 2050-12-31.',
       recovery:
-        'Use dates between 1950-01-01 and 2050-12-31 — the CMIP6 projection coverage. For observed history before 1950 limits, use openmeteo_get_historical (the archive, from 1940).',
+        'Keep start_date on or after 1950-01-01 and end_date on or before 2050-12-31 — the CMIP6 projection coverage. For observed history before 1950, use openmeteo_get_historical (the archive, from 1940).',
       retryable: false,
     },
     {
@@ -126,6 +133,9 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     UPSTREAM_TIMEOUT_ERROR,
   ],
 
+  // Open-Meteo's own parameter name for the variable list.
+  inputAliases: { daily: 'daily_variables' },
+
   input: z.object({
     latitude: z
       .number()
@@ -141,20 +151,12 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     end_date: CalendarDateSchema.describe(
       'End date (YYYY-MM-DD, inclusive, max 2050-12-31). Must be on or after start_date.',
     ),
-    daily_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Daily climate variables to fetch (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_mean", "shortwave_radiation_sum"]). Required — the Climate API is daily-only.',
-      ),
-    models: z
-      .array(z.string())
-      .max(7)
-      .optional()
-      .describe(
-        `CMIP6 models to include: ${CLIMATE_MODEL_LIST}. With 2+ models each variable column is suffixed with the model name (e.g. temperature_2m_max_MRI_AGCM3_2_S). Omit to use the API default (a single model, unsuffixed columns). A name outside this list is sent upstream rather than rejected here.`,
-      ),
+    daily_variables: nameList(50).describe(
+      'Daily climate variables to fetch (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_mean", "shortwave_radiation_sum"]). Required — the Climate API is daily-only.',
+    ),
+    models: nameList(7).describe(
+      `CMIP6 models to include: ${CLIMATE_MODEL_LIST}. With 2+ models each variable column is suffixed with the model name (e.g. temperature_2m_max_MRI_AGCM3_2_S). Omit to use the API default (a single model, unsuffixed columns). A name outside this list is sent upstream rather than rejected here.`,
+    ),
     temperature_unit: z
       .enum(['celsius', 'fahrenheit'])
       .default('celsius')
@@ -167,6 +169,12 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       .enum(['mm', 'inch'])
       .default('mm')
       .describe('Precipitation unit. Default "mm".'),
+    cell_selection: z
+      .enum(['land', 'sea', 'nearest'])
+      .optional()
+      .describe(
+        'Which grid cell answers the coordinate. Omitted, Open-Meteo picks a land cell, so a point offshore reads conditions on shore. Set "sea" for a point on the water so a water cell answers; keep the default for a point on land, which "sea" moves onto the water. "nearest" takes the closest cell, land or water. On this endpoint the response latitude and longitude can stay the same while the values change with this setting, so they do not show which cell answered.',
+      ),
     timezone: z.string().default('auto').describe('IANA timezone or "auto". Default "auto".'),
     canvas_id: CanvasIdSchema.optional().describe(
       'DataCanvas token for multi-decade or multi-model queries. When a result is too large to return inline — driven by total payload size, so a wide multi-model pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its per-model columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
@@ -174,9 +182,19 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
   }),
 
   output: z.object({
-    latitude: z.number().describe('Snapped latitude (Open-Meteo snaps to nearest grid point)'),
-    longitude: z.number().describe('Snapped longitude'),
-    elevation: z.number().describe('Elevation at grid point (meters)'),
+    latitude: z
+      .number()
+      .describe(
+        'Grid latitude Open-Meteo reports for the request. It does not identify the cell whose values were returned: a different cell_selection can change the values while this stays the same',
+      ),
+    longitude: z
+      .number()
+      .describe(
+        'Grid longitude Open-Meteo reports for the request — like latitude, it does not identify the cell whose values were returned',
+      ),
+    elevation: z
+      .number()
+      .describe('Terrain elevation of the requested coordinate (meters), whichever cell answered'),
     timezone: z.string().describe('Resolved IANA timezone'),
     models: z
       .array(z.string())
@@ -230,9 +248,11 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); recognized variables a selected model carries no values for, with the dates that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); recognized variables that came back null under a real unit, with the dates that do carry values — a variable null across the whole window is attributed to the selected model that returned it empty when another selected model returned values for it, and otherwise to the location, the window, or the selected models; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
+
+  enrichmentTrailer: { notice: { render: renderNotice } },
 
   async handler(args, ctx) {
     const input = {
@@ -290,6 +310,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
         temperature_unit: input.temperature_unit,
         wind_speed_unit: input.wind_speed_unit,
         precipitation_unit: input.precipitation_unit,
+        cell_selection: input.cell_selection,
         timezone: input.timezone,
       },
       ctx,
@@ -309,8 +330,8 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       if (isRequestTooLargeReason(reason)) {
         throw ctx.fail('request_too_large', frameRequestTooLargeMessage(reason, PAYLOAD_NARROWING));
       }
-      if (reason.toLowerCase().includes('date') || reason.toLowerCase().includes('range')) {
-        throw ctx.fail('date_out_of_range', reason || 'Date out of CMIP6 projection range.');
+      if (isDateOutOfRangeReason(reason)) {
+        throw ctx.fail('date_out_of_range', reason);
       }
       /*
        * The models array goes out with a literal comma, so upstream parses it as a list
@@ -362,10 +383,16 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     /*
      * Temporal coverage, the case the check above cannot see: not all models carry all
      * variables, and the combination a model does not run comes back null under its
-     * real unit rather than as an unserved name — per-model columns are reported
-     * separately, since the gap belongs to one model and not the variable.
+     * real unit rather than as an unserved name. The selection is what puts such a
+     * column on its model — CMCC_CM2_VHR4 returns rain_sum empty beside an
+     * MRI_AGCM3_2_S column with values — rather than on the location or the window.
      */
-    notice.add(describeCoverageGaps(findCoverageGaps('daily', data.daily, rawDailyUnits)));
+    const selection = { models: input.models, variables: dailyVariables };
+    notice.add(
+      describeCoverageGaps(
+        findCoverageGaps('daily', data.daily, rawDailyUnits, undefined, selection),
+      ),
+    );
     notice.add(unitsTrimmedNotice(omittedUnits, 'fewer daily_variables, or fewer models'));
 
     const dailyRecords = data.daily ? reshapeColumnar(data.daily) : [];
@@ -390,9 +417,8 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
           models: input.models,
           date_range: dateRange,
           record_count: handle.rowCount,
-          // Same selection the canvas-less branch makes, so both paths return the same
-          // rows for the same records.
-          daily: boundedPreview(dailyRecords, rowBudget),
+          // The canvas preview budget, since every row is staged: the leading rows only.
+          daily: boundedPreview(dailyRecords, CANVAS_PREVIEW_CHARS),
           daily_units: dailyUnits,
           canvas_id: instance.canvasId,
           table_name: handle.tableName,
@@ -403,7 +429,8 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       /*
        * No canvas (CANVAS_PROVIDER_TYPE=none): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
-       * multi-decade, multi-model pull.
+       * multi-decade, multi-model pull. The preview takes the whole row budget, not the
+       * canvas preview's: here it is everything the caller gets.
        *
        * The full disclosure is composed into `notice`, for the reason the canvas pointer
        * is: a structuredContent-only client reads one surface, and on this branch the

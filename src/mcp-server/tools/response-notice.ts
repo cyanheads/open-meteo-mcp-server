@@ -24,14 +24,19 @@
  *     *location* the dataset carries nothing for — pollen outside Europe, waves at a
  *     land point.
  *
- * It also attributes the columns of a multi-model forecast or archive response to the
- * models that produced them ({@link columnModel}), which is how a model upstream
- * silently dropped ({@link describeDroppedModels}) and a model that does not serve a
- * variable ({@link describeModelUnserved}) get named.
+ * It also attributes the columns of a multi-model forecast, archive, or climate response
+ * to the models that produced them ({@link columnModel}), which is how a model upstream
+ * silently dropped ({@link describeDroppedModels}), a model that does not serve a
+ * variable ({@link describeModelUnserved}), and a model that returned nothing for a
+ * variable another selected model served ({@link findCoverageGaps}) get named.
+ *
+ * {@link renderNotice} is how the composed notice reaches `content[]`: every weather tool
+ * and `openmeteo_search_locations` set it as their `enrichmentTrailer.notice.render`.
  *
  * @module mcp-server/tools/response-notice
  */
 
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import type { ColumnarBlock, UnitsMap } from '@/services/open-meteo/types.js';
 
 /** The slice of the handler `Context` {@link composeNotice} writes through. */
@@ -53,9 +58,8 @@ export interface NoticeComposer {
  * composed string, which is what makes the underlying last-write-wins behaviour
  * correct rather than lossy — the final write always carries every part.
  *
- * Parts are joined with a space into one line: the framework renders `notice` as a
- * single markdown blockquote in `content[]`, prefixing only the first line with `> `,
- * so an embedded newline would drop the rest out of the quote.
+ * Parts are joined with a space into one line, so the notice reads as one paragraph on
+ * both surfaces.
  */
 export function composeNotice(ctx: NoticeSink): NoticeComposer {
   const parts: string[] = [];
@@ -68,19 +72,55 @@ export function composeNotice(ctx: NoticeSink): NoticeComposer {
   };
 }
 
+/**
+ * The `content[]` trailer line for a notice: a block quote, every line of it quoted,
+ * whose text a CommonMark parse reads back as exactly `notice`.
+ *
+ * The framework's default notice line quotes the text as live Markdown, so a generated
+ * canvas ID such as `_a4RmGLw5_` or a caller-typed name such as `*x*` would read as
+ * emphasis. The escaping happens here, on the rendered line only: `structuredContent`
+ * keeps the notice exactly as {@link composeNotice} wrote it.
+ */
+export function renderNotice(notice: string): string {
+  return escapeMarkdownInline(notice)
+    .split('\n')
+    .map((line) => `> ${line}`)
+    .join('\n');
+}
+
 /** Which side of a response a gap was found on. */
 export type CoverageCadence = 'daily' | 'hourly';
 
+/**
+ * Whose an `all-null` gap is, on a request that selected `models`.
+ *   - `model`: another requested model returned values for the same variables in this
+ *     cadence, so the variables are servable at this point and in this window and the
+ *     gap is `model`'s — whether it lacks them or its record does not reach the window,
+ *     the remedy is the same: read them from `servedBy`.
+ *   - `undetermined`: no requested model returned them. Nothing in the response
+ *     separates a model that does not carry them from a location or window outside the
+ *     data's coverage, so `models` are named beside the location and the window.
+ */
+export type GapAttribution =
+  | { readonly kind: 'model'; readonly model: string; readonly servedBy: readonly string[] }
+  | { readonly kind: 'undetermined'; readonly models: readonly string[] };
+
 /** A set of variables sharing one temporal coverage gap in one cadence. */
 export interface CoverageGap {
+  /** Whose an `all-null` gap is, when the caller selected `models`. Absent otherwise. */
+  readonly attribution?: GapAttribution;
   readonly cadence: CoverageCadence;
   /** First timestamp carrying data. Absent when the whole window is null. */
   readonly first?: string;
   readonly kind: 'all-null' | 'partial';
   /** Last timestamp carrying data. Absent when the whole window is null. */
   readonly last?: string;
+  /** Null rows before `first`. Absent when the whole window is null. */
+  readonly leadingNullRows?: number;
   readonly nullRows: number;
   readonly totalRows: number;
+  /** Null rows after `last`. Absent when the whole window is null. */
+  readonly trailingNullRows?: number;
   /** The requested variables affected, in the order upstream listed their columns. */
   readonly variables: readonly string[];
 }
@@ -114,12 +154,19 @@ export const byEnsembleVariable: ColumnGrouping = (column) => column.replace(/_m
  * Groups sharing an identical gap are merged into one entry, which is what keeps the
  * message short: the common case is every requested variable running out at the same
  * timestamp because the model's horizon, not the variable, is what ended.
+ *
+ * Given the caller's model `selection`, an `all-null` group also carries its
+ * {@link GapAttribution}, and the merge keeps apart what the attribution tells apart:
+ * one entry per empty model and set of models that served the same variables, and one
+ * for every column no selected model served. Without a selection, or with no models in
+ * it, nothing is attributed.
  */
 export function findCoverageGaps(
   cadence: CoverageCadence,
   block: ColumnarBlock | undefined,
   units: UnitsMap | undefined,
   grouping: ColumnGrouping = (column) => column,
+  selection?: ModelSelection,
 ): CoverageGap[] {
   const times = block?.time;
   if (!block || !times || times.length === 0) return [];
@@ -133,63 +180,175 @@ export function findCoverageGaps(
     else groups.set(name, [values]);
   }
 
-  /** Gaps keyed by shape, so variables that ran out together are named together. */
-  const merged = new Map<string, { first?: string; last?: string; nullRows: number }>();
-  const named = new Map<string, string[]>();
-  for (const [name, columns] of groups) {
-    let first: string | undefined;
-    let last: string | undefined;
-    let nullRows = 0;
-    for (const [row, time] of times.entries()) {
-      if (columns.some((values) => values[row] != null)) {
-        first ??= time;
-        last = time;
-      } else {
-        nullRows += 1;
-      }
-    }
-    if (nullRows === 0) continue;
+  const spans = [...groups].map(([name, columns]) => coverageSpan(name, columns, times));
+  const attribute = selection?.models?.length ? attributor(spans, selection) : undefined;
 
-    const key = `${first ?? ''}|${last ?? ''}|${nullRows}`;
-    merged.set(key, {
-      ...(first !== undefined && { first }),
-      ...(last !== undefined && { last }),
-      nullRows,
-    });
-    named.set(key, [...(named.get(key) ?? []), name]);
+  /** Gaps keyed by shape, so variables that ran out together are named together. */
+  const merged = new Map<string, MergedGap>();
+  for (const { carried, name, nullRows } of spans) {
+    if (nullRows === 0) continue;
+    const owner = carried ? undefined : attribute?.(name);
+    const shape = `${carried?.first ?? ''}|${carried?.last ?? ''}|${nullRows}`;
+    const key =
+      owner?.kind === 'model' ? `${shape}|${owner.model}|${owner.servedBy.join(',')}` : shape;
+
+    const entry: MergedGap = merged.get(key) ?? {
+      gap: {
+        cadence,
+        kind: carried ? 'partial' : 'all-null',
+        ...carried,
+        nullRows,
+        totalRows: times.length,
+      },
+      models: new Set(),
+      ...(owner && { owner }),
+      variables: [],
+    };
+    entry.variables.push(name);
+    if (owner?.kind === 'undetermined') for (const model of owner.models) entry.models.add(model);
+    merged.set(key, entry);
   }
 
-  return [...merged].map(([key, shape]) => ({
-    cadence,
-    kind: shape.first === undefined ? ('all-null' as const) : ('partial' as const),
-    ...shape,
-    totalRows: times.length,
-    variables: named.get(key) ?? [],
+  const requested = [...new Set(selection?.models)];
+  return [...merged.values()].map(({ gap, models, owner, variables }) => ({
+    ...gap,
+    variables,
+    ...(owner && {
+      attribution:
+        owner.kind === 'model'
+          ? owner
+          : { kind: owner.kind, models: requested.filter((model) => models.has(model)) },
+    }),
   }));
 }
 
+/** One coverage group's rows: where its data starts and stops, and how many rows carry none. */
+interface CoverageSpan {
+  /** The first and last timestamp carrying data and the null rows outside them; absent when none does. */
+  readonly carried?: Pick<CoverageGap, 'first' | 'last' | 'leadingNullRows' | 'trailingNullRows'>;
+  readonly name: string;
+  readonly nullRows: number;
+}
+
+/** A {@link findCoverageGaps} entry while groups are merged into it. */
+interface MergedGap {
+  readonly gap: Omit<CoverageGap, 'attribution' | 'variables'>;
+  /** The models an `undetermined` entry names, gathered across the groups merged into it. */
+  readonly models: Set<string>;
+  readonly owner?: GapAttribution;
+  readonly variables: string[];
+}
+
+/** The {@link CoverageSpan} of one group, read row by row over its combined columns. */
+function coverageSpan(
+  name: string,
+  columns: readonly (readonly (number | string | null)[])[],
+  times: readonly string[],
+): CoverageSpan {
+  let first: string | undefined;
+  let last: string | undefined;
+  let firstRow = 0;
+  let lastRow = 0;
+  let nullRows = 0;
+  for (const [row, time] of times.entries()) {
+    if (columns.some((values) => values[row] != null)) {
+      if (first === undefined) {
+        first = time;
+        firstRow = row;
+      }
+      last = time;
+      lastRow = row;
+    } else {
+      nullRows += 1;
+    }
+  }
+  if (first === undefined || last === undefined) return { name, nullRows };
+  return {
+    carried: {
+      first,
+      last,
+      leadingNullRows: firstRow,
+      trailingNullRows: times.length - 1 - lastRow,
+    },
+    name,
+    nullRows,
+  };
+}
+
 /**
- * Null rows a `partial` gap needs before it earns a sentence.
+ * The {@link GapAttribution} of each empty group under `selection`, which must hold at
+ * least one model. A model counts as serving a variable only through its own column for
+ * it with a value in this cadence: a sibling variable with values from the same model
+ * says nothing about this one — `daylight_duration` is astronomical and present for
+ * every window, and `precipitation_hours` reads 0 where a model carries no
+ * precipitation — and a column under the unit `"undefined"` never reached the groups.
+ * A column that cannot be put on one requested model — a single model's plain names, or
+ * the plain names the one survivor of a multi-model request keeps — names every
+ * requested model.
+ */
+function attributor(
+  spans: readonly CoverageSpan[],
+  selection: ModelSelection,
+): (name: string) => GapAttribution {
+  const requested = [...new Set(selection.models)];
+  /** Variable → the requested models whose column for it carries a value. */
+  const served = new Map<string, Set<string>>();
+  for (const { carried, name } of spans) {
+    const source = carried && columnSource(name, selection);
+    if (source) {
+      served.set(source.variable, (served.get(source.variable) ?? new Set()).add(source.model));
+    }
+  }
+  return (name) => {
+    const source = columnSource(name, selection);
+    if (!source) return { kind: 'undetermined', models: requested };
+    const servers = served.get(source.variable);
+    const servedBy = requested.filter((model) => servers?.has(model));
+    return servedBy.length > 0
+      ? { kind: 'model', model: source.model, servedBy }
+      : { kind: 'undetermined', models: [source.model] };
+  };
+}
+
+/**
+ * Null rows that earn a `partial` gap its sentence wherever they sit.
  *
  * Every sentence in the composed notice reads with the same weight, so a single stray
  * null — a climate pull whose final projected day is empty, 1 row of 36,890 — arrived
  * looking exactly as consequential as a model running out of forecast horizon. Six is
- * the smallest gap observed live that a caller can act on: `ncep_gefs025` over a
- * sixteen-day window serves ten days and returns six null daily rows, and narrowing
- * `forecast_days` or switching models is a real response to that. Anything shorter is
- * noise in the data, not a coverage boundary.
- *
- * Applied to the message only — {@link findCoverageGaps} still detects, merges, and
- * returns the gap, so the analysis stays complete for any other reader.
+ * the smallest interior run worth naming: `ncep_gefs025` over a sixteen-day window
+ * serves ten days and returns six null daily rows, and narrowing `forecast_days` or
+ * switching models is a real response to that. A shorter run in the interior is noise
+ * in the data, not a coverage boundary; a shorter run at the window's edges can still be
+ * one — see {@link MIN_EDGE_PERCENT}.
  */
 const MIN_REPORTED_NULL_ROWS = 6;
 
 /**
+ * The share of the window, in percent, that a `partial` gap's null rows before its first
+ * and after its last timestamp carrying data earn it a sentence at, under
+ * {@link MIN_REPORTED_NULL_ROWS}.
+ *
+ * Nulls at an edge are where a dataset starts or stops — a model's horizon, an archive's
+ * first day, the ERA5 lag — and on a short window that is a handful of rows: the last 1
+ * of 35 daily rows of `ncep_gefs05`, the last 5 of 100 days of `era5`, the first 4 of 10
+ * days of `era5_land` around its 1950 start. One percent sits between the largest edge
+ * share that is noise (one trailing null of 36,890) and the smallest measured one a
+ * caller acts on (one of 35). Interior nulls are not an edge and keep the six-row floor.
+ */
+const MIN_EDGE_PERCENT = 1;
+
+/**
  * True when a gap is too small to be worth a sentence. `all-null` never qualifies,
  * whatever its row count: absent data is the answer to the request, not a gap in it.
+ *
+ * Applied to the message only — {@link findCoverageGaps} still detects, merges, and
+ * returns the gap, so the analysis stays complete for any other reader.
  */
 function isNegligible(gap: CoverageGap): boolean {
-  return gap.kind === 'partial' && gap.nullRows < MIN_REPORTED_NULL_ROWS;
+  if (gap.kind === 'all-null' || gap.nullRows >= MIN_REPORTED_NULL_ROWS) return false;
+  const edgeRows = (gap.leadingNullRows ?? 0) + (gap.trailingNullRows ?? 0);
+  return edgeRows * 100 < gap.totalRows * MIN_EDGE_PERCENT;
 }
 
 /** `a, b, c, and 5 more`, capped at {@link MAX_NAMED} names. */
@@ -201,8 +360,14 @@ function nameList(variables: readonly string[]): string {
 /**
  * The surfaced message: one sentence per gap worth reporting, naming the affected
  * variables and either that the whole window is empty or where the data actually starts
- * and stops. A partial gap under {@link MIN_REPORTED_NULL_ROWS} is left out, so a stray
- * null does not read like a coverage boundary.
+ * and stops. A partial gap is left out under {@link MIN_REPORTED_NULL_ROWS} unless its
+ * edge rows reach {@link MIN_EDGE_PERCENT} of the window, so a stray null does not read
+ * like a coverage boundary.
+ *
+ * An all-null gap's cause follows its {@link GapAttribution}: the model it belongs to
+ * when another selected model served the same variables, the location, the window, or
+ * the selected models when none did, and — with no models selected — the location or
+ * the window.
  *
  * `record_count` is deliberately untouched by any of this — it reports rows, and the
  * rows are real. What the caller cannot see without this sentence is that the values
@@ -217,13 +382,35 @@ export function describeCoverageGaps(...gaps: readonly CoverageGap[][]): string 
     .filter((gap) => !isNegligible(gap))
     .map((gap) =>
       gap.kind === 'all-null'
-        ? `No ${gap.cadence} data for ${nameList(gap.variables)} anywhere in the requested window — ` +
-          `all ${gap.totalRows} values are null even though the units are real, so this location or ` +
-          'the requested window falls outside this dataset’s coverage rather than the names being unserved.'
-        : `Partial ${gap.cadence} coverage for ${nameList(gap.variables)}: data runs ${gap.first} to ` +
-          `${gap.last}, and ${gap.nullRows} of ${gap.totalRows} rows are null.`,
+        ? allNullSentence(gap)
+        : `Partial ${gap.cadence} coverage for ${nameList(gap.variables)}: data runs ${gap.first} to ${gap.last}, and ${gap.nullRows} of ${gap.totalRows} rows ${gap.nullRows === 1 ? 'is' : 'are'} null.`,
     );
   return sentences.length > 0 ? sentences.join(' ') : undefined;
+}
+
+/** The sentence for an `all-null` gap, its cause chosen by {@link CoverageGap.attribution}. */
+function allNullSentence(gap: CoverageGap): string {
+  const columns = nameList(gap.variables);
+  const { attribution, cadence, totalRows } = gap;
+  if (!attribution) {
+    return `No ${cadence} data for ${columns} anywhere in the requested window — all ${totalRows} values are null even though the units are real, so this location or the requested window falls outside this dataset’s coverage rather than the names being unserved.`;
+  }
+  const [them, variables] = gap.variables.length === 1 ? ['it', 'variable'] : ['them', 'variables'];
+  switch (attribution.kind) {
+    case 'model': {
+      const { model, servedBy } = attribution;
+      const from = servedBy.length === 1 ? servedBy[0] : `one of ${nameList(servedBy)}`;
+      return `${model} returned no ${cadence} data for ${columns} — all ${totalRows} values are null, while ${nameList(servedBy)} returned values for the same ${variables}. Read ${them} from ${from}.`;
+    }
+    case 'undetermined': {
+      const { models } = attribution;
+      return `No ${cadence} data for ${columns} anywhere in the requested window — all ${totalRows} values are null even though the units are real, so this location or the requested window falls outside this dataset’s coverage, or ${nameList(models)} ${models.length === 1 ? 'does' : 'do'} not carry ${them}. Try another model, or omit models to use the default.`;
+    }
+    default: {
+      const unreachable: never = attribution;
+      return unreachable;
+    }
+  }
 }
 
 /**
@@ -271,21 +458,45 @@ export interface ModelSelection {
   readonly variables: readonly string[];
 }
 
+/** The requested model and variable a model-suffixed column spells. */
+interface ColumnSource {
+  readonly model: string;
+  readonly variable: string;
+}
+
 /**
- * The requested model a column belongs to. With 2+ models the forecast and archive
- * endpoints name every hourly and daily column `<variable>_<model>`, so a column is
- * attributed only when it spells exactly one requested variable–model pair — a bare
- * suffix match would give `temperature_2m_gfs_seamless` to a requested `seamless` too.
- * `undefined` for a bare column, an unrecognized one, or a selection of fewer than two
- * models (whose columns carry plain names).
+ * The suffixes a requested model's columns carry. Beside another model the archive
+ * names Best Match's columns `<variable>_archive_best_match`, where the forecast
+ * endpoint names them `<variable>_best_match`.
  */
-export function columnModel(column: string, selection: ModelSelection): string | undefined {
+function modelSuffixes(model: string): readonly string[] {
+  return model === 'best_match' ? ['_best_match', '_archive_best_match'] : [`_${model}`];
+}
+
+/**
+ * The requested model and variable `column` belongs to. With 2+ models the forecast,
+ * archive, and climate endpoints name every hourly and daily column
+ * `<variable><suffix>` (see {@link modelSuffixes}), so a column is attributed only when
+ * it spells exactly one requested variable–model pair — a bare suffix match would give
+ * `temperature_2m_gfs_seamless` to a requested `seamless` too. `undefined` for a bare
+ * column, an unrecognized one, or a selection of fewer than two models (whose columns
+ * carry plain names).
+ */
+function columnSource(column: string, selection: ModelSelection): ColumnSource | undefined {
   const { models, variables } = selection;
   if (!models || models.length < 2) return;
-  return models.find((model) => {
-    const suffix = `_${model}`;
-    return column.endsWith(suffix) && variables.includes(column.slice(0, -suffix.length));
-  });
+  for (const model of models) {
+    for (const suffix of modelSuffixes(model)) {
+      const variable = column.slice(0, -suffix.length);
+      if (column.endsWith(suffix) && variables.includes(variable)) return { model, variable };
+    }
+  }
+  return;
+}
+
+/** The requested model a column belongs to — {@link columnSource}'s model. */
+export function columnModel(column: string, selection: ModelSelection): string | undefined {
+  return columnSource(column, selection)?.model;
 }
 
 /**
@@ -343,10 +554,10 @@ export function describeModelUnserved(
   const byModel = new Map<string, string[]>();
   const attributed: string[] = [];
   for (const column of columns) {
-    const model = columnModel(column, selection);
-    if (model === undefined) continue;
+    const source = columnSource(column, selection);
+    if (source === undefined) continue;
     attributed.push(column);
-    byModel.set(model, [...(byModel.get(model) ?? []), column.slice(0, -(model.length + 1))]);
+    byModel.set(source.model, [...(byModel.get(source.model) ?? []), source.variable]);
   }
   if (attributed.length === 0) return;
   const pairs = [...byModel].map(

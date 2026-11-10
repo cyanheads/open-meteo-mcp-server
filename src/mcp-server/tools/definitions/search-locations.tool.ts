@@ -9,6 +9,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import type { GeocodingResult } from '@/services/open-meteo/types.js';
+import { renderNotice } from '../response-notice.js';
 import {
   RATE_LIMITED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
@@ -111,7 +112,10 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
       ),
     country: z
       .string()
-      .regex(/^[A-Za-z]{2}$/)
+      .regex(/^[A-Za-z]{2}$/, {
+        error:
+          'Must be an ISO 3166-1 alpha-2 code: two letters such as "NL" or "US", not a country name or a three-letter code. Omit country to search globally.',
+      })
       .optional()
       .describe(
         'ISO 3166-1 alpha-2 country code (e.g. "US", "FR") to disambiguate places that share a name. Omit for a global search.',
@@ -197,6 +201,8 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
   },
 
   enrichmentTrailer: {
+    // The notice quotes the upstream place name, so it is escaped on the rendered line only.
+    notice: { render: renderNotice },
     effective_language: { label: 'Effective language' },
   },
 

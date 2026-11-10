@@ -19,7 +19,7 @@ import {
 } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { CalendarDateSchema } from '../date-input.js';
-import { cleanNames } from '../name-input.js';
+import { cleanNames, nameList } from '../name-input.js';
 import { formatCurrent, formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
   composeNotice,
@@ -27,9 +27,11 @@ import {
   describeCurrentGaps,
   findCoverageGaps,
   findCurrentGaps,
+  renderNotice,
 } from '../response-notice.js';
 import {
   boundedPreviewByCadence,
+  CANVAS_PREVIEW_CHARS,
   canvasPointerLine,
   canvasPointerNotice,
   exceedsInlineBudget,
@@ -48,6 +50,7 @@ import {
   coverageGapContract,
   frameInvalidVariableMessage,
   frameRequestTooLargeMessage,
+  isDateOutOfRangeReason,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
@@ -147,6 +150,14 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       retryable: false,
     },
     {
+      reason: 'date_out_of_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Upstream rejected start_date or end_date as outside the range the marine endpoint accepts; its message names that range.',
+      recovery:
+        'Move start_date and end_date inside the range the message names — from the first day the marine archive accepts to the last day of its forecast — and retry. Real wave values go back to at least 2022.',
+      retryable: false,
+    },
+    {
       reason: 'invalid_timezone',
       code: JsonRpcErrorCode.ValidationError,
       when: 'timezone was blank, or upstream did not recognize the requested time zone.',
@@ -167,6 +178,13 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     UPSTREAM_TIMEOUT_ERROR,
   ],
 
+  // Open-Meteo's own parameter names for the three variable lists.
+  inputAliases: {
+    current: 'current_variables',
+    hourly: 'hourly_variables',
+    daily: 'daily_variables',
+  },
+
   input: z.object({
     latitude: z
       .number()
@@ -176,27 +194,15 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
         'Latitude of a coastal or ocean point. Use openmeteo_search_locations to resolve a place name. Sheltered water returns near-zero wave values; a land point well inland returns null values, which the notice reports, while one near the coast is answered from a nearby sea cell with no notice — check the response latitude and longitude is the water you meant.',
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
-    current_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Marine variables to return for the current instant (e.g., ["wave_height", "wave_period", "wave_direction", "sea_surface_temperature"]). Uses Open-Meteo\'s 15-minute current-conditions data, so it answers "what are the waves right now?" without requesting an hourly series and picking a row. Takes the hourly variable names — a daily aggregate such as wave_height_max belongs in daily_variables and is rejected here. Combines with past_days or a start_date/end_date range; the current block is always the present instant. Satisfies the variable requirement on its own.',
-      ),
-    hourly_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Hourly marine variables (e.g., ["wave_height", "wave_direction", "wave_period", "wind_wave_height", "swell_wave_height"]). Hourly names only — a daily aggregate such as wave_height_max or wave_direction_dominant belongs in daily_variables and is rejected here. At least one of current_variables, hourly_variables, or daily_variables is required.',
-      ),
-    daily_variables: z
-      .array(z.string())
-      .max(50)
-      .optional()
-      .describe(
-        'Daily marine summary variables (e.g., ["wave_height_max", "wave_direction_dominant", "wave_period_max"]). Daily names only — an hourly name such as wave_height belongs in hourly_variables and is rejected here; for a daily summary use its published aggregate (wave_height_max). At least one of current_variables, hourly_variables, or daily_variables is required.',
-      ),
+    current_variables: nameList(50).describe(
+      'Marine variables to return for the current instant (e.g., ["wave_height", "wave_period", "wave_direction", "sea_surface_temperature"]). Uses Open-Meteo\'s 15-minute current-conditions data, so it answers "what are the waves right now?" without requesting an hourly series and picking a row. Takes the hourly variable names — a daily aggregate such as wave_height_max belongs in daily_variables and is rejected here. Combines with past_days or a start_date/end_date range; the current block is always the present instant. Satisfies the variable requirement on its own.',
+    ),
+    hourly_variables: nameList(50).describe(
+      'Hourly marine variables (e.g., ["wave_height", "wave_direction", "wave_period", "wind_wave_height", "swell_wave_height"]). Hourly names only — a daily aggregate such as wave_height_max or wave_direction_dominant belongs in daily_variables and is rejected here. At least one of current_variables, hourly_variables, or daily_variables is required.',
+    ),
+    daily_variables: nameList(50).describe(
+      'Daily marine summary variables (e.g., ["wave_height_max", "wave_direction_dominant", "wave_period_max"]). Daily names only — an hourly name such as wave_height belongs in hourly_variables and is rejected here; for a daily summary use its published aggregate (wave_height_max). At least one of current_variables, hourly_variables, or daily_variables is required.',
+    ),
     forecast_days: z
       .number()
       .int()
@@ -324,6 +330,8 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       ),
   },
 
+  enrichmentTrailer: { notice: { render: renderNotice } },
+
   async handler(args, ctx) {
     const input = {
       ...args,
@@ -448,6 +456,10 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
           frameRequestTooLargeMessage(data.reason, PAYLOAD_NARROWING),
         );
       }
+      // An archive range outside what upstream accepts — its message names the range.
+      if (isDateOutOfRangeReason(data.reason)) {
+        throw ctx.fail('date_out_of_range', data.reason);
+      }
       throw ctx.fail('invalid_variable', frameInvalidVariableMessage(data.reason));
     }
 
@@ -522,9 +534,11 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
          * spillover()'s previewRows: those are drained from the head of the concatenated
          * array, so a wide hourly window fills them before a single daily row and the
          * daily summary comes back empty. The staged table is unaffected — it holds
-         * every row of both cadences, in chronological order.
+         * every row of both cadences, in chronological order. The budget is the canvas
+         * preview's, not the row budget that decided the spill: every row is on the
+         * canvas, so the preview only has to show the columns and the leading rows.
          */
-        const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
+        const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, CANVAS_PREVIEW_CHARS);
 
         return {
           latitude: data.latitude,
@@ -546,8 +560,8 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       /*
        * No canvas (CANVAS_PROVIDER_TYPE=none): bound the preview anyway.
        * Falling through to the full inline return would report truncated: false on a
-       * 92-day hourly window. Same per-cadence selection the canvas branch uses, so
-       * both paths return the same rows for the same records.
+       * 92-day hourly window. Same per-cadence selection the canvas branch uses, but
+       * against the whole row budget: here the preview is everything the caller gets.
        *
        * The full disclosure is composed into `notice`, for the reason the canvas pointer
        * is: a structuredContent-only client reads one surface, and on this branch the

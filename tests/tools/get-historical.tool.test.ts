@@ -217,7 +217,7 @@ describe('openmeteoGetHistoricalTool', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'date_out_of_range',
-        recovery: { hint: expect.stringContaining('past_days') },
+        recovery: { hint: expect.stringContaining('start_date on or after 1940-01-01') },
       },
     });
   });
@@ -226,7 +226,8 @@ describe('openmeteoGetHistoricalTool', () => {
     mockGetHistorical.mockResolvedValue({
       ...MOCK_RESPONSE,
       error: true,
-      reason: 'start_date is out of allowed date range.',
+      // Verbatim from the live archive endpoint for an end_date past its last day.
+      reason: "Parameter 'end_date' is out of allowed range from 1940-01-01 to 2026-11-10",
     });
     const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({
@@ -335,7 +336,7 @@ describe('openmeteoGetHistoricalTool', () => {
     // including invalid variable names. Non-date errors must produce invalid_variable.
     // Real upstream reason shape from the live archive endpoint (Swift type-init jargon).
     const upstreamReason =
-      "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_historical_var.";
+      'Invalid value: Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_historical_var';
     mockGetHistorical.mockResolvedValue({
       ...MOCK_RESPONSE,
       error: true,
@@ -417,12 +418,12 @@ describe('openmeteoGetHistoricalTool', () => {
     expect(error.message).not.toMatch(/exact Open-Meteo API name/);
   });
 
-  it('throws date_out_of_range when API error reason contains "range"', async () => {
-    // Verifies the "range" keyword path is also classified correctly.
+  it("throws date_out_of_range for the archive's start_date range rejection", async () => {
+    // Verbatim from the live archive endpoint for a start_date before its first day.
     mockGetHistorical.mockResolvedValue({
       ...MOCK_RESPONSE,
       error: true,
-      reason: 'Parameter start_date is out of allowed range from 1940-01-01 to 2026-05-30.',
+      reason: "Parameter 'start_date' is out of allowed range from 1940-01-01 to 2026-11-10",
     });
     const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
     const input = openmeteoGetHistoricalTool.input.parse({

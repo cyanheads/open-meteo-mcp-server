@@ -155,7 +155,7 @@ describe('openmeteoGetFloodTool', () => {
    * #25 — GloFAS requires start_date and end_date together and rejects forecast_days
    * alongside either. Each combination below is the live API's documented behaviour;
    * before the guards, every one of them reached upstream and came back classified as
-   * date_out_of_range with a recovery about the 1984 coverage floor — advice that
+   * date_out_of_range with a recovery about the 1984 start_date floor — advice that
    * fixes none of them.
    */
   it('throws date_range_incomplete when only start_date is provided', async () => {
@@ -278,13 +278,16 @@ describe('openmeteoGetFloodTool', () => {
     mockGetFlood.mockResolvedValue({
       ...MOCK_RESPONSE,
       error: true,
-      reason: 'start_date is out of allowed date range.',
+      // Verbatim from the live flood endpoint for an end_date past the last date it accepts.
+      reason: "Parameter 'end_date' is out of allowed range from 1984-01-01 to 2027-11-10",
     });
     const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
       longitude: -122.3,
       daily_variables: ['river_discharge'],
+      start_date: '2026-11-01',
+      end_date: '2028-01-01',
     });
     await expect(openmeteoGetFloodTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
@@ -375,7 +378,7 @@ describe('openmeteoGetFloodTool', () => {
       ...MOCK_RESPONSE,
       error: true,
       reason:
-        "Data corrupted at path ''. Cannot initialize ForecastVariableDaily from invalid String value bogus_discharge.",
+        'Invalid value: Cannot initialize ForecastVariableDaily from invalid String value bogus_discharge',
     });
     const input = openmeteoGetFloodTool.input.parse({
       latitude: 47.6,
@@ -444,12 +447,12 @@ describe('openmeteoGetFloodTool', () => {
   });
 
   /**
-   * #19 — a full 1984→present reanalysis pull is ~15.5k daily records (~285 KB) and
+   * #19 — a full 1984→present date-range pull is ~15.5k daily records (~285 KB) and
    * had no retrieval path: every row came back inline with no canvas handle. Spill
    * eligibility is payload size, never row count — see spill-utils.
    */
   it('spills to DataCanvas and sets truncated=true when the payload exceeds the inline budget', async () => {
-    const days = 15_537; // 1984-01-01 → present, the full GloFAS reanalysis span
+    const days = 15_537; // 1984-01-01 → present, the earliest date GloFAS accepts to today
     const time = dailyDates(days);
     mockGetFlood.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -499,11 +502,11 @@ describe('openmeteoGetFloodTool', () => {
 
   it('starts the canvas-path preview at the first row carrying data', async () => {
     // The canvas branch used to echo spillover()'s chronological head, so a reanalysis
-    // range opening before the coordinate's record began previewed nothing but nulls.
+    // range opening before GloFAS discharge begins previewed nothing but nulls.
     // It now takes the same boundedPreview() selection the canvas-less branch does;
     // the staged table still holds every row in chronological order.
     const days = 15_000;
-    const nullRun = 4_749; // 1984 → the coordinate's first reading, measured live
+    const nullRun = 4_749; // 1984-01-01 → 1996-12-31, null before GloFAS discharge begins
     const time = dailyDates(days);
     mockGetFlood.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -984,10 +987,10 @@ describe('openmeteoGetFloodTool unserved-variable notice', () => {
     expect(notice).toContain('openmeteo_dataframe_describe');
   });
 
-  it('reports a reanalysis range that opens before the coordinate has a record (#40)', async () => {
-    // A GloFAS range starting before the nearest river's record begins comes back
-    // null until it does, with the real m³/s unit throughout.
-    const time = dailyDates(30);
+  it('reports a reanalysis range that opens before GloFAS discharge begins (#40)', async () => {
+    // A GloFAS range starting before discharge begins on 1997-01-01 comes back null
+    // until it does, with the real m³/s unit throughout.
+    const time = dailyDates(30, '1996-12-20');
     mockGetFlood.mockResolvedValue({
       ...MOCK_RESPONSE,
       daily_units: { time: 'iso8601', river_discharge: 'm³/s' },
@@ -1003,8 +1006,8 @@ describe('openmeteoGetFloodTool unserved-variable notice', () => {
         latitude: 47.6,
         longitude: -122.3,
         daily_variables: ['river_discharge'],
-        start_date: '1984-01-01',
-        end_date: '1984-01-30',
+        start_date: '1996-12-20',
+        end_date: '1997-01-18',
       }),
       ctx,
     );
@@ -1495,5 +1498,94 @@ describe('openmeteoGetFloodTool discharge-variable wording (#64)', () => {
         river_discharge_p25: 1.16,
       },
     ]);
+  });
+});
+
+describe('openmeteoGetFloodTool discharge start (#92)', () => {
+  /*
+   * GloFAS accepts a date range from 1984-01-01, but every reanalysis model answers
+   * 1984-01-01 through 1996-12-31 with null: discharge begins 1997-01-01. The floor
+   * stays, so each surface names the two dates for what they are.
+   */
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+  });
+
+  const dateEntry = () =>
+    openmeteoGetFloodTool.errors?.find((entry) => entry.reason === 'date_out_of_range');
+
+  it('the description names the earliest accepted date apart from where discharge begins', () => {
+    expect(openmeteoGetFloodTool.description).toContain(
+      'or start_date and end_date together for a date range. A date range accepts dates from 1984-01-01, but GloFAS discharge begins 1997-01-01 — every model returns null before it.',
+    );
+  });
+
+  it('the start_date description does the same', () => {
+    expect(openmeteoGetFloodTool.input.shape.start_date.description).toMatch(
+      /^Start of a date range \(YYYY-MM-DD, e\.g\., "2023-01-01"\)\. The earliest date accepted is 1984-01-01, but GloFAS discharge begins 1997-01-01, so earlier days come back null\. /,
+    );
+  });
+
+  it('the date_out_of_range entry names 1984-01-01 as the earliest date accepted, never where data begins', () => {
+    const entry = dateEntry();
+    expect(entry?.when).toMatch(
+      /^start_date predates 1984-01-01, the earliest date GloFAS accepts, or end_date /,
+    );
+    expect(entry?.recovery).toMatch(
+      /^Keep start_date on or after 1984-01-01 — the earliest date GloFAS accepts — and end_date /,
+    );
+    expect(entry?.recovery).toMatch(/ Discharge begins 1997-01-01, so a range opening earlier /);
+    for (const text of [entry?.when ?? '', entry?.recovery ?? '']) {
+      expect(text).not.toMatch(/(covers|coverage)[^.]*1984/);
+    }
+  });
+
+  it('rejects a start_date before 1984-01-01 locally, as the earliest date accepted', async () => {
+    const error = await wireError(openmeteoGetFloodTool, {
+      latitude: 48.425,
+      longitude: -122.375,
+      daily_variables: ['river_discharge'],
+      start_date: '1983-12-31',
+      end_date: '1984-01-02',
+    });
+    expect(error.data?.reason).toBe('date_out_of_range');
+    expect(error.message).toBe(
+      'start_date 1983-12-31 predates 1984-01-01, the earliest date GloFAS accepts.',
+    );
+    expect(mockGetFlood).not.toHaveBeenCalled();
+  });
+
+  it('still answers a 1984–1996 range with its null rows and the coverage notice', async () => {
+    const time = dailyDates(30, '1990-06-01');
+    mockGetFlood.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      daily_units: { time: 'iso8601', river_discharge: 'm³/s' },
+      daily: { time, river_discharge: time.map(() => null) },
+    });
+
+    const ctx = createMockContext({ errors: openmeteoGetFloodTool.errors });
+    const result = await openmeteoGetFloodTool.handler(
+      openmeteoGetFloodTool.input.parse({
+        latitude: 48.425,
+        longitude: -122.375,
+        daily_variables: ['river_discharge'],
+        start_date: '1990-06-01',
+        end_date: '1990-06-30',
+      }),
+      ctx,
+    );
+
+    expect(result.record_count).toBe(30);
+    expect(result.daily.every((row) => row.river_discharge === null)).toBe(true);
+    expect(String(getEnrichment(ctx).notice)).toContain(
+      'No daily data for river_discharge anywhere in the requested window',
+    );
+  });
+
+  it('the notice description says where discharge begins rather than a per-coordinate record', () => {
+    const text = openmeteoGetFloodTool.enrichment?.notice?.description ?? '';
+    expect(text).toContain('before GloFAS discharge begins on 1997-01-01');
+    expect(text).not.toContain("coordinate's discharge record");
   });
 });

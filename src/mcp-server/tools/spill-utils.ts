@@ -71,6 +71,20 @@ const MIN_ROW_CHARS = 8_000;
 const UNITS_CHARS = INLINE_CHARS - RESPONSE_SCAFFOLD_CHARS - MIN_ROW_CHARS;
 
 /**
+ * Row budget for the preview a spilled response carries beside its canvas pointer, in the
+ * currency {@link INLINE_CHARS} is expressed in.
+ *
+ * With every row staged on the canvas, the preview's job is to show the column set and the
+ * leading rows; the rest is read with SQL, so the caller should not spend the whole row
+ * budget on rows it will query anyway. It is the {@link MIN_ROW_CHARS} floor every response
+ * is already guaranteed, so it never exceeds the `rowBudget` that ruled the result oversized
+ * — and that `rowBudget` alone still decides fit versus spill. The canvas-less branch keeps
+ * the whole `rowBudget`, because there the preview is everything the caller receives. A row
+ * wider than its share still comes back whole, one per cadence (see {@link boundedPreview}).
+ */
+export const CANVAS_PREVIEW_CHARS = MIN_ROW_CHARS;
+
+/**
  * What one record costs against {@link INLINE_CHARS}, on whichever surface renders it
  * larger.
  *
@@ -252,8 +266,9 @@ export function deriveSpillSchema(records: readonly TimeRecord[]): ColumnSchema[
  * covers both inline surfaces; `spillover()` only knows JSON length, so re-asking it
  * reopens the gap between the two. The preview it buffers under this value is empty
  * and unused — every tool selects its own through {@link boundedPreview} or
- * {@link boundedPreviewByCadence}, which is also what gives both cadences and the
- * canvas-less path the same rows.
+ * {@link boundedPreviewByCadence}, which is also what keeps both cadences in the
+ * preview, against {@link CANVAS_PREVIEW_CHARS} here and the whole row budget on the
+ * canvas-less path.
  */
 const SPILL_ALWAYS = 1;
 
@@ -298,20 +313,20 @@ function hasNonNullValue(record: Record<string, unknown>): boolean {
  * Always at least one row when `records` is non-empty.
  *
  * The canvas-less half of the spill decision, and the canvas half too: both paths take
- * their preview from here, so the same records produce the same rows whether or not
- * DataCanvas is configured. With `CANVAS_PROVIDER_TYPE=none`, `getCanvas()` returns
- * undefined and the tools would otherwise fall through
+ * their preview from here, under different budgets. With `CANVAS_PROVIDER_TYPE=none`,
+ * `getCanvas()` returns undefined and the tools would otherwise fall through
  * an exceeded budget to an unbounded inline return carrying `truncated: false` — the
- * field a client reads to decide whether anything is missing. The only difference
- * between the two paths is that one has a canvas holding the remainder, which
+ * field a client reads to decide whether anything is missing. That path passes the whole
+ * `rowBudget`, since its preview is all the caller receives. The canvas path passes
+ * {@link CANVAS_PREVIEW_CHARS}, since the canvas holds the remainder, which
  * {@link canvasPointerNotice} names and {@link noCanvasNotice} explains the absence of.
  *
  * The leading all-null run is skipped because the preview is all the caller sees of
  * the rows themselves. Three real response shapes open with one: an ensemble
  * `past_days` response leads with placeholder rows the models don't hindcast; the
  * forecast API serves fewer past days than `past_days: 92` allows, so the unserved
- * head comes back null; and a GloFAS reanalysis range that starts before the
- * coordinate's record begins is null until it does. A chronological head would spend
+ * head comes back null; and a GloFAS reanalysis range that starts before GloFAS
+ * discharge begins (1997-01-01) is null until it does. A chronological head would spend
  * the whole budget inside that run and return a response with no data at all. When
  * every row is null the head is returned as-is — that is the honest answer, not an
  * empty array.
@@ -320,8 +335,9 @@ function hasNonNullValue(record: Record<string, unknown>): boolean {
  * so the rows fit both inline surfaces rather than only the JSON one.
  *
  * @param budget - Character ceiling for the returned rows: the `rowBudget` from
- * {@link inlineBudget}, or the share of it {@link boundedPreviewByCadence} passes when
- * the response carries both cadences.
+ * {@link inlineBudget} with no canvas, {@link CANVAS_PREVIEW_CHARS} with one, or the
+ * share of either {@link boundedPreviewByCadence} passes when the response carries both
+ * cadences.
  */
 export function boundedPreview<T extends Record<string, unknown>>(
   records: readonly T[],

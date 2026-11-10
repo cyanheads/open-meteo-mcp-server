@@ -287,6 +287,64 @@ describe('openmeteoSearchLocationsTool', () => {
     ).toThrow();
   });
 
+  it.each(['USA', 'Netherlands', ''])(
+    'rejects country %j with the alpha-2 rule on every surface (#97)',
+    async (country) => {
+      const rule =
+        'country: Must be an ISO 3166-1 alpha-2 code: two letters such as "NL" or "US", not a country name or a three-letter code. Omit country to search globally.';
+
+      const result = await runToolContract(openmeteoSearchLocationsTool, {
+        name: 'Utrecht',
+        country,
+      });
+
+      expect(result.isError).toBe(true);
+      const { error } = result.structuredContent as {
+        error: { code: number; message: string; data?: { recovery?: { hint: string } } };
+      };
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.message).toBe(
+        `Input validation error: Invalid arguments for tool openmeteo_search_locations: ${rule}`,
+      );
+      expect(error.data?.recovery?.hint).toBe(rule);
+      expect(firstText(result.content)).toContain(`openmeteo_search_locations: ${rule}`);
+      expect(mockGetGeocode).not.toHaveBeenCalled();
+    },
+  );
+
+  it('validates NL, nl, and Nl alike and sends NL upstream', async () => {
+    mockGetGeocode.mockResolvedValue({ results: [PARIS_FR] });
+
+    const results = [];
+    for (const country of ['NL', 'nl', 'Nl']) {
+      results.push(
+        await runToolContract(openmeteoSearchLocationsTool, { name: 'Utrecht', country }),
+      );
+    }
+
+    expect(mockGetGeocode.mock.calls.map((call) => call.slice(0, 4))).toEqual([
+      ['Utrecht', 5, 'en', 'NL'],
+      ['Utrecht', 5, 'en', 'NL'],
+      ['Utrecht', 5, 'en', 'NL'],
+    ]);
+    expect(results.map((result) => result.isError === true)).toEqual([false, false, false]);
+    expect(results[1]?.structuredContent).toEqual(results[0]?.structuredContent);
+    expect(results[2]?.structuredContent).toEqual(results[0]?.structuredContent);
+  });
+
+  it('advertises country with its two-letter pattern', () => {
+    const advertised = openmeteoSearchLocationsTool.input['~standard'].jsonSchema.input({
+      target: 'draft-2020-12',
+    }) as { properties: Record<string, unknown> };
+
+    expect(advertised.properties.country).toStrictEqual({
+      description:
+        'ISO 3166-1 alpha-2 country code (e.g. "US", "FR") to disambiguate places that share a name. Omit for a global search.',
+      type: 'string',
+      pattern: '^[A-Za-z]{2}$',
+    });
+  });
+
   it('normalises nullable fields', async () => {
     const partialResult = {
       ...SEATTLE_RESULT,
@@ -456,6 +514,17 @@ describe('openmeteoSearchLocationsTool low-confidence notice (#48)', () => {
   it('leaves a well-populated top result unflagged', async () => {
     const { notice } = await noticeFor([SEATTLE_RESULT], 'Seattle');
     expect(notice).toBeUndefined();
+  });
+
+  it('renders a Markdown-active place name literally in content[] and stores it raw', async () => {
+    // `_Calcutta_` between quotes is emphasis to a CommonMark parse unless it is escaped.
+    mockGetGeocode.mockResolvedValue({ results: [{ ...CALCUTTA_ZA, name: '_Calcutta_' }] });
+    const result = await runToolContract(openmeteoSearchLocationsTool, { name: 'Calcutta' });
+    expect(result.isError).toBeFalsy();
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    expect(notice).toMatch(/^Low-confidence match: the top result "_Calcutta_" \(South Africa, /);
+    const trailer = result.content.at(-1);
+    expect(renderedText(trailer?.type === 'text' ? trailer.text : '')).toContain(notice);
   });
 
   it.each([

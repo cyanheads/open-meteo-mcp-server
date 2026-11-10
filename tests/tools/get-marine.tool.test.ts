@@ -286,7 +286,7 @@ describe('openmeteoGetMarineTool', () => {
       ...MOCK_RESPONSE,
       error: true,
       reason:
-        "Data corrupted at path ''. Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_wave.",
+        'Invalid value: Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_wave.',
     });
     const input = openmeteoGetMarineTool.input.parse({
       latitude: 47.8,
@@ -705,10 +705,10 @@ describe('openmeteoGetMarineTool', () => {
 
     expect(result.truncated).toBe(true);
     expect(result.canvas_id).toBe('canvas-marine-mix');
-    expect(result.daily).toHaveLength(dailyTime.length);
+    expect(result.daily?.length ?? 0).toBeGreaterThan(0);
     expect(result.daily?.[0]).toMatchObject({ time: dailyTime[0], wave_height_max: 2 });
     expect(result.hourly?.length ?? 0).toBeGreaterThan(0);
-    // One shared budget across both cadences, matching the canvas-less branch.
+    // One shared budget across both cadences.
     expect(
       JSON.stringify(result.hourly ?? []).length + JSON.stringify(result.daily ?? []).length,
     ).toBeLessThanOrEqual(rowBudgetFor(result));

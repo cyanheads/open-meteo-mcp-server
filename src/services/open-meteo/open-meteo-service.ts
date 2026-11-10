@@ -358,6 +358,11 @@ function withOpenMeteoRetry<T>(url: string, ctx: Context, origin: RequestOrigin)
 // ---------------------------------------------------------------------------
 
 export interface ForecastParams {
+  /**
+   * Which grid cell answers: `land`, `sea`, or `nearest`. Omitted sends no parameter, so
+   * upstream's own default — a land cell on this endpoint — answers.
+   */
+  cell_selection?: string | undefined;
   /** Variables to return at the current instant, forwarded as the upstream `current`. */
   current?: string[] | undefined;
   daily?: string[] | undefined;
@@ -377,6 +382,8 @@ export interface ForecastParams {
 }
 
 export interface HistoricalParams {
+  /** As on {@link ForecastParams}; the archive also defaults to a land cell. */
+  cell_selection?: string | undefined;
   daily?: string[] | undefined;
   end_date: string;
   hourly?: string[] | undefined;
@@ -428,6 +435,8 @@ export interface AirQualityParams {
 }
 
 export interface EnsembleParams {
+  /** As on {@link ForecastParams}; the ensemble endpoint also defaults to a land cell. */
+  cell_selection?: string | undefined;
   daily?: string[] | undefined;
   forecast_days?: number | undefined;
   hourly?: string[] | undefined;
@@ -449,6 +458,8 @@ export interface FloodParams {
 }
 
 export interface ClimateParams {
+  /** As on {@link ForecastParams}; the climate endpoint also defaults to a land cell. */
+  cell_selection?: string | undefined;
   daily: string[];
   end_date: string;
   models?: string[] | undefined;
@@ -599,6 +610,7 @@ export class OpenMeteoService {
       temperature_unit: params.temperature_unit,
       wind_speed_unit: params.wind_speed_unit,
       precipitation_unit: params.precipitation_unit,
+      cell_selection: params.cell_selection,
       timezone: params.timezone ?? 'auto',
     });
 
@@ -668,6 +680,7 @@ export class OpenMeteoService {
       temperature_unit: params.temperature_unit,
       wind_speed_unit: params.wind_speed_unit,
       precipitation_unit: params.precipitation_unit,
+      cell_selection: params.cell_selection,
       timezone: params.timezone ?? 'auto',
     });
 
@@ -718,10 +731,10 @@ type QueryValue = string | number | string[] | undefined;
 /**
  * Build a request URL, joining a list parameter with a LITERAL comma.
  *
- * `URLSearchParams` percent-encodes the comma, and Open-Meteo then reads the whole
- * list as one opaque value: it rejects `MRI_AGCM3_2_S%2CBOGUS_MODEL` as
- * `invalid String value MRI_AGCM3_2_S,BOGUS_MODEL`, naming a valid model alongside
- * the bad one and leaving the caller nothing to converge on. The same request with a
+ * `URLSearchParams` percent-encodes the comma. Open-Meteo still splits an encoded list
+ * that is valid, but rejects one holding a bad name as a single value: it rejects
+ * `MRI_AGCM3_2_S%2CBOGUS_MODEL` as `invalid String value MRI_AGCM3_2_S,BOGUS_MODEL`,
+ * naming a valid model alongside the bad one and leaving the caller nothing to converge on. The same request with a
  * literal comma is rejected as `invalid String value BOGUS_MODEL` — upstream, the
  * authority on which names exist, isolates the offender itself, so no local catalog
  * has to re-derive it. This holds for every comma-joined parameter the service sends:
@@ -734,8 +747,10 @@ type QueryValue = string | number | string[] | undefined;
  *
  * Every character that could alter the query's structure is escaped: `encodeURIComponent`
  * runs per list element and per scalar, so `&`, `=`, `#`, `?`, `%`, whitespace, and any
- * non-ASCII byte are percent-encoded, and a comma inside an element encodes to `%2C` and
- * cannot forge a separator. What it leaves literal beyond the separator — `!`, `'`, `(`,
+ * non-ASCII byte are percent-encoded, and no value can add, replace, or truncate a
+ * parameter. A comma inside an element encodes to `%2C`, which Open-Meteo also splits a
+ * valid list on, so an element holding a comma reaches upstream as the names it joins.
+ * What it leaves literal beyond the separator — `!`, `'`, `(`,
  * `)`, `~`, `*`, and a space as `%20` rather than `+` — are all characters RFC 3986
  * permits unencoded in a query value; none is a delimiter, so none can split a parameter.
  * Keys are literals in this module and need no escaping.
@@ -769,6 +784,7 @@ function openMeteoUrl(base: string, params: Record<string, QueryValue>): string 
  * declare is simply never present, and an absent field is omitted from the query.
  */
 interface WeatherQueryParams {
+  cell_selection?: string | undefined;
   current?: string[] | undefined;
   daily?: string[] | undefined;
   end_date?: string | undefined;
@@ -805,6 +821,7 @@ function buildWeatherUrl(
     wind_speed_unit: params.wind_speed_unit,
     precipitation_unit: params.precipitation_unit,
     length_unit: params.length_unit,
+    cell_selection: params.cell_selection,
     timezone: params.timezone ?? 'auto',
   });
 }

@@ -4,7 +4,7 @@ description: Tool choice, gates, and workflows for the openmeteo_* weather tools
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.0.1"
 ---
 
 ## Scope
@@ -24,7 +24,7 @@ Modeled, gridded data from Open-Meteo, keyless: deterministic and ensemble forec
 ## Identifiers
 
 - **Coordinates** come from `openmeteo_search_locations`, which indexes populated places only: a surf break ("Banzai Pipeline") returns `no_results`. Geocode the nearest town, then move the coordinate onto the water or the river channel (Gates 5 and 6).
-- **The served cell.** Each weather response's `latitude`/`longitude` is the grid cell that answered, not the input, and it can sit kilometres away: `era5` (0.25° grid) answered Seattle from 47.5, −122.25. Once a marine or flood cell is chosen, send that served coordinate on every follow-up call so all the numbers come from one cell.
+- **The served cell.** Each weather response's `latitude`/`longitude` is the grid cell that answered, not the input, and it can sit kilometres away: `era5` (0.25° grid) answered Seattle from 47.5, −122.25. Forecast, historical, ensemble, and climate answer from a land cell unless `cell_selection` says otherwise, so a point on the water reads on-shore conditions: set `cell_selection: "sea"` for one (Gate 5). On climate the response coordinate can stay the same while the values change with `cell_selection`, so it does not name the cell that answered. Once a marine or flood cell is chosen, send that served coordinate on every follow-up call so all the numbers come from one cell.
 - **`canvas_id` and `table_name`** come only from a response with `truncated: true`. A window small enough to return inline is not staged.
 
 ## Gates
@@ -32,7 +32,7 @@ Modeled, gridded data from Open-Meteo, keyless: deterministic and ensemble forec
 1. **Odds come from the ensemble.** `precipitation_probability` is the chance of more than 0.1 mm in the preceding hour, and daily `precipitation_probability_max` is the highest hourly value of the day. Neither answers "more than 20 mm" or "a wet day". For a threshold, count ensemble values over it (Workflows). In one probe the default forecast gave 21.8 mm and a 74 % maximum hourly probability for a day on which 5 of 51 ensemble values passed 20 mm.
 2. **Frost is a surface question.** `temperature_2m_min` is air at 2 m. Request hourly `soil_temperature_0cm` (the surface temperature on land) beside it before saying "no frost": one probe returned daily minima of 0.6 °C and 1.0 °C while the surface fell to −0.7 °C and −1.8 °C. For the odds of an air frost, count ensemble `temperature_2m_min` members below 0.
 3. **A projection is not a forecast.** `openmeteo_get_climate` returns a plausible value for any date to 2050 (it answered 2027-07-01 with no warning), and its models disagree by several degrees on a single day (5.1 to 12.7 °C at one point on 2041-01-01). Never read a date, a month, or a season from it. Compare multi-year windows only, take each model's change against its own baseline window, and report the range across models.
-4. **One model across a comparison.** The archive's default blend changes source by date, and sources differ by more than a degree on the same day (`era5` 20.5 °C, `ecmwf_ifs` 18.8 °C). Pin one archive model for the baseline and the period you compare to it. An ERA5-family pin leaves the last week or so null; on 2026-10-28, `era5` ended at 2026-10-21. End the comparison at the date the notice names; never splice in another model or forecast `past_days`. Not every archive model reaches 1940: `era5_land` returned nulls for July 1945 where `era5` had values.
+4. **One model across a comparison.** The archive's default blend changes source by date, and sources differ by more than a degree on the same day (`era5` 20.5 °C, `ecmwf_ifs` 18.8 °C). Pin one archive model for the baseline and the period you compare to it. An ERA5-family pin leaves the last week or so null; on 2026-10-28, `era5` ended at 2026-10-21. End the comparison at the date the notice names, on a short window as on a long one; never splice in another model or forecast `past_days`. Not every archive model reaches 1940: `era5_land` returned nulls for July 1945 where `era5` had values. Pick the model by the variable, since a model that does not carry one returns it with a real unit and all nulls, and the notice then names that model. As measured for 2020-06 at 42.03, −93.62 and 52.52, 13.41: `era5_land` carries no precipitation, rain, snowfall, wind speed or gusts, shortwave radiation, `et0_fao_evapotranspiration`, `sunshine_duration`, or `weather_code` in either cadence, and no hourly `cloud_cover` or `surface_pressure`, and its `precipitation_hours` reads 0, so a sibling variable with values is no sign the window is covered. `ecmwf_ifs` has no daily `temperature_2m_max` or `temperature_2m_min`. `era5_seamless` served every variable tested.
 5. **Check the marine cell.** A coastal land point does not come back null. It is answered from a nearby sea cell: an inland point in Anaheim (33.80, −117.85) returned real waves from 33.708, −117.958. Only points far inland return nulls. Close to shore, neighbouring cells differ: two cells about 8 km apart off Huntington Beach gave swell of 10.3 s from 224° and 7.4 s from 274°. Place the coordinate just offshore of the break, confirm the served cell is the one you meant, and compare one neighbouring offshore cell before you commit.
 6. **Check the river's magnitude.** GloFAS cells sit on a 0.05° grid (snapped values such as 50.925, 6.975), and the cell that answers is not reliably the biggest river nearby. Downtown Cologne (50.94, 6.96) is answered by a cell carrying a few m³/s, while the cell 0.05° west carries over 1,000 m³/s, the Rhine. If the discharge is orders of magnitude below what the named river carries, try neighbouring cells in 0.05° steps across the channel and keep the one that fits.
 7. **The AQI looks backward.** `us_aqi` and the `us_aqi_*` sub-indices average over preceding hours: 24 h for particulates, and for ozone the higher of the hourly and 8 h values. In one probe `us_aqi_pm2_5` fell from 30 to 22 while hourly `pm2_5` rose from 1.4 to 2.6 μg/m³. For conditions at a given hour, read the hourly concentrations (`pm2_5`, `ozone`) for that hour alongside the index. The scales also differ: `us_aqi` 0–50 is good, while `european_aqi` 20–40 is only "fair".
@@ -56,12 +56,12 @@ Run `openmeteo_get_climate` twice with the same models and variables: once for a
 ### River flood outlook ("flood risk next month")
 
 1. Find the cell (Gate 6), then reuse its served coordinate.
-2. Climatology: a date range with `models: ["consolidated_v4"]`. It spills; take quantiles in SQL (`quantile_cont(river_discharge, 0.9)`), or the median of annual maxima.
+2. Climatology: a date range with `models: ["consolidated_v4"]`, which holds 1997-01-01 to 2025-05-31; earlier days, which the endpoint accepts back to 1984-01-01, and later days are null. It spills; take quantiles in SQL (`quantile_cont(river_discharge, 0.9)`), or the median of annual maxima.
 3. Outlook: `forecast_days`, with `river_discharge_p75` and `river_discharge_max` beside `river_discharge`. `river_discharge` is one value, not the ensemble centre, and it can fall below `river_discharge_p25`. Judge the risk from the upper statistics against the cell's own quantiles, and report how many days ahead the exceedance appears.
 
 ### Surf session at a named beach
 
-Geocode the town, then move the coordinate offshore of the break (Gate 5). Read the marine hourly `swell_wave_height`, `swell_wave_period`, and `swell_wave_direction`, and the forecast's `wind_speed_10m` and `wind_direction_10m` at the same point for onshore or offshore wind. Wave and wind directions both give where they come from: at one open-ocean point, wind waves from 70° sat under wind from 66°.
+Geocode the town, then move the coordinate offshore of the break (Gate 5). Read the marine hourly `swell_wave_height`, `swell_wave_period`, and `swell_wave_direction`, and the forecast's `wind_speed_10m` and `wind_direction_10m` at the same point for onshore or offshore wind, with `cell_selection: "sea"` on the forecast call so a water cell answers for the point on the water. Wave and wind directions both give where they come from: at one open-ocean point, wind waves from 70° sat under wind from 66°.
 
 ### Conventions
 
@@ -70,7 +70,7 @@ Geocode the town, then move the coordinate offshore of the break (Gate 5). Read 
 
 ### DataCanvas
 
-Results too large to return inline are staged as a DataCanvas table, and the response carries a `canvas_id`. Call `openmeteo_dataframe_describe` with it for the staged table and column names before writing SQL, then `openmeteo_dataframe_query` with a read-only query. Pass the same `canvas_id` back to stage further results beside the first; the tables expire with the canvas.
+Results too large to return inline are staged as a DataCanvas table, and the response carries a `canvas_id`. Call `openmeteo_dataframe_describe` with it for the staged table and column names before writing SQL, then `openmeteo_dataframe_query` with a read-only query. It returns the first `limit` rows (default 25, at most 10,000), each whole; `row_count` is the exact total and `truncated` says more rows exist, so set `limit` to the rows you need, or page with `LIMIT` / `OFFSET` under an `ORDER BY`. Pass the same `canvas_id` back to stage further results beside the first; the tables expire with the canvas.
 
 For per-model columns, stack two windows and turn the model suffix into a value:
 

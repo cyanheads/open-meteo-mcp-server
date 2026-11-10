@@ -199,6 +199,15 @@ export const FORECAST_MODELS: readonly string[] = [
 export const FORECAST_MODEL_NAMES = FORECAST_MODELS.join(', ');
 
 /**
+ * First day GloFAS carries discharge, as a GMT model date (a timezone east of GMT labels
+ * it a day later). Upstream accepts a range from 1984-01-01, the floor the flood tool
+ * keeps, but `seamless_v4`, `consolidated_v4`, and both v3 reanalysis models answer
+ * 1984-01-01 through 1996-12-31 with null. Measured live 2026-11-09 at six cells on five
+ * continents; the docs page's "Data are available from 1984-01-01" does not hold.
+ */
+export const FLOOD_DISCHARGE_START_DATE = '1997-01-01';
+
+/**
  * First day the default `seamless_v4` serves `forecast_v4` run data instead of
  * `consolidated_v4` reanalysis, as a GMT model date (a timezone east of GMT labels it a
  * day later). Measured live 2026-10-24 at two points: identical to `consolidated_v4`
@@ -209,7 +218,7 @@ export const FLOOD_SEAMLESS_SWITCH_DATE = '2023-08-05';
 /**
  * Last day `consolidated_v4` carries reanalysis; it answers later dates with HTTP 200 and
  * null rows. Measured live 2026-10-24 — the docs page's source table still says "1984 –
- * July 2022", which is stale.
+ * July 2022", which is stale at both ends (see {@link FLOOD_DISCHARGE_START_DATE}).
  */
 export const FLOOD_CONSOLIDATED_END_DATE = '2025-05-31';
 
@@ -235,7 +244,7 @@ export const FLOOD_MODELS: readonly CatalogModel[] = [
   DEFAULT_FLOOD_MODEL,
   {
     name: 'consolidated_v4',
-    note: `reanalysis from 1984 through ${FLOOD_CONSOLIDATED_END_DATE}; null after it and on every forecast_days call`,
+    note: `reanalysis from ${FLOOD_DISCHARGE_START_DATE} through ${FLOOD_CONSOLIDATED_END_DATE}; null outside that span and on every forecast_days call`,
   },
   {
     name: 'forecast_v4',

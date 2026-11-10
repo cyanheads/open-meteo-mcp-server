@@ -470,7 +470,7 @@ describe('OpenMeteoService upstream classification', () => {
     // The coverage-gap match stays narrow on every endpoint: an unknown-variable
     // rejection is still returned as a body for the tool's own errors[] contract.
     respondWith(
-      '{"error":true,"reason":"Data corrupted at path \'\'. Cannot initialize ForecastVariable from invalid String value bogus_wave."}',
+      '{"error":true,"reason":"Invalid value: Cannot initialize ForecastVariable from invalid String value bogus_wave."}',
       400,
     );
     const ctx = createMockContext();
@@ -490,7 +490,7 @@ describe('OpenMeteoService upstream classification', () => {
     // The coverage-gap match is narrow: an unknown-variable rejection still comes back
     // as a body so the tool can attach its own error-contract reason.
     respondWith(
-      '{"error":true,"reason":"Data corrupted at path \'\'. Cannot initialize MultiDomains from invalid String value BOGUS_MODEL."}',
+      '{"error":true,"reason":"Invalid value: Cannot initialize MultiDomains from invalid String value BOGUS_MODEL."}',
       400,
     );
     const ctx = createMockContext();
@@ -1108,9 +1108,70 @@ describe('OpenMeteoService request encoding', () => {
     expect(requestedUrls()[0] ?? '').not.toContain('models=');
   });
 
+  it.each([
+    [
+      'forecast',
+      (cell: string | undefined, ctx: ReturnType<typeof createMockContext>) =>
+        getOpenMeteoService().getForecast(
+          37.49,
+          -122.5,
+          { hourly: ['wind_speed_10m'], cell_selection: cell },
+          ctx,
+        ),
+    ],
+    [
+      'archive',
+      (cell: string | undefined, ctx: ReturnType<typeof createMockContext>) =>
+        getOpenMeteoService().getHistorical(
+          37.49,
+          -122.5,
+          {
+            start_date: '2024-01-10',
+            end_date: '2024-01-10',
+            hourly: ['wind_speed_10m'],
+            cell_selection: cell,
+          },
+          ctx,
+        ),
+    ],
+    [
+      'ensemble',
+      (cell: string | undefined, ctx: ReturnType<typeof createMockContext>) =>
+        getOpenMeteoService().getEnsemble(
+          37.49,
+          -122.5,
+          { hourly: ['wind_speed_10m'], cell_selection: cell },
+          ctx,
+        ),
+    ],
+    [
+      'climate',
+      (cell: string | undefined, ctx: ReturnType<typeof createMockContext>) =>
+        getOpenMeteoService().getClimate(
+          37.49,
+          -122.5,
+          {
+            start_date: '2024-01-10',
+            end_date: '2024-01-10',
+            daily: ['wind_speed_10m_mean'],
+            cell_selection: cell,
+          },
+          ctx,
+        ),
+    ],
+  ])('sends cell_selection on the %s request only when one is set (#93)', async (_label, send) => {
+    // Omitted must reach the wire as no parameter at all: upstream's own default (a
+    // land cell on these four endpoints) is then what answers, as it does today.
+    const ctx = createMockContext();
+    for (const cell of [undefined, 'land', 'sea', 'nearest']) await send(cell, ctx);
+
+    const sent = requestedUrls().map((url) => new URL(url).searchParams.getAll('cell_selection'));
+    expect(sent).toEqual([[], ['land'], ['sea'], ['nearest']]);
+  });
+
   it('sends the climate models list with a literal comma so upstream isolates the offender (#34)', async () => {
     /*
-     * Percent-encoding the comma makes upstream read the list as one opaque value:
+     * Percent-encoding the comma makes upstream reject the list as one value:
      * `models=MRI_AGCM3_2_S%2CBOGUS_MODEL` is rejected as
      * `invalid String value MRI_AGCM3_2_S,BOGUS_MODEL`, naming a valid model as a
      * suspect. With a literal comma the same request is rejected as
@@ -1202,7 +1263,7 @@ describe('OpenMeteoService request encoding', () => {
   it('still escapes every character other than the list separator', async () => {
     // The comma is a sub-delimiter RFC 3986 permits unencoded in a query value;
     // nothing else is let through, and encoding runs per list element so a comma
-    // inside an element could not forge a separator.
+    // inside an element is sent as %2C.
     const ctx = createMockContext();
     await getOpenMeteoService().getGeocode('São Paulo, SP', 5, 'en', 'BR', ctx);
 
@@ -1233,8 +1294,9 @@ describe('OpenMeteoService request encoding', () => {
       /*
        * Every value in every request originates in tool input, and the list separator
        * is the one character deliberately left literal — so a value carrying `&`, `=`,
-       * `#`, or a comma of its own must not be able to add a parameter, replace one,
-       * truncate the query, or forge a separator.
+       * `#`, or a comma of its own must not be able to add a parameter, replace one, or
+       * truncate the query. Open-Meteo also splits a valid list on `%2C`, so an element
+       * holding a comma still reaches upstream as the names it joins.
        */
       const ctx = createMockContext();
       await getOpenMeteoService().getGeocode(raw, 5, 'en', undefined, ctx);
