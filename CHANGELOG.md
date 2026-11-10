@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-11-10 · ⚠️ Breaking
+
+Adds cell_selection for points on the water, Open-Meteo's own hourly/daily/current keys and comma-joined lists, and a limit page size (default 25 rows) on openmeteo_dataframe_query; coverage notices name the model that lacks a variable. Breaking: the query tool refuses internal metadata view names as aliases.
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-10-28
 
 Publishes the open-meteo-guide agent skill over MCP and in every package, corrects the flood, marine, and ERA5-lag guidance in tool descriptions, and moves to mcp-ts-core 0.13.18 with DuckDB 2 and an .mcpb that no longer ships tests, coverage, sources, or scripts.

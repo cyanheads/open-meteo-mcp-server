@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 18:11:43
+Generated on: 2026-11-10 10:00:02
 
 ```text
 open-meteo-mcp-server/
@@ -29,6 +29,7 @@ open-meteo-mcp-server/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
 │   ├── 0.5.x/
+│   ├── 0.6.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -173,6 +174,7 @@ open-meteo-mcp-server/
 │   │       ├── name-input.ts
 │   │       ├── reshape-utils.ts
 │   │       ├── response-notice.ts
+│   │       ├── row-data-ceiling.ts
 │   │       ├── spill-utils.ts
 │   │       ├── timezone-input.ts
 │   │       ├── upstream-error.ts
@@ -192,14 +194,18 @@ open-meteo-mcp-server/
 │   ├── helpers/
 │   │   ├── commonmark.ts
 │   │   ├── content.ts
+│   │   ├── cpu-time.ts
+│   │   ├── gfm-table.ts
 │   │   ├── inline-surface.ts
 │   │   ├── marker-config.ts
 │   │   ├── no-canvas.ts
+│   │   ├── stdio-server.ts
 │   │   ├── upstream-calls.ts
 │   │   ├── upstream-spy.ts
 │   │   └── wire-error.ts
 │   ├── integration/
 │   │   ├── index-canvas-default.int.test.ts
+│   │   ├── index-env-file.int.test.ts
 │   │   └── search-locations-contract.int.test.ts
 │   ├── prompts/
 │   ├── resources/
@@ -213,10 +219,13 @@ open-meteo-mcp-server/
 │   │   └── definitions.smoke.test.ts
 │   └── tools/
 │       ├── canvas-id-input.test.ts
+│       ├── canvas-preview.test.ts
+│       ├── cell-selection.test.ts
 │       ├── dataframe-describe.tool.test.ts
 │       ├── dataframe-drop.tool.test.ts
 │       ├── dataframe-query.tool.test.ts
 │       ├── date-input.test.ts
+│       ├── date-rejection.test.ts
 │       ├── error-contract.test.ts
 │       ├── get-air-quality.tool.test.ts
 │       ├── get-climate.tool.test.ts
@@ -228,8 +237,11 @@ open-meteo-mcp-server/
 │       ├── get-marine.tool.test.ts
 │       ├── model-catalog.test.ts
 │       ├── name-input.test.ts
+│       ├── name-list-input.test.ts
+│       ├── notice-wiring.test.ts
 │       ├── rate-limit-contract.test.ts
 │       ├── response-notice.test.ts
+│       ├── row-data-ceiling.test.ts
 │       ├── search-locations.tool.test.ts
 │       ├── spill-utils.test.ts
 │       ├── tool-surface.test.ts
