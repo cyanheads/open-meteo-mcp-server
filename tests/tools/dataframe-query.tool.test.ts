@@ -13,20 +13,37 @@ import {
   DuckdbProvider,
   type IDataCanvasProvider,
 } from '@cyanheads/mcp-ts-core/canvas';
+import { resetConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext,
+  getEnrichment,
+  type MockContextLogger,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoDataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 import { openmeteoDataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
-import { INLINE_CHARS, stageSpill } from '@/mcp-server/tools/spill-utils.js';
+import { stageSpill } from '@/mcp-server/tools/spill-utils.js';
+import { renderedText } from '../helpers/commonmark.js';
 import { firstText } from '../helpers/content.js';
-import { wireError } from '../helpers/wire-error.js';
+import { cpuMicrosPerCall } from '../helpers/cpu-time.js';
+import { gfmTable } from '../helpers/gfm-table.js';
+import { type WireError, wireError } from '../helpers/wire-error.js';
 
 // Canvas mock — returns undefined by default; individual tests override
 let mockCanvasInstance: unknown;
 
 vi.mock('@/services/canvas-accessor.js', () => ({
   getCanvas: () => mockCanvasInstance,
+}));
+
+/** Stands in for every counter the tool creates, so a test can count its increments. */
+const clampCounter = vi.hoisted(() => ({ add: vi.fn() }));
+
+vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>()),
+  createCounter: () => clampCounter,
 }));
 
 const MOCK_ROWS = [
@@ -222,16 +239,24 @@ describe('openmeteoDataframeQueryTool', () => {
     );
   });
 
-  it('caps returned rows to the 100-row preview while row_count reflects the full result', async () => {
-    // Handler-side symmetric cap (#16): the canvas may hold up to its 10k row limit,
-    // but the tool returns at most a 100-row preview on both surfaces. row_count stays
-    // the true total so the agent knows to page the rest with SQL LIMIT / OFFSET.
+  it('asks the canvas for a 25-row page by default while row_count reflects the full result', async () => {
+    // The canvas returns at most rowLimit rows and flags a cut result; the tool then counts
+    // the full result, so row_count stays the true total the agent pages the rest from.
     const fullRows = Array.from({ length: 250 }, (_, i) => ({ i, v: i * 2 }));
-    const mockInstance = {
-      canvasId: 'testCanv01',
-      query: vi.fn().mockResolvedValue({ rows: fullRows, rowCount: 250 }),
+    const query = vi.fn((sql: string, options: { rowLimit?: number }) =>
+      Promise.resolve(
+        sql.startsWith('SELECT COUNT(*)')
+          ? { rows: [{ n: 250 }], rowCount: 1, truncated: false }
+          : {
+              rows: fullRows.slice(0, options.rowLimit),
+              rowCount: options.rowLimit,
+              truncated: true,
+            },
+      ),
+    );
+    mockCanvasInstance = {
+      acquire: vi.fn().mockResolvedValue({ canvasId: 'testCanv01', query }),
     };
-    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue(mockInstance) };
 
     const ctx = createMockContext({ errors: openmeteoDataframeQueryTool.errors });
     const input = openmeteoDataframeQueryTool.input.parse({
@@ -240,10 +265,11 @@ describe('openmeteoDataframeQueryTool', () => {
     });
     const result = await openmeteoDataframeQueryTool.handler(input, ctx);
 
-    expect(result.rows).toHaveLength(100); // preview cap, not the 250 materialized rows
+    expect(query.mock.calls[0]?.[1]).toMatchObject({ rowLimit: 25 });
+    expect(result.rows).toHaveLength(25);
     expect(result.row_count).toBe(250); // true total preserved for paging guidance
     expect(result.rows[0]).toEqual({ i: 0, v: 0 });
-    expect(result.rows[99]).toEqual({ i: 99, v: 198 });
+    expect(result.rows[24]).toEqual({ i: 24, v: 48 });
   });
 
   it('passes canvas_id to canvas.acquire', async () => {
@@ -269,6 +295,7 @@ describe('openmeteoDataframeQueryTool', () => {
       canvas_id: 'testCanv01',
       rows: [],
       row_count: 0,
+      truncated: false,
     });
     expect(firstText(blocks)).toContain('testCanv01');
     expect(firstText(blocks)).toContain('No rows returned');
@@ -282,6 +309,7 @@ describe('openmeteoDataframeQueryTool', () => {
         { time: '2020-02', avg_temp: 2.1 },
       ],
       row_count: 2,
+      truncated: false,
     });
     const text = firstText(blocks) ?? '';
     expect(text).toContain('testCanv01');
@@ -304,11 +332,16 @@ describe('openmeteoDataframeQueryTool', () => {
           { nested: { temp: 3.2, rain: 0 }, values: [3.2, 0] },
         ],
         row_count: 2,
+        truncated: false,
       }),
     );
-    expect(text).toContain('| {"temp":3.6,"rain":0} | [3.6,0] |');
-    expect(text).toContain('| {"temp":3.2,"rain":0} | [3.2,0] |');
+    expect(text).toContain('| {"temp":3.6,"rain":0} | \\[3.6,0\\] |');
+    expect(text).toContain('| {"temp":3.2,"rain":0} | \\[3.2,0\\] |');
     expect(text).not.toContain('[object Object]');
+    expect(gfmTable(text)[1]?.map((cell) => cell.text)).toEqual([
+      '{"temp":3.6,"rain":0}',
+      '[3.6,0]',
+    ]);
   });
 
   it('escapes literal pipes so a cell cannot break the table row', () => {
@@ -320,6 +353,7 @@ describe('openmeteoDataframeQueryTool', () => {
         canvas_id: 'testCanv01',
         rows: [{ nested: { note: 'pipe|test' }, plain: 'a|b' }],
         row_count: 1,
+        truncated: false,
       }),
     );
     expect(text).toContain('| {"note":"pipe\\|test"} | a\\|b |');
@@ -345,6 +379,7 @@ describe('openmeteoDataframeQueryTool', () => {
           },
         ],
         row_count: 1,
+        truncated: false,
       }),
     );
     expect(text).toContain(
@@ -361,22 +396,25 @@ describe('openmeteoDataframeQueryTool', () => {
       canvas_id: 'testCanv01',
       rows,
       row_count: 150,
+      truncated: true,
     });
     const text = firstText(blocks) ?? '';
     expect(text).toContain('Showing first 100 of 150 rows');
     expect(text).toContain('LIMIT / OFFSET');
   });
 
-  it('names the size ceiling and the next OFFSET when fewer than 100 rows fit (#65)', () => {
+  it('names the page as the limit it applied, and the next OFFSET (#65, #94)', () => {
     const text = firstText(
       openmeteoDataframeQueryTool.format!({
         canvas_id: 'testCanv01',
         rows: [{ v: 1 }, { v: 2 }, { v: 3 }],
         row_count: 8784,
+        truncated: true,
       }),
     );
     expect(text).toContain('Showing first 3 of 8784 rows');
-    expect(text).toContain('80,000-character inline ceiling');
+    expect(text).toContain('(limit 3)');
+    expect(text).not.toContain('inline ceiling');
     expect(text).toContain('Continue at OFFSET 3');
     expect(text).not.toContain('OFFSET 100');
   });
@@ -387,10 +425,11 @@ describe('openmeteoDataframeQueryTool', () => {
         canvas_id: 'testCanv01',
         rows: Array.from({ length: 100 }, (_, i) => ({ v: i })),
         row_count: 250,
+        truncated: true,
       }),
     );
     expect(text.split('\n').at(-1)).toBe(
-      '_Showing first 100 of 250 rows (the 100-row inline cap). Continue at OFFSET 100: re-issue the SQL with LIMIT / OFFSET, adding 100 to any OFFSET it already applies and subtracting it from any LIMIT. Page under an ORDER BY: without one, DuckDB guarantees no row order between calls._',
+      '_Showing first 100 of 250 rows (limit 100). Continue at OFFSET 100: re-issue the SQL with LIMIT / OFFSET, adding 100 to any OFFSET it already applies and subtracting it from any LIMIT. Page under an ORDER BY: without one, DuckDB guarantees no row order between calls._',
     );
   });
 
@@ -402,6 +441,315 @@ describe('openmeteoDataframeQueryTool', () => {
     expect(rows).toContain(
       'Page under an ORDER BY: without one, DuckDB guarantees no row order between calls.',
     );
+  });
+});
+
+describe('openmeteoDataframeQueryTool limit (#94)', () => {
+  const WHOLE_ROWS =
+    "Rows come back whole, so a page's size rests on limit and on the columns the SQL selects: from a member-suffixed ensemble table, select only the columns the question needs. A page over 8,000,000 characters of row data fails as result_too_large rather than being cut. A LIMIT in the SQL still applies; the page holds the smaller of the two.";
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetConfig();
+  });
+
+  /** A fresh tool module, so its server config parses the `OPENMETEO_CLAMP_LIMITS` stubbed here. */
+  async function loadTool(clampLimits: string | undefined) {
+    vi.resetModules();
+    vi.stubEnv('OPENMETEO_CLAMP_LIMITS', clampLimits);
+    return (await import('@/mcp-server/tools/definitions/dataframe-query.tool.js'))
+      .openmeteoDataframeQueryTool;
+  }
+
+  /** The `limit` property of the inputSchema tools/list advertises, as it crosses the wire. */
+  function advertisedLimit(tool: typeof openmeteoDataframeQueryTool): unknown {
+    const schema = tool.input['~standard'].jsonSchema.input({ target: 'draft-2020-12' }) as {
+      properties: Record<string, unknown>;
+    };
+    return JSON.parse(JSON.stringify(schema.properties.limit));
+  }
+
+  it('advertises a default of 25 and no maximum while clamping is on', async () => {
+    expect(advertisedLimit(await loadTool(undefined))).toStrictEqual({
+      default: 25,
+      type: 'integer',
+      minimum: 1,
+      description: `Rows to return: the page size. Default 25; a larger value returns at most 10,000 rows and says so. ${WHOLE_ROWS}`,
+    });
+  });
+
+  it('advertises maximum 10000 when OPENMETEO_CLAMP_LIMITS=false', async () => {
+    expect(advertisedLimit(await loadTool('false'))).toStrictEqual({
+      default: 25,
+      type: 'integer',
+      minimum: 1,
+      maximum: 10000,
+      description: `Rows to return: the page size. Default 25, at most 10,000. ${WHOLE_ROWS}`,
+    });
+  });
+
+  it('takes its cap from a lower CANVAS_DEFAULT_ROW_LIMIT in both modes', async () => {
+    resetConfig({ CANVAS_DEFAULT_ROW_LIMIT: '500' });
+    expect(advertisedLimit(await loadTool('false'))).toMatchObject({
+      maximum: 500,
+      description: expect.stringContaining('Default 25, at most 500.'),
+    });
+    expect(advertisedLimit(await loadTool(undefined))).toMatchObject({
+      description: expect.stringContaining('a larger value returns at most 500 rows and says so.'),
+    });
+  });
+
+  it('lowers the default to a cap below 25 in both modes', async () => {
+    resetConfig({ CANVAS_DEFAULT_ROW_LIMIT: '5' });
+    expect(advertisedLimit(await loadTool('false'))).toMatchObject({
+      default: 5,
+      maximum: 5,
+      description: expect.stringContaining('Default 5, at most 5.'),
+    });
+    expect(advertisedLimit(await loadTool(undefined))).toMatchObject({
+      default: 5,
+      description: expect.stringContaining(
+        'Default 5; a larger value returns at most 5 rows and says so.',
+      ),
+    });
+  });
+
+  it('holds the cap at 10,000 when CANVAS_DEFAULT_ROW_LIMIT is higher', async () => {
+    resetConfig({ CANVAS_DEFAULT_ROW_LIMIT: '50000' });
+    expect(advertisedLimit(await loadTool('false'))).toMatchObject({ maximum: 10000 });
+  });
+
+  it('rejects a limit above the cap when OPENMETEO_CLAMP_LIMITS=false, naming the maximum', async () => {
+    const tool = await loadTool('false');
+    const err = await wireError(tool, { canvas_id: 'testCanv01', sql: 'SELECT 1', limit: 20000 });
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.message).toContain('limit');
+    expect(err.message).toContain('10000');
+    expect(err.message).not.toContain('Unrecognized');
+  });
+
+  it.each([
+    ['on', undefined],
+    ['off', 'false'],
+  ])('rejects limit 0 and 2.5 with clamping %s', async (_mode, clampLimits) => {
+    const tool = await loadTool(clampLimits);
+    for (const [limit, problem] of [
+      [0, '>=1'],
+      [2.5, 'int'],
+    ] as const) {
+      const err = await wireError(tool, { canvas_id: 'testCanv01', sql: 'SELECT 1', limit });
+      expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err.message).toContain(problem);
+      expect(err.message).not.toContain('Unrecognized');
+    }
+  });
+});
+
+describe('openmeteoDataframeQueryTool response ceiling', () => {
+  /** Recovery for a page whose first row alone is over the ceiling. */
+  const RETURN_LESS_PER_ROW =
+    'Return less per row: select fewer columns, shorten long strings with left() or substr(), trim long lists with list_slice(), or aggregate.';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /** Serves `rows` as a data-query page with more rows behind it; returns the canvas query spy. */
+  function serve(rows: Record<string, unknown>[]) {
+    const query = vi.fn((sql: string) =>
+      Promise.resolve(
+        sql.startsWith('SELECT COUNT(*)')
+          ? { rows: [{ n: 1000 }], rowCount: 1, truncated: false }
+          : { rows, rowCount: rows.length, truncated: true },
+      ),
+    );
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'testCanv01', query }) };
+    return query;
+  }
+
+  /** The failed call's error envelope, and its content[] text as a CommonMark parse reads it. */
+  async function failure() {
+    const result = await runToolContract(openmeteoDataframeQueryTool, {
+      canvas_id: 'testCanv01',
+      sql: 'SELECT * FROM t',
+    });
+    expect(result.isError).toBe(true);
+    return {
+      error: (result.structuredContent as { error: WireError }).error,
+      raw: firstText(result.content),
+      text: renderedText(firstText(result.content)),
+    };
+  }
+
+  it('refuses a page over 8,000,000 characters of row data on both surfaces, naming the rows that fit', async () => {
+    const query = serve(['a', 'b', 'c'].map((ch) => ({ note: ch.repeat(3_000_000) })));
+    const { error, text } = await failure();
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message:
+        'This page of 3 rows holds more than 8,000,000 characters of row data, the most one response carries, and rows are never cut; its first 2 rows fit.',
+      data: {
+        reason: 'result_too_large',
+        retryable: false,
+        recovery: {
+          hint: 'Set limit to 2 or less and page the rest with LIMIT / OFFSET, or select fewer columns.',
+        },
+      },
+    });
+    expect(text.split('\n').slice(0, 3)).toEqual([
+      `Error: ${error.message}`,
+      `Recovery: ${error.data?.recovery?.hint}`,
+      '(reason result_too_large · not retryable)',
+    ]);
+    // The data query ran; the COUNT(*) behind a truncated page never did.
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('says the first row fits when only it does', async () => {
+    serve([{ note: 'a'.repeat(5_000_000) }, { note: 'b'.repeat(5_000_000) }]);
+    const { error } = await failure();
+    expect(error.message).toBe(
+      'This page of 2 rows holds more than 8,000,000 characters of row data, the most one response carries, and rows are never cut; its first row fits.',
+    );
+    expect(error.data?.recovery?.hint).toBe(
+      'Set limit to 1 or less and page the rest with LIMIT / OFFSET, or select fewer columns.',
+    );
+  });
+
+  it.each([
+    ['a one-row page', [{ note: 'x'.repeat(8_000_001) }]],
+    ['a page whose first row alone is over', [{ note: 'x'.repeat(8_000_001) }, { note: 'y' }]],
+  ])('tells %s to return less per row, not to lower limit', async (_page, rows) => {
+    const query = serve(rows);
+    const { error, raw, text } = await failure();
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message:
+        'The first row alone holds more than 8,000,000 characters of row data, the most one response carries, and rows are never cut.',
+      data: { reason: 'result_too_large', recovery: { hint: RETURN_LESS_PER_ROW } },
+    });
+    expect(text).toContain(`Recovery: ${RETURN_LESS_PER_ROW}`);
+    expect(raw).not.toContain('limit');
+    expect(raw).not.toContain('xxxxxxxxxx');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('declares result_too_large as the ValidationError the previous row_too_large was, not retryable', () => {
+    expect(
+      openmeteoDataframeQueryTool.errors?.find((e) => e.reason === 'result_too_large'),
+    ).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      retryable: false,
+      when: expect.stringContaining('8,000,000 characters of row data'),
+    });
+    expect(openmeteoDataframeQueryTool.description).toContain(
+      'One response carries at most 8,000,000 characters of row data',
+    );
+  });
+
+  describe('relayed error text', () => {
+    /** A canvas whose data query rejects with `err`. */
+    function failWith(err: unknown) {
+      mockCanvasInstance = {
+        acquire: vi.fn().mockResolvedValue({
+          canvasId: 'testCanv01',
+          query: vi.fn().mockRejectedValue(err),
+        }),
+      };
+    }
+
+    const marker = (length: number) =>
+      ` … (cut to 2,000 of ${length.toLocaleString('en-US')} characters)`;
+
+    it('cuts a relayed engine message and the data field quoting it to 2,000 characters, keeping code, reason, and recovery', async () => {
+      const binderMessage = `Binder Error: Referenced column "${'a'.repeat(10_000)}" not found in FROM clause!`;
+      const message = `Canvas query failed to prepare: ${binderMessage}`;
+      failWith(
+        validationError(message, {
+          reason: 'invalid_sql',
+          statementType: 'UNKNOWN',
+          binderMessage,
+          recovery: { hint: 'Correct the column name the message reports missing.' },
+        }),
+      );
+      const { error, text } = await failure();
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toMatchObject({
+        reason: 'invalid_sql',
+        statementType: 'UNKNOWN',
+        recovery: { hint: 'Correct the column name the message reports missing.' },
+      });
+      expect(error.message).toHaveLength(2_000);
+      expect(
+        error.message.startsWith(
+          'Canvas query failed to prepare: Binder Error: Referenced column "aaa',
+        ),
+      ).toBe(true);
+      expect(error.message.endsWith(marker(message.length))).toBe(true);
+      const quoted = error.data?.binderMessage as string;
+      expect(quoted).toHaveLength(2_000);
+      expect(quoted.endsWith(marker(binderMessage.length))).toBe(true);
+      expect(text.split('\n')[0]).toBe(`Error: ${error.message}`);
+    });
+
+    it('relays a message of exactly 2,000 characters whole and cuts one of 2,001', async () => {
+      const whole = `Canvas query failed: Invalid Input Error: ${'x'.repeat(2_000 - 42)}`;
+      expect(whole).toHaveLength(2_000);
+      failWith(validationError(whole, { reason: 'sql_execution_error' }));
+      expect((await failure()).error.message).toBe(whole);
+
+      failWith(validationError(`${whole}y`, { reason: 'sql_execution_error' }));
+      const { error } = await failure();
+      expect(error.message).toHaveLength(2_000);
+      expect(error.message.endsWith(marker(2_001))).toBe(true);
+      expect(error.data?.reason).toBe('sql_execution_error');
+    });
+
+    it.each([
+      ['an even', ''],
+      ['an odd', 'x'],
+    ])('cuts on a code-point boundary at %s offset', async (_parity, lead) => {
+      const message = `${lead}${'😀'.repeat(3_000)}`;
+      failWith(validationError(message, { reason: 'sql_execution_error' }));
+      const { error } = await failure();
+      expect(error.message.isWellFormed()).toBe(true);
+      const [head, tail] = error.message.split(' … (cut to ');
+      expect(message.startsWith(head ?? '')).toBe(true);
+      expect(`(cut to ${tail}`).toBe(marker(message.length).slice(3));
+      expect(error.message.length).toBeGreaterThanOrEqual(1_999);
+      expect(error.message.length).toBeLessThanOrEqual(2_000);
+    });
+
+    it('cuts the error a cancelled count rethrows', async () => {
+      const controller = new AbortController();
+      const long = `Canvas query failed: Invalid Input Error: ${'x'.repeat(50_000)}`;
+      const query = vi.fn((sql: string) => {
+        if (!sql.startsWith('SELECT COUNT(*)')) {
+          return Promise.resolve({ rows: [{ v: 1 }], rowCount: 1, truncated: true });
+        }
+        controller.abort();
+        return Promise.reject(validationError(long, { reason: 'sql_execution_error' }));
+      });
+      mockCanvasInstance = {
+        acquire: vi.fn().mockResolvedValue({ canvasId: 'testCanv01', query }),
+      };
+      const ctx = createMockContext({
+        signal: controller.signal,
+        errors: openmeteoDataframeQueryTool.errors,
+      });
+      const input = openmeteoDataframeQueryTool.input.parse({
+        canvas_id: 'testCanv01',
+        sql: 'SELECT v FROM t',
+      });
+      const outcome = await Promise.resolve(openmeteoDataframeQueryTool.handler(input, ctx)).then(
+        () => undefined,
+        (err: unknown) => err as { code: number; message: string; data?: { reason?: string } },
+      );
+      expect(outcome?.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(outcome?.data?.reason).toBe('sql_execution_error');
+      expect(outcome?.message).toHaveLength(2_000);
+      expect(outcome?.message.endsWith(marker(long.length))).toBe(true);
+    });
   });
 });
 
@@ -441,19 +789,25 @@ describe('openmeteoDataframeQueryTool content[] cell encoding (#66)', () => {
         canvas_id: 'testCanv01',
         rows,
         row_count: rows.length,
+        truncated: false,
       }),
     );
 
-  it('keeps a newline-bearing value on one table row, escaped', () => {
+  /** Each table line's cells as a GFM parse reads them. */
+  const parsed = (text: string) => gfmTable(text).map((row) => row.map((cell) => cell.text));
+
+  it('keeps a newline-bearing value on one table row, read back whole', () => {
     const text = render([{ note: '<b>**A**\nB</b>' }]);
-    expect(tableLines(text)).toEqual(['| note |', '| --- |', '| <b>**A**\\nB</b> |']);
+    expect(tableLines(text)).toEqual(['| note |', '| --- |', '| \\<b>\\*\\*A\\*\\*&#10;B\\</b> |']);
+    expect(parsed(text)).toEqual([['note'], ['<b>**A**\nB</b>']]);
   });
 
   it('escapes pipes and newlines in column names so the header parses as a table', () => {
     const text = render([{ 'a|b': 1, 'line\nbreak': 'x' }]);
     const lines = tableLines(text);
-    expect(lines[0]).toBe('| a\\|b | line\\nbreak |');
+    expect(lines[0]).toBe('| a\\|b | line&#10;break |');
     expect(lines.map((line) => gfmCells(line).length)).toEqual([2, 2, 2]);
+    expect(parsed(text)[0]).toEqual(['a|b', 'line\nbreak']);
   });
 
   it('renders the empty string as "" and null as an empty cell', () => {
@@ -461,46 +815,47 @@ describe('openmeteoDataframeQueryTool content[] cell encoding (#66)', () => {
     expect(tableLines(text)[2]).toBe('|  | "" |');
   });
 
-  it('escapes backslashes, carriage returns, and quotes with JSON string escaping', () => {
-    const text = render([{ bs: 'x\\|y', crlf: '\r\n', q: 'say "hi"', tab: 'a\tb' }]);
+  it('reads back backslashes, carriage returns, quotes, and tabs as written', () => {
+    const values = { bs: 'x\\|y', crlf: '\r\n', q: 'say "hi"', tab: 'a\tb' };
+    const text = render([values]);
     const row = tableLines(text)[2] ?? '';
-    expect(row).toBe('| x\\\\\\|y | \\r\\n | say \\"hi\\" | a\\tb |');
-    // The escaped backslash is consumed as its own pair, so the pipe stays escaped:
-    // one cell per column, and the cell reads back as the original value.
+    expect(row).toBe('| x\\\\\\|y | &#13;&#10; | say "hi" | a\tb |');
+    // The escaped backslash is consumed as its own pair, so the pipe stays escaped.
     expect(gfmCells(row)).toHaveLength(4);
+    expect(parsed(text)[1]).toEqual(Object.values(values));
   });
 
-  describe('characters JSON escaping leaves bare', () => {
-    /** The `\uXXXX` escape text a cell carries in place of the character `code`. */
-    const escapeOf = (code: number) => `\\u${code.toString(16).padStart(4, '0')}`;
+  describe('characters a table cell would split or trim', () => {
     const LINE_SEPARATOR = String.fromCharCode(0x2028);
     const PARAGRAPH_SEPARATOR = String.fromCharCode(0x2029);
     const NBSP = String.fromCharCode(0xa0);
-    const SPACE = escapeOf(0x20);
 
     it.each([
-      ['a line separator', `a${LINE_SEPARATOR}b`, `a${escapeOf(0x2028)}b`],
-      ['a paragraph separator', `a${PARAGRAPH_SEPARATOR}b`, `a${escapeOf(0x2029)}b`],
-      ['a lone no-break space', NBSP, escapeOf(0xa0)],
-      ['a no-break space between words', `a${NBSP}b`, `a${escapeOf(0xa0)}b`],
-      ['a single space', ' ', SPACE],
-      ['leading and trailing spaces', '  pad  ', `${SPACE}${SPACE}pad${SPACE}${SPACE}`],
+      ['a line separator', `a${LINE_SEPARATOR}b`, 'a&#8232;b'],
+      ['a paragraph separator', `a${PARAGRAPH_SEPARATOR}b`, 'a&#8233;b'],
+      ['a lone no-break space', NBSP, '&#160;'],
+      ['a no-break space between words', `a${NBSP}b`, `a${NBSP}b`],
+      ['a single space', ' ', '&#32;'],
+      ['leading and trailing spaces', '  pad  ', '&#32;&#32;pad&#32;&#32;'],
       ['a space inside a value', 'a b', 'a b'],
-    ])('renders %s as its escape, on one row the parser cannot trim', (_label, value, cell) => {
-      const lines = tableLines(render([{ v: value, n: null }]));
+    ])('renders %s on one row the parser cannot trim', (_label, value, cell) => {
+      const text = render([{ v: value, n: null }]);
+      const lines = tableLines(text);
       expect(lines[2]).toBe(`| ${cell} |  |`);
       expect(lines).toHaveLength(3);
+      expect(parsed(text)[1]).toEqual([value, '']);
     });
 
     it('keeps a single space distinct from null and from the empty string', () => {
-      const lines = tableLines(render([{ space: ' ', empty: '', missing: null }]));
-      expect(lines[2]).toBe(`| ${SPACE} | "" |  |`);
-      expect(gfmCells(lines[2] ?? '')).toEqual([SPACE, '""', '']);
+      const text = render([{ space: ' ', empty: '', missing: null }]);
+      expect(tableLines(text)[2]).toBe('| &#32; | "" |  |');
+      expect(parsed(text)[1]).toEqual([' ', '""', '']);
     });
 
-    it('escapes the same characters in a column name', () => {
-      const lines = tableLines(render([{ ' padded ': 1, [`x${LINE_SEPARATOR}y`]: 2 }]));
-      expect(lines[0]).toBe(`| ${SPACE}padded${SPACE} | x${escapeOf(0x2028)}y |`);
+    it('encodes the same characters in a column name', () => {
+      const text = render([{ ' padded ': 1, [`x${LINE_SEPARATOR}y`]: 2 }]);
+      expect(tableLines(text)[0]).toBe('| &#32;padded&#32; | x&#8232;y |');
+      expect(parsed(text)[0]).toEqual([' padded ', `x${LINE_SEPARATOR}y`]);
     });
   });
 
@@ -515,7 +870,172 @@ describe('openmeteoDataframeQueryTool content[] cell encoding (#66)', () => {
       sql: 'SELECT 1',
     });
     expect((result.structuredContent as { rows: unknown[] }).rows).toEqual(rows);
-    expect(tableLines(firstText(result.content))[2]).toBe('| a\\|b\\nc | "" |  |');
+    expect(tableLines(firstText(result.content))[2]).toBe('| a\\|b&#10;c | "" |  |');
+  });
+});
+
+describe('openmeteoDataframeQueryTool content[] round trip (#86)', () => {
+  const render = (rows: Record<string, unknown>[]) =>
+    firstText(
+      openmeteoDataframeQueryTool.format!({
+        canvas_id: 'testCanv01',
+        rows,
+        row_count: rows.length,
+        truncated: false,
+      }),
+    );
+
+  /** The text a reader should see for `value`: itself, `""` for the empty string, JSON for a struct or list. */
+  const readsAs = (value: unknown) =>
+    value === null
+      ? ''
+      : value === ''
+        ? '""'
+        : typeof value === 'object'
+          ? JSON.stringify(value)
+          : String(value);
+
+  /**
+   * Asserts `value` reads back exactly, with no markup opened, as a cell and — when it
+   * is a string — as a header, under both HTML settings, every row keeping two columns.
+   */
+  function expectRoundTrip(value: unknown) {
+    const asCell = render([{ v: value, n: null }]);
+    const asHeader =
+      typeof value === 'string' && value !== '' ? render([{ [value]: 1, k: 2 }]) : undefined;
+    for (const html of [false, true]) {
+      const cells = gfmTable(asCell, { html });
+      expect(cells.map((row) => row.length)).toEqual([2, 2]);
+      expect(cells[1]).toEqual([
+        { text: readsAs(value), markup: [] },
+        { text: '', markup: [] },
+      ]);
+      if (asHeader === undefined) continue;
+      const headers = gfmTable(asHeader, { html });
+      expect(headers.map((row) => row.length)).toEqual([2, 2]);
+      expect(headers[0]?.[0]).toEqual({ text: value, markup: [] });
+    }
+  }
+
+  const LINE_SEPARATOR = String.fromCharCode(0x2028);
+  const PARAGRAPH_SEPARATOR = String.fromCharCode(0x2029);
+  const NBSP = String.fromCharCode(0xa0);
+
+  /** Markdown syntax, entities, and line terminators: each read as something else before #86. */
+  const SYNTAX_VALUES: [string, unknown][] = [
+    ['emphasis', '*x*'],
+    ['underscore emphasis', '_a_b_'],
+    ['strong emphasis', '__x__'],
+    ['a code span', 'a `code` b'],
+    ['a link', '[t](u)'],
+    ['an image', '![a](b)'],
+    ['strikethrough', '~~s~~'],
+    ['inline HTML', '<b>x</b>'],
+    ['an autolink', '<http://x.io>'],
+    ['an email autolink', '<a@b.io>'],
+    ['a backslash before a pipe', 'x\\|y'],
+    ['an entity', '&copy;'],
+    ['a numeric character reference', '&#10;'],
+    ['a leading heading marker', '# h'],
+    ['a leading list marker', '- item'],
+    ['a leading ordered-list marker', '1. x'],
+    ['a thematic break', '---'],
+    ['a newline', 'a\nb'],
+    ['a CRLF', 'a\r\nb'],
+    ['a carriage return', 'a\rb'],
+    ['a trailing newline', 'a\n'],
+    ['a backslash before a newline', 'a\\\nb'],
+    ['a tab', 'a\tb'],
+    ['edge spaces', '  pad  '],
+    ['a single space', ' '],
+    ['a lone no-break space', NBSP],
+    ['a line separator', `a${LINE_SEPARATOR}b`],
+    ['a paragraph separator', `a${PARAGRAPH_SEPARATOR}b`],
+    ['edge pipes', '|a|'],
+    ['a struct holding Markdown', { s: '`x`', l: ['[t](u)', null], note: 'a*b|c' }],
+    ['a list holding Markdown', ['*a*', '~~b~~', 1]],
+  ];
+
+  describe('values carrying Markdown syntax or line breaks', () => {
+    it.each(SYNTAX_VALUES)('%s', (_label, value) => expectRoundTrip(value));
+  });
+
+  describe('running time over caller-sized cells', () => {
+    /** Generous per-character CPU ceiling for rendering one cell and its header. */
+    const CPU_MICROS_PER_CHAR = 2;
+    const BASE = 5_000;
+
+    /**
+     * Shapes grown by doubling from 5k characters: the digit run to 320k, the full 64×
+     * span, and every other shape to 80k.
+     */
+    const SHAPES: [string, (size: number) => string, number][] = [
+      ['a repeated opener with no closer', (size) => '['.repeat(size), 80_000],
+      ['repeated backticks', (size) => '`'.repeat(size), 80_000],
+      ['nested openers', (size) => '[!['.repeat(size / 3), 80_000],
+      ['overlapping prefixes', (size) => '&#'.repeat(size / 2), 80_000],
+      ['overlapping tag prefixes', (size) => '<a'.repeat(size / 2), 80_000],
+      ['a whitespace run inside one line', (size) => `a${' '.repeat(size)}b`, 80_000],
+      ['one long line ending in a break', (size) => `${'§1 x'.repeat(size / 4)}\ny`, 80_000],
+      ['breaks throughout', (size) => '  \r\n'.repeat(size / 4), 80_000],
+      ['a long digit run', (size) => '1'.repeat(size), 320_000],
+    ];
+
+    it.each(SHAPES)('stays linear on %s', (_shape, build, largest) => {
+      const timeAt = (size: number) => {
+        const value = build(size);
+        const rows = [{ [value]: value }];
+        return cpuMicrosPerCall(() => render(rows), Math.max(4, Math.ceil(400_000 / size)));
+      };
+
+      const base = timeAt(BASE);
+      expect(base).toBeLessThan(BASE * CPU_MICROS_PER_CHAR);
+      let atLargest = base;
+      for (let size = BASE * 2; size <= largest; size *= 2) {
+        atLargest = timeAt(size);
+        expect(atLargest, `${size} characters`).toBeLessThan(size * CPU_MICROS_PER_CHAR);
+      }
+
+      // Linear growth over the span is its own size; quadratic would be its square.
+      const span = largest / BASE;
+      expect(atLargest / base).toBeLessThan(4 * span);
+    });
+  });
+
+  it('leaves structuredContent rows exactly as the canvas returned them', async () => {
+    const rows = [Object.fromEntries(SYNTAX_VALUES.map(([label, value]) => [label, value]))];
+    const query = vi.fn().mockResolvedValue({ rows, rowCount: 1 });
+    mockCanvasInstance = {
+      acquire: vi.fn().mockResolvedValue({ canvasId: 'testCanv01', query }),
+    };
+    const result = await runToolContract(openmeteoDataframeQueryTool, {
+      canvas_id: 'testCanv01',
+      sql: 'SELECT 1',
+    });
+    expect((result.structuredContent as { rows: unknown[] }).rows).toStrictEqual(
+      structuredClone(rows),
+    );
+    const table = gfmTable(firstText(result.content));
+    expect(table[1]?.map((cell) => cell.text)).toEqual(SYNTAX_VALUES.map(([, v]) => readsAs(v)));
+  });
+
+  describe('values that already read back as themselves', () => {
+    it.each([
+      ['an intraword underscore', 'a_b_c'],
+      ['double quotes', 'say "hi"'],
+      ['a backslash before a star', 'x\\*y'],
+      ['a backslash before a letter', 'x\\y'],
+      ['a lone backslash', '\\'],
+      ['a pipe', 'a|b'],
+      ['a BIGINT marshaled as a string', '123456789012345'],
+      ['a timestamp', '2020-01-01 00:00:00'],
+      ['the empty string', ''],
+      ['null', null],
+      ['a number', -2.3],
+      ['a boolean', true],
+      ['a plain struct', { temp: 3.6, rain: 0 }],
+      ['a plain list', [3.6, 0]],
+    ])('%s', (_label, value) => expectRoundTrip(value));
   });
 });
 
@@ -592,14 +1112,19 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
     vi.restoreAllMocks();
   });
 
-  const run = (sql: string) =>
+  const run = (sql: string, limit?: number) =>
     runToolContract(
       openmeteoDataframeQueryTool,
-      { canvas_id: canvasId, sql },
+      { canvas_id: canvasId, sql, ...(limit === undefined ? {} : { limit }) },
       { context: { tenantId: TENANT } },
     );
 
-  type Structured = { rows: Record<string, unknown>[]; row_count: number; count_error?: string };
+  type Structured = {
+    rows: Record<string, unknown>[];
+    row_count: number;
+    count_error?: string;
+    truncated: boolean;
+  };
 
   /** Both serialized surfaces, plus every content[] block the framework emits. */
   function surfaces(result: Awaited<ReturnType<typeof run>>) {
@@ -618,48 +1143,29 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
     };
   }
 
-  describe('inline size ceiling (#65)', () => {
-    it('fails a first row wider than the ceiling as row_too_large, with no partial value', async () => {
-      const err = await wireError(
-        openmeteoDataframeQueryTool,
-        { canvas_id: canvasId, sql: "SELECT repeat('x', 150000) AS note" },
-        { context: { tenantId: TENANT } },
-      );
-      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
-      expect(err.data?.reason).toBe('row_too_large');
-      expect(err.message).toMatch(/needs 150,0\d\d characters inline/);
-      expect(err.data?.recovery?.hint).toContain('left()');
-      expect(err.data?.recovery?.hint).toContain('list_slice()');
-      expect(JSON.stringify(err)).not.toContain('x'.repeat(100));
+  describe('whole rows, never cut (#65, #94)', () => {
+    it('returns a 150,000-character value whole on both surfaces', async () => {
+      const s = surfaces(await run("SELECT repeat('x', 150000) AS note"));
+      expect(s.structured.rows).toEqual([{ note: 'x'.repeat(150_000) }]);
+      expect(gfmTable(s.text)[1]?.[0]?.text).toBe('x'.repeat(150_000));
     });
 
-    it('takes whole wide rows up to the ceiling on both surfaces, never cutting a value', async () => {
+    it('returns limit wide rows whole on both surfaces, with the continuation', async () => {
       const result = await run("SELECT repeat('x', 10000) AS note FROM hist");
       const s = surfaces(result);
-      expect(s.structuredChars).toBeLessThanOrEqual(INLINE_CHARS);
-      expect(s.textChars).toBeLessThanOrEqual(INLINE_CHARS);
       expect(s.blocks).toBe(1);
-      expect(s.contentTotal).toBeLessThanOrEqual(INLINE_CHARS);
-      const shown = s.structured.rows.length;
-      expect(shown).toBeGreaterThan(0);
-      expect(shown).toBeLessThan(100);
-      // Tight packing: one more 10,000-character row would have crossed the ceiling.
-      expect(s.textChars + 10_000).toBeGreaterThan(INLINE_CHARS);
+      expect(s.structured.rows).toHaveLength(25);
       for (const row of s.structured.rows) expect(row.note).toHaveLength(10_000);
       expect(s.structured.row_count).toBe(8784);
-      expect(tableLines(s.text)).toHaveLength(shown + 2);
-      expect(s.text).toContain(`Showing first ${shown} of 8784 rows`);
-      expect(s.text).toContain('80,000-character inline ceiling');
-      expect(s.text).toContain(`Continue at OFFSET ${shown}`);
+      expect(tableLines(s.text)).toHaveLength(27);
+      expect(s.text).toContain('Showing first 25 of 8784 rows (limit 25)');
+      expect(s.text).toContain('Continue at OFFSET 25');
     });
 
-    it('bounds SELECT * on a 154-column ensemble table with identical rows on both surfaces', async () => {
+    it('returns SELECT * on a 154-column ensemble table as 25 identical rows on both surfaces', async () => {
       const s = surfaces(await run('SELECT * FROM ens'));
-      expect(s.structuredChars).toBeLessThanOrEqual(INLINE_CHARS);
-      expect(s.textChars).toBeLessThanOrEqual(INLINE_CHARS);
       const shown = s.structured.rows.length;
-      expect(shown).toBeGreaterThan(0);
-      expect(shown).toBeLessThan(100);
+      expect(shown).toBe(25);
       expect(s.structured.row_count).toBe(168);
       const lines = tableLines(s.text);
       expect(lines).toHaveLength(shown + 2);
@@ -669,36 +1175,31 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
       });
     });
 
-    it('reserves room for the size notice when a result under 100 rows does not fit whole', async () => {
-      // Eight rows fill the ceiling with less slack than the notice takes, and the exact
-      // row_count (50) is under the row cap, so only the size-ceiling notice can appear.
-      const width = Math.floor((INLINE_CHARS - 200) / 8) - 12;
-      const s = surfaces(await run(`SELECT repeat('x', ${width}) AS note FROM hist LIMIT 50`));
+    it('returns the first limit of 50 wide rows under a SQL LIMIT, with the continuation', async () => {
+      const s = surfaces(await run(`SELECT repeat('x', 9000) AS note FROM hist LIMIT 50`));
       expect(s.structured.row_count).toBe(50);
-      expect(s.structured.rows.length).toBeLessThan(50);
-      expect(s.text).toContain(`Showing first ${s.structured.rows.length} of 50 rows`);
-      expect(s.textChars).toBeLessThanOrEqual(INLINE_CHARS);
-      expect(s.contentTotal).toBeLessThanOrEqual(INLINE_CHARS);
+      expect(s.structured.rows).toHaveLength(25);
+      expect(s.text).toContain('Showing first 25 of 50 rows');
     });
 
-    it('charges a row its rendered line when escaping makes it wider than its JSON', async () => {
-      // 30,000 pipes: ~30,000 characters of JSON but ~60,000 rendered (`\|` each), so a
-      // JSON-only charge would admit both rows and render ~120,000 characters.
+    it('returns both 30,000-pipe rows whole, each pipe reading back as itself', async () => {
       const s = surfaces(await run("SELECT repeat('|', 30000) AS p FROM u ORDER BY k LIMIT 2"));
-      expect(s.structured.rows).toHaveLength(1);
+      expect(s.structured.rows).toHaveLength(2);
       expect(s.structured.row_count).toBe(2);
-      expect(s.textChars).toBeLessThanOrEqual(INLINE_CHARS);
-      expect(s.text).toContain('Continue at OFFSET 1');
+      expect(s.text).not.toContain('Continue at OFFSET');
+      expect(gfmTable(s.text).map((row) => row.map((cell) => cell.text))).toEqual([
+        ['p'],
+        ['|'.repeat(30_000)],
+        ['|'.repeat(30_000)],
+      ]);
     });
 
-    it('charges a row its JSON when long column names make it wider than its rendered line', async () => {
-      // The alias repeats in every JSON row but renders once, in the header.
+    it('returns limit rows under a 1,000-character alias, which renders once in the header', async () => {
       const alias = 'a'.repeat(1_000);
       const s = surfaces(await run(`SELECT temperature_2m AS "${alias}" FROM hist`));
-      expect(s.structuredChars).toBeLessThanOrEqual(INLINE_CHARS);
-      expect(s.structured.rows.length).toBeGreaterThan(0);
-      expect(s.structured.rows.length).toBeLessThan(100);
+      expect(s.structured.rows).toHaveLength(25);
       expect(s.structured.row_count).toBe(8784);
+      expect(gfmTable(s.text)[0]?.map((cell) => cell.text)).toEqual([alias]);
     });
 
     it('returns a 12-row monthly aggregate whole, with no notice', async () => {
@@ -712,18 +1213,22 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
       expect(s.text).not.toContain('Showing first');
     });
 
-    it('returns the first 100 of 8784 rows for SELECT * over a one-variable hourly table', async () => {
+    it('returns the first 25 of 8784 rows by default for SELECT * over a one-variable hourly table', async () => {
       const s = surfaces(await run('SELECT * FROM hist'));
-      expect(s.structured.rows).toHaveLength(100);
+      expect(s.structured.rows).toHaveLength(25);
       expect(s.structured.row_count).toBe(8784);
-      expect(s.text).toContain('Showing first 100 of 8784 rows');
+      expect(s.structured.truncated).toBe(true);
+      expect(s.text).toContain('**Rows:** 8784 | **Truncated:** true');
+      expect(s.structured).not.toHaveProperty('notice');
+      expect(s.text.split('\n').at(-1)).toBe(
+        '_Showing first 25 of 8784 rows (limit 25). Continue at OFFSET 25: re-issue the SQL with LIMIT / OFFSET, adding 25 to any OFFSET it already applies and subtracting it from any LIMIT. Page under an ORDER BY: without one, DuckDB guarantees no row order between calls._',
+      );
     });
 
     it('returns a whole-year list() as one row', async () => {
       const s = surfaces(await run('SELECT list(temperature_2m) AS temps FROM hist'));
       expect(s.structured.rows).toHaveLength(1);
       expect(s.structured.rows[0]?.temps).toHaveLength(8784);
-      expect(s.structuredChars).toBeLessThanOrEqual(INLINE_CHARS);
     });
 
     it('returns a left()-shortened value whole', async () => {
@@ -906,27 +1411,27 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
       const s = surfaces(await run('SELECT * FROM hist CROSS JOIN u'));
       expect(s.structured.row_count).toBe(26352);
       expect(s.structured.count_error).toBeUndefined();
-      expect(s.structured.rows).toHaveLength(100);
-      expect(s.text).toContain('Showing first 100 of 26352 rows');
+      expect(s.structured.rows).toHaveLength(25);
+      expect(s.text).toContain('Showing first 25 of 26352 rows');
     });
 
-    it('materializes no more rows than the preview, then counts through the same gate', async () => {
+    it('materializes no more rows than the page, then counts through the same gate', async () => {
       const query = vi.spyOn(provider, 'query');
       await run('SELECT * FROM hist CROSS JOIN u;\n ');
       expect(query).toHaveBeenCalledTimes(2);
       const [dataCall, countCall] = query.mock.calls;
-      expect(dataCall?.[3]).toMatchObject({ rowLimit: 100, denySystemCatalogs: true });
+      expect(dataCall?.[3]).toMatchObject({ rowLimit: 25, denySystemCatalogs: true });
       const dataResult = await query.mock.results[0]?.value;
-      expect(dataResult.rows.length).toBeLessThanOrEqual(100);
+      expect(dataResult.rows.length).toBeLessThanOrEqual(25);
       expect(countCall?.[1]).toBe(
         'SELECT COUNT(*) AS n FROM (\nSELECT * FROM hist CROSS JOIN u\n)',
       );
       expect(countCall?.[3]).toMatchObject({ denySystemCatalogs: true });
     });
 
-    it('runs no count query when the result fits the preview', async () => {
+    it('runs no count query when the result fits the page', async () => {
       const query = vi.spyOn(provider, 'query');
-      const s = surfaces(await run('SELECT * FROM hist LIMIT 100'));
+      const s = surfaces(await run('SELECT * FROM hist LIMIT 100', 100));
       expect(query).toHaveBeenCalledTimes(1);
       expect(s.structured.rows).toHaveLength(100);
       expect(s.structured.row_count).toBe(100);
@@ -937,11 +1442,11 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
       // The trailing comment after `;` passes on its own but leaves the wrapped
       // count unparseable — a real count-only failure.
       const s = surfaces(await run('SELECT * FROM hist; -- whole year'));
-      expect(s.structured.rows).toHaveLength(100);
-      expect(s.structured.row_count).toBe(101);
+      expect(s.structured.rows).toHaveLength(25);
+      expect(s.structured.row_count).toBe(26);
       expect(s.structured.count_error).toBe('invalid_sql');
-      expect(s.text).toContain('at least 101 (the full result could not be counted: invalid_sql)');
-      expect(s.text).toContain('Showing first 100 of at least 101 rows');
+      expect(s.text).toContain('at least 26 (the full result could not be counted: invalid_sql)');
+      expect(s.text).toContain('Showing first 25 of at least 26 rows');
     });
 
     it('reports the count failure reason the canvas raised', async () => {
@@ -957,13 +1462,13 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
             ),
       );
       const s = surfaces(await run('SELECT * FROM hist'));
-      expect(s.structured).toMatchObject({ row_count: 101, count_error: 'sql_execution_error' });
-      expect(s.structured.rows).toHaveLength(100);
+      expect(s.structured).toMatchObject({ row_count: 26, count_error: 'sql_execution_error' });
+      expect(s.structured.rows).toHaveLength(25);
     });
 
     /**
-     * A three-way cross join of the staged tables: 231 million rows the preview streams
-     * its first 100 of at once, and that a full COUNT(*) takes far longer than the
+     * A three-way cross join of the staged tables: 231 million rows the page streams
+     * its first 25 of at once, and that a full COUNT(*) takes far longer than the
      * shortened budget to walk. The canvas interrupts the real DuckDB statement.
      */
     const SLOW_COUNT_SQL =
@@ -975,12 +1480,10 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
         .spyOn(AbortSignal, 'timeout')
         .mockImplementation((ms) => realTimeout(ms === 5_000 ? 25 : ms));
       const s = surfaces(await run(SLOW_COUNT_SQL));
-      expect(s.structured.rows).toHaveLength(100);
-      expect(s.structured).toMatchObject({ row_count: 101, count_error: 'count_timeout' });
-      expect(s.text).toContain(
-        'at least 101 (the full result could not be counted: count_timeout)',
-      );
-      expect(s.text).toContain('Showing first 100 of at least 101 rows');
+      expect(s.structured.rows).toHaveLength(25);
+      expect(s.structured).toMatchObject({ row_count: 26, count_error: 'count_timeout' });
+      expect(s.text).toContain('at least 26 (the full result could not be counted: count_timeout)');
+      expect(s.text).toContain('Showing first 25 of at least 26 rows');
       expect(budget).toHaveBeenCalledWith(5_000);
     });
 
@@ -1034,5 +1537,377 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
       expect(err.data?.reason).toBe(reason);
       expect(query).toHaveBeenCalledTimes(1);
     });
+  });
+
+  describe('paging (#94)', () => {
+    /** The canvas's own read of `sql`, under its 10,000-row limit — independent of the tool. */
+    const directRows = async (sql: string) =>
+      (await canvas.acquire(canvasId, createMockContext({ tenantId: TENANT }))).query(sql);
+
+    /**
+     * Walks `SELECT * FROM hist ORDER BY time LIMIT <limit> OFFSET <offset>` the way the
+     * continuation notice directs: each page's OFFSET grows by the rows it showed and its
+     * LIMIT shrinks by them, until a page carries no notice.
+     */
+    async function walk(sqlLimit: number, sqlOffset: number, limit?: number) {
+      const pages: number[] = [];
+      const rows: Record<string, unknown>[] = [];
+      let remaining = sqlLimit;
+      let offset = sqlOffset;
+      for (;;) {
+        const s = surfaces(
+          await run(`SELECT * FROM hist ORDER BY time LIMIT ${remaining} OFFSET ${offset}`, limit),
+        );
+        rows.push(...s.structured.rows);
+        pages.push(s.structured.rows.length);
+        const next = /Continue at OFFSET (\d+)/.exec(s.text);
+        if (!next) return { pages, rows };
+        const shown = Number(next[1]);
+        expect(shown).toBe(s.structured.rows.length);
+        expect(s.structured.row_count).toBe(remaining);
+        remaining -= shown;
+        offset += shown;
+      }
+    }
+
+    it.each([
+      [150, 0],
+      [150, 20],
+    ])(
+      'follows the continuation notice through LIMIT %i OFFSET %i, matching one direct read row for row',
+      async (sqlLimit, sqlOffset) => {
+        const { pages, rows } = await walk(sqlLimit, sqlOffset);
+        expect(pages.length).toBeGreaterThan(1);
+        const direct = await directRows(
+          `SELECT * FROM hist ORDER BY time LIMIT ${sqlLimit} OFFSET ${sqlOffset}`,
+        );
+        expect(rows).toEqual(direct.rows);
+      },
+    );
+
+    const memberExample = [
+      ...(openmeteoDataframeQueryTool.input.shape.sql.description ?? '').matchAll(
+        /`(SELECT [^`]+)`/g,
+      ),
+    ]
+      .map((m) => m[1] as string)
+      .find((sql) => sql.includes('COLUMNS(')) as string;
+
+    beforeAll(async () => {
+      const instance = await canvas.acquire(canvasId, createMockContext({ tenantId: TENANT }));
+      // 240 hourly rows of ten precipitation members: the member example's row count.
+      await instance.registerTable(
+        'ens240',
+        hourlyTimes(240).map((time, i) => {
+          const row: Record<string, unknown> = { time, precipitation: round1((i % 9) / 10) };
+          for (let m = 1; m <= 10; m++) {
+            row[`precipitation_member${String(m).padStart(2, '0')}`] = round1(((i * m) % 9) / 10);
+          }
+          return row;
+        }),
+      );
+      // 360 hourly rows of 64 temperature members: one list() per member runs past 80,000 characters.
+      await instance.registerTable(
+        'ens64',
+        hourlyTimes(360).map((time, i) => {
+          const row: Record<string, unknown> = { time, temperature_2m: round1(10 + (i % 13) / 3) };
+          for (let m = 1; m <= 64; m++) {
+            row[`temperature_2m_member${String(m).padStart(2, '0')}`] = round1(
+              10 + ((i + m) % 13) / 3,
+            );
+          }
+          return row;
+        }),
+      );
+    });
+
+    it('returns limit 240 member counts whole, with no notice', async () => {
+      const s = surfaces(await run(memberExample.replaceAll('<table_name>', 'ens240'), 240));
+      expect(s.structured.rows).toHaveLength(240);
+      expect(s.structured.row_count).toBe(240);
+      expect(s.structured.truncated).toBe(false);
+      expect(s.text).toContain('**Rows:** 240 | **Truncated:** false');
+      expect(s.structured.rows.map((row) => Number(row.members_reporting))).toEqual(
+        Array(240).fill(10),
+      );
+      expect(s.structured).not.toHaveProperty('notice');
+      expect(s.text).not.toContain('Showing first');
+      expect(s.blocks).toBe(1);
+    });
+
+    it('returns one row and a continuation at OFFSET 1 under limit 1', async () => {
+      const s = surfaces(await run('SELECT * FROM u ORDER BY k', 1));
+      // `k` is staged as BIGINT, which DuckDB marshals as a string.
+      expect(s.structured.rows).toEqual([{ k: '1' }]);
+      expect(s.structured.row_count).toBe(3);
+      expect(s.text).toContain('Showing first 1 of 3 rows (limit 1). Continue at OFFSET 1:');
+    });
+
+    it.each([
+      [150, 0],
+      [150, 20],
+    ])(
+      'pages LIMIT %i OFFSET %i at limit 100 in two calls, matching one direct read',
+      async (sqlLimit, sqlOffset) => {
+        const { pages, rows } = await walk(sqlLimit, sqlOffset, 100);
+        expect(pages).toEqual([100, 50]);
+        const direct = await directRows(
+          `SELECT * FROM hist ORDER BY time LIMIT ${sqlLimit} OFFSET ${sqlOffset}`,
+        );
+        expect(rows).toEqual(direct.rows);
+      },
+    );
+
+    it.each([150, 200])(
+      'returns the SQL LIMIT 150 rows whole under limit %i, with no notice and no count',
+      async (limit) => {
+        const query = vi.spyOn(provider, 'query');
+        const s = surfaces(await run('SELECT * FROM hist ORDER BY time LIMIT 150', limit));
+        expect(s.structured.rows).toHaveLength(150);
+        expect(s.structured.row_count).toBe(150);
+        expect(s.text).not.toContain('Showing first');
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(query.mock.calls[0]?.[3]).toMatchObject({ rowLimit: limit });
+      },
+    );
+
+    it('lowers limit 20000 to the 10,000-row cap and says so on both surfaces', async () => {
+      const query = vi.spyOn(provider, 'query');
+      const result = await run('SELECT * FROM hist CROSS JOIN u', 20000);
+      const s = surfaces(result);
+      const notice =
+        'limit 20000 is above the per-call cap of 10000 rows, so 10000 was applied. To read more than 10000 rows, page with LIMIT / OFFSET in the SQL.';
+      expect(s.structured.rows).toHaveLength(10000);
+      expect(s.structured.row_count).toBe(26352);
+      expect(s.structured).toMatchObject({ notice });
+      expect(result.content[1]).toEqual({ type: 'text', text: `\n\n> ${notice}` });
+      expect(query.mock.calls[0]?.[3]).toMatchObject({ rowLimit: 10000 });
+      expect(s.text).toContain(
+        'Showing first 10000 of 26352 rows (limit 10000). Continue at OFFSET 10000:',
+      );
+    });
+
+    it('logs one info line and adds one to the clamp counter per clamped call, and neither otherwise', async () => {
+      const call = async (limit: number) => {
+        const ctx = createMockContext({
+          tenantId: TENANT,
+          errors: openmeteoDataframeQueryTool.errors,
+        });
+        const input = openmeteoDataframeQueryTool.input.parse({
+          canvas_id: canvasId,
+          sql: 'SELECT * FROM u',
+          limit,
+        });
+        await openmeteoDataframeQueryTool.handler(input, ctx);
+        const lowered = (ctx.log as MockContextLogger).calls.filter(
+          (c) => c.msg === 'Dataframe query limit lowered to the cap',
+        );
+        return { lowered, enrichment: getEnrichment(ctx) };
+      };
+
+      clampCounter.add.mockClear();
+      const clamped = await call(20000);
+      expect(clamped.lowered).toEqual([
+        {
+          level: 'info',
+          msg: 'Dataframe query limit lowered to the cap',
+          data: expect.objectContaining({ requested: 20000, applied: 10000 }),
+        },
+      ]);
+      expect(clampCounter.add).toHaveBeenCalledTimes(1);
+      expect(clampCounter.add).toHaveBeenCalledWith(1);
+      expect(clamped.enrichment).toEqual({
+        notice:
+          'limit 20000 is above the per-call cap of 10000 rows, so 10000 was applied. To read more than 10000 rows, page with LIMIT / OFFSET in the SQL.',
+      });
+
+      clampCounter.add.mockClear();
+      const atCap = await call(10000);
+      expect(atCap.lowered).toEqual([]);
+      expect(clampCounter.add).not.toHaveBeenCalled();
+      expect(atCap.enrichment).toEqual({});
+    });
+
+    it('caps limit at a lowered CANVAS_DEFAULT_ROW_LIMIT, so the canvas never gets a rowLimit it refuses', async () => {
+      resetConfig({ CANVAS_DEFAULT_ROW_LIMIT: '500' });
+      const small = new DuckdbProvider({
+        defaultRowLimit: 500,
+        exportRootPath: exportRoot,
+        memoryLimitMb: 256,
+        schemaSniffRows: 100,
+      });
+      const smallCanvas = new DataCanvas(
+        small,
+        new CanvasRegistry(small, { ...DEFAULT_CANVAS_REGISTRY_OPTIONS, sweeperIntervalMs: 0 }),
+      );
+      try {
+        const instance = await smallCanvas.acquire(
+          undefined,
+          createMockContext({ tenantId: TENANT }),
+        );
+        await instance.registerTable(
+          'n',
+          Array.from({ length: 600 }, (_, i) => ({ i })),
+        );
+        mockCanvasInstance = smallCanvas;
+        const query = vi.spyOn(small, 'query');
+        const result = await runToolContract(
+          openmeteoDataframeQueryTool,
+          { canvas_id: instance.canvasId, sql: 'SELECT * FROM n ORDER BY i', limit: 1000 },
+          { context: { tenantId: TENANT } },
+        );
+        expect(result.isError).toBeFalsy();
+        const s = surfaces(result);
+        expect(s.structured.rows).toHaveLength(500);
+        expect(s.structured.row_count).toBe(600);
+        expect(s.structured).toMatchObject({
+          notice:
+            'limit 1000 is above the per-call cap of 500 rows, so 500 was applied. To read more than 500 rows, page with LIMIT / OFFSET in the SQL.',
+        });
+        expect(query.mock.calls[0]?.[3]).toMatchObject({ rowLimit: 500 });
+      } finally {
+        await smallCanvas.shutdown(createMockContext({ tenantId: TENANT }));
+        resetConfig();
+      }
+    });
+
+    it('applies a cap below 25 as the default, with no notice for a call that sent no limit', async () => {
+      resetConfig({ CANVAS_DEFAULT_ROW_LIMIT: '5' });
+      const small = new DuckdbProvider({
+        defaultRowLimit: 5,
+        exportRootPath: exportRoot,
+        memoryLimitMb: 256,
+        schemaSniffRows: 100,
+      });
+      const smallCanvas = new DataCanvas(
+        small,
+        new CanvasRegistry(small, { ...DEFAULT_CANVAS_REGISTRY_OPTIONS, sweeperIntervalMs: 0 }),
+      );
+      try {
+        const instance = await smallCanvas.acquire(
+          undefined,
+          createMockContext({ tenantId: TENANT }),
+        );
+        await instance.registerTable(
+          'n',
+          Array.from({ length: 8 }, (_, i) => ({ i })),
+        );
+        mockCanvasInstance = smallCanvas;
+        const query = vi.spyOn(small, 'query');
+        const result = await runToolContract(
+          openmeteoDataframeQueryTool,
+          { canvas_id: instance.canvasId, sql: 'SELECT * FROM n ORDER BY i' },
+          { context: { tenantId: TENANT } },
+        );
+        expect(result.isError).toBeFalsy();
+        const s = surfaces(result);
+        expect(s.structured.rows).toHaveLength(5);
+        expect(s.structured.row_count).toBe(8);
+        expect(s.structured).not.toHaveProperty('notice');
+        expect(s.text).not.toContain('above the per-call cap');
+        expect(query.mock.calls[0]?.[3]).toMatchObject({ rowLimit: 5 });
+      } finally {
+        await smallCanvas.shutdown(createMockContext({ tenantId: TENANT }));
+        resetConfig();
+      }
+    });
+
+    it('returns a row wider than 80,000 characters whole on both surfaces', async () => {
+      const s = surfaces(
+        await run("SELECT list(COLUMNS('^temperature_2m_member\\d+$') ORDER BY time) FROM ens64"),
+      );
+      expect(s.structured.rows).toHaveLength(1);
+      const values = Object.values(s.structured.rows[0] ?? {});
+      expect(values).toHaveLength(64);
+      for (const value of values) expect(value).toHaveLength(360);
+      expect(s.structuredChars).toBeGreaterThan(80_000);
+      expect(gfmTable(s.text)[1]?.map((cell) => cell.text)).toEqual(
+        values.map((value) => JSON.stringify(value)),
+      );
+    });
+
+    it('returns no rows and no notice for an empty result or an OFFSET past the end under limit 5', async () => {
+      for (const sql of ['SELECT * FROM hist WHERE false', 'SELECT * FROM hist OFFSET 100000']) {
+        const s = surfaces(await run(sql, 5));
+        expect(s.structured).toStrictEqual({
+          rows: [],
+          row_count: 0,
+          truncated: false,
+          canvas_id: canvasId,
+        });
+        expect(s.text).toContain('**Rows:** 0 | **Truncated:** false');
+        expect(s.text).toContain('No rows returned');
+      }
+    });
+  });
+
+  describe('response ceiling and relayed error text', () => {
+    it('refuses a page just over 8,000,000 characters of row data before counting the result', async () => {
+      // Three rows of `u`, so the page of two is truncated and a count would follow it.
+      const query = vi.spyOn(provider, 'query');
+      const result = await run("SELECT repeat('x', 4500000) AS note FROM u", 2);
+      expect(result.isError).toBe(true);
+      const error = (result.structuredContent as { error: WireError }).error;
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        message:
+          'This page of 2 rows holds more than 8,000,000 characters of row data, the most one response carries, and rows are never cut; its first row fits.',
+        data: {
+          reason: 'result_too_large',
+          recovery: {
+            hint: 'Set limit to 1 or less and page the rest with LIMIT / OFFSET, or select fewer columns.',
+          },
+        },
+      });
+      expect(query).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      [
+        'an execution error quoting a computed value',
+        "SELECT error(repeat('x', 5000))",
+        JsonRpcErrorCode.ValidationError,
+        'sql_execution_error',
+      ],
+      [
+        'a binder error quoting a column name',
+        `SELECT "${'a'.repeat(5000)}" FROM u`,
+        JsonRpcErrorCode.ValidationError,
+        'invalid_sql',
+      ],
+      [
+        'a missing table with a long name',
+        `SELECT * FROM "${'a'.repeat(5000)}"`,
+        JsonRpcErrorCode.NotFound,
+        'missing_table',
+      ],
+      [
+        'a system catalog with a long name',
+        `SELECT duckdb_${'a'.repeat(5000)}()`,
+        JsonRpcErrorCode.ValidationError,
+        'system_catalog_access',
+      ],
+      [
+        'a denied function with a long name',
+        `SELECT * FROM pragma_${'a'.repeat(5000)}()`,
+        JsonRpcErrorCode.ValidationError,
+        'denied_function',
+      ],
+    ])(
+      'relays %s cut to 2,000 characters, with its code and reason',
+      async (_path, sql, code, reason) => {
+        const result = await run(sql);
+        expect(result.isError).toBe(true);
+        const error = (result.structuredContent as { error: WireError }).error;
+        expect(error.code).toBe(code);
+        expect(error.data?.reason).toBe(reason);
+        expect(error.message.length).toBeLessThanOrEqual(2_000);
+        expect(error.message).toMatch(/ … \(cut to 2,000 of [\d,]+ characters\)$/);
+        for (const value of Object.values(error.data ?? {})) {
+          if (typeof value === 'string') expect(value.length).toBeLessThanOrEqual(2_000);
+        }
+        expect(firstText(result.content).length).toBeLessThan(3_000);
+      },
+    );
   });
 });

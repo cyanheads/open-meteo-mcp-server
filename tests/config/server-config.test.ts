@@ -1,9 +1,13 @@
 /**
  * @fileoverview Tests for the server-specific env config: base-URL defaults and
- * overrides, and the opt-in flag for openmeteo_dataframe_drop.
+ * overrides, the opt-in flag for openmeteo_dataframe_drop, the OPENMETEO_CLAMP_LIMITS
+ * switch, and reading ./.env on the first parse.
  * @module tests/config/server-config.test
  */
 
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -18,6 +22,7 @@ const ENV_VARS = [
   'OPEN_METEO_FLOOD_BASE_URL',
   'OPEN_METEO_CLIMATE_BASE_URL',
   'OPENMETEO_DATAFRAME_DROP_ENABLED',
+  'OPENMETEO_CLAMP_LIMITS',
 ] as const;
 
 /** The config caches its first parse, so each read goes through a fresh module instance. */
@@ -89,6 +94,75 @@ describe('getServerConfig', () => {
       await expect(loadConfig()).rejects.toMatchObject({
         code: JsonRpcErrorCode.ConfigurationError,
         message: expect.stringContaining('OPENMETEO_DATAFRAME_DROP_ENABLED'),
+      });
+    });
+  });
+
+  describe('OPENMETEO_CLAMP_LIMITS', () => {
+    it('defaults to on when unset', async () => {
+      await expect(loadConfig()).resolves.toMatchObject({ clampLimits: true });
+    });
+
+    it('treats a blank value as unset', async () => {
+      vi.stubEnv('OPENMETEO_CLAMP_LIMITS', '');
+      await expect(loadConfig()).resolves.toMatchObject({ clampLimits: true });
+    });
+
+    it('turns off for "false" — a string flag, not a truthy coercion', async () => {
+      vi.stubEnv('OPENMETEO_CLAMP_LIMITS', 'false');
+      await expect(loadConfig()).resolves.toMatchObject({ clampLimits: false });
+    });
+
+    it('rejects a value that is not a boolean word, naming the env var', async () => {
+      vi.stubEnv('OPENMETEO_CLAMP_LIMITS', 'sometimes');
+      await expect(loadConfig()).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ConfigurationError,
+        message: expect.stringContaining('OPENMETEO_CLAMP_LIMITS'),
+      });
+    });
+  });
+
+  /**
+   * A tool definition reads this config when its module is imported. Under Node that is
+   * before `createApp()` loads `./.env`, so the first parse loads it itself.
+   */
+  describe('./.env in the working directory', () => {
+    let previousCwd: string;
+    let dir: string;
+
+    beforeEach(() => {
+      previousCwd = process.cwd();
+      dir = mkdtempSync(join(tmpdir(), 'om-server-config-'));
+      process.chdir(dir);
+    });
+
+    afterEach(() => {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('reads values set only in ./.env', async () => {
+      writeFileSync(
+        join(dir, '.env'),
+        'OPENMETEO_CLAMP_LIMITS=false\nOPENMETEO_DATAFRAME_DROP_ENABLED=true\n',
+      );
+      await expect(loadConfig()).resolves.toMatchObject({
+        clampLimits: false,
+        dataframeDropEnabled: true,
+      });
+    });
+
+    it('never overrides a value already in the environment', async () => {
+      writeFileSync(join(dir, '.env'), 'OPENMETEO_CLAMP_LIMITS=false\n');
+      vi.stubEnv('OPENMETEO_CLAMP_LIMITS', 'true');
+      await expect(loadConfig()).resolves.toMatchObject({ clampLimits: true });
+    });
+
+    it('parses the environment as it stands when ./.env cannot be read', async () => {
+      mkdirSync(join(dir, '.env'));
+      await expect(loadConfig()).resolves.toMatchObject({
+        clampLimits: true,
+        dataframeDropEnabled: false,
       });
     });
   });
