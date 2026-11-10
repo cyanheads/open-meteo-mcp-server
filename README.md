@@ -144,7 +144,7 @@ The server also publishes an agent skill, `open-meteo-guide` (`skill://open-mete
 - `canvas_id` plus a read-only `SELECT` against the staged `table_name`; `rows` holds the first `limit` rows (default 25, each whole, values never cut). A larger `limit` returns at most 10,000 rows (or `CANVAS_DEFAULT_ROW_LIMIT` when lower) and a `notice` says so. `row_count` is the exact total and `truncated` is `true` when it exceeds `rows`; page with `OFFSET <rows.length>` under an `ORDER BY`
 - A page's size rests on `limit` and the columns selected, so from a member-suffixed ensemble table select the columns the question needs rather than `SELECT *`. One response carries at most 8,000,000 characters of row data (the rows written as JSON, a character that needs escaping counted at its escaped length); a larger page is refused as `result_too_large`, never cut, and the message says how many leading rows fit
 - If the count fails or runs past 5 seconds, rows still return, `row_count` is a lower bound, and `count_error` names the reason (e.g. `count_timeout`)
-- Fails as `canvas_not_enabled`, `canvas_not_found`, `missing_table`, `system_catalog_access` (system catalogs are blocked), or `result_too_large`. An error message relayed from the query engine is cut to 2,000 characters, keeping its code and `reason`
+- Fails as `canvas_not_enabled`, `canvas_not_found`, `missing_table`, `system_catalog_access` (system catalogs are blocked, and so is a DuckDB metadata view's name such as `pg_class` used as a column alias, CTE name, or table alias), or `result_too_large`. An error message relayed from the query engine is cut to 2,000 characters, keeping its code and `reason`
 
 ---
 

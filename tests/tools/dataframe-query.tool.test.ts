@@ -1910,4 +1910,28 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
       },
     );
   });
+
+  describe("a DuckDB metadata view name as the statement's own name", () => {
+    it.each([
+      ['a column alias', 'duckdb_tables', 'SELECT k AS duckdb_tables FROM u'],
+      ['a CTE name', 'pg_class', 'WITH pg_class AS (SELECT k FROM u) SELECT k FROM pg_class'],
+      ['a subquery column', 'pg_type', 'SELECT pg_type FROM (SELECT k AS pg_type FROM u)'],
+      ['a table alias', 'pg_index', 'SELECT pg_index.k FROM u AS pg_index'],
+    ])(
+      'refuses %s as system_catalog_access, with a recovery that says to rename it',
+      async (_role, name, sql) => {
+        const err = await wireError(
+          openmeteoDataframeQueryTool,
+          { canvas_id: canvasId, sql },
+          { context: { tenantId: TENANT } },
+        );
+        expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(err.data?.reason).toBe('system_catalog_access');
+        expect(err.message).toContain(name);
+        expect(err.data?.recovery?.hint).toContain(
+          'When the name the message reports is one of your own',
+        );
+      },
+    );
+  });
 });

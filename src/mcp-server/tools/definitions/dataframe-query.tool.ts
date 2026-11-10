@@ -219,9 +219,9 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     {
       reason: 'system_catalog_access',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL references a system catalog such as information_schema, sqlite_master, pg_catalog, or a duckdb_*() function.',
+      when: "The SQL references a system catalog such as information_schema, pg_catalog, a duckdb_*() function, or one of DuckDB's internal metadata views (duckdb_tables, sqlite_master, pg_class, …), or uses a metadata view's name as its own column alias, CTE name, subquery column, or table alias.",
       recovery:
-        'List tables and columns with openmeteo_dataframe_describe instead — system catalogs are blocked so callers cannot enumerate other staged canvases.',
+        'List tables and columns with openmeteo_dataframe_describe instead — system catalogs are blocked so callers cannot enumerate other staged canvases. When the name the message reports is one of your own — a column alias, CTE name, subquery column, or table alias — rename it and retry.',
       retryable: false,
     },
     {
