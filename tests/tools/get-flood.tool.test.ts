@@ -1091,6 +1091,7 @@ describe('openmeteoGetFloodTool river-selection wording (#43)', () => {
       'rate_limited',
       'upstream_unavailable',
       'upstream_timeout',
+      'upstream_rejected',
     ]);
   });
 });

@@ -2,9 +2,10 @@
  * @fileoverview Per-tool wiring of the notice mechanisms `response-notice.ts` owns. Each
  * of the seven weather tools renders its `notice` into `content[]` through
  * `renderNotice`, so a CommonMark parse reads back exactly `structuredContent.notice`;
- * historical, forecast, and climate hand the caller's model selection to the coverage
- * analysis, so a model that returned nothing for a variable another selected model
- * served is named instead of the location or window; and a horizon or archive-start gap
+ * historical, forecast, climate, marine, and ensemble hand the caller's model selection to the
+ * coverage analysis, so a model that returned nothing for a variable another selected model
+ * served is named instead of the location or window, and climate hands over its closed model
+ * set, so a call naming every model is offered no other; and a horizon or archive-start gap
  * under six null rows reaches the notice through each tool it was measured on. The full
  * value tables live in `response-notice.test.ts`; this file proves one case per side of
  * each branch, per tool.
@@ -20,7 +21,15 @@ import { openmeteoGetFloodTool } from '@/mcp-server/tools/definitions/get-flood.
 import { openmeteoGetForecastTool } from '@/mcp-server/tools/definitions/get-forecast.tool.js';
 import { openmeteoGetHistoricalTool } from '@/mcp-server/tools/definitions/get-historical.tool.js';
 import { openmeteoGetMarineTool } from '@/mcp-server/tools/definitions/get-marine.tool.js';
+import {
+  ARCHIVE_MODELS,
+  CLIMATE_MODELS,
+  ENSEMBLE_MODELS,
+  FORECAST_MODELS,
+  MARINE_MODELS,
+} from '@/mcp-server/tools/model-catalog.js';
 import { renderedText } from '../helpers/commonmark.js';
+import { trailerOf } from '../helpers/content.js';
 
 const service = vi.hoisted(() => ({
   getAirQuality: vi.fn(),
@@ -75,12 +84,6 @@ const noticeOf = (result: CallToolResult): string => {
   const notice = (result.structuredContent as { notice?: unknown }).notice;
   expect(typeof notice).toBe('string');
   return notice as string;
-};
-
-/** The `content[]` trailer block — the last text block, where the framework appends enrichment. */
-const trailerOf = (result: CallToolResult): string => {
-  const block = result.content.at(-1);
-  return block?.type === 'text' ? block.text : '';
 };
 
 // --- notice rendering --------------------------------------------------------
@@ -235,9 +238,7 @@ describe('notice rendering in content[]', () => {
 
     const notice = noticeOf(result);
     expect(notice).toBe(
-      'uv_index_max returned no data — Open-Meteo reported the unit as "undefined", which means ' +
-        'the archive does not serve that name in the cadence it was requested under. Check the ' +
-        'spelling, and whether it belongs in hourly_variables or daily_variables.',
+      'uv_index_max returned no data — Open-Meteo reported the unit as "undefined", which means the archive parsed that name but serves no data for it. Drop it, or request it from the tool that serves that kind of variable: forecast-only variables (uv_index, …) from openmeteo_get_forecast (its past_days reaches 92 days back), marine variables (wave_height, ocean_current_velocity, …) from openmeteo_get_marine, air-quality variables (pm2_5, ozone, …) from openmeteo_get_air_quality.',
     );
     expect(trailerOf(result)).toBe(`\n\n> ${notice}`);
   });
@@ -472,6 +473,300 @@ describe('model attribution of an all-null coverage gap (#90)', () => {
         'dataset’s coverage rather than the names being unserved.',
     );
   });
+
+  it('openmeteo_get_ensemble: names the empty model and the one that served the variable (#98)', async () => {
+    // Beside another model each column ends in its model's name, the member token first;
+    // ncep_gefs025's snow_depth columns come back all null under a real unit.
+    service.getEnsemble.mockResolvedValue({
+      ...ENVELOPE,
+      hourly_units: {
+        time: 'iso8601',
+        snow_depth_ecmwf_ifs025_ensemble: 'm',
+        snow_depth_member01_ecmwf_ifs025_ensemble: 'm',
+        snow_depth_ncep_gefs025: 'm',
+        snow_depth_member01_ncep_gefs025: 'm',
+      },
+      hourly: {
+        time: day,
+        snow_depth_ecmwf_ifs025_ensemble: day.map(() => 0.2),
+        snow_depth_member01_ecmwf_ifs025_ensemble: day.map(() => 0.3),
+        snow_depth_ncep_gefs025: day.map(() => null),
+        snow_depth_member01_ncep_gefs025: day.map(() => null),
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...POINT,
+      hourly_variables: ['snow_depth'],
+      models: 'ecmwf_ifs025_ensemble,ncep_gefs025',
+      forecast_days: 1,
+    });
+
+    expect(noticeOf(result)).toBe(
+      'This response carries 2 ensemble models, so every column ends in the name of its model: ' +
+        'snow_depth_ecmwf_ifs025_ensemble is the control run of ecmwf_ifs025_ensemble and ' +
+        'snow_depth_member01_ecmwf_ifs025_ensemble its member 01. Members per model, control ' +
+        'runs not counted: ecmwf_ifs025_ensemble 1, ncep_gefs025 1; member_count is their sum. ' +
+        'ncep_gefs025 returned no hourly data for snow_depth_ncep_gefs025 — all 24 values are ' +
+        'null, while ecmwf_ifs025_ensemble returned values for the same variable. Read it from ' +
+        'ecmwf_ifs025_ensemble.',
+    );
+    expect(renderedText(trailerOf(result))).toBe(noticeOf(result));
+  });
+
+  it('openmeteo_get_ensemble: keeps the location-or-window sentence for one model', async () => {
+    service.getEnsemble.mockResolvedValue({
+      ...ENVELOPE,
+      hourly_units: {
+        time: 'iso8601',
+        temperature_2m: '°C',
+        temperature_2m_member01: '°C',
+        snow_depth: 'm',
+        snow_depth_member01: 'm',
+      },
+      hourly: {
+        time: day,
+        temperature_2m: day.map(() => 9),
+        temperature_2m_member01: day.map(() => 9.5),
+        snow_depth: day.map(() => null),
+        snow_depth_member01: day.map(() => null),
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...POINT,
+      hourly_variables: ['temperature_2m', 'snow_depth'],
+      forecast_days: 1,
+    });
+
+    expect(noticeOf(result)).toBe(
+      'No hourly data for snow_depth anywhere in the requested window — all 24 values are null ' +
+        'even though the units are real, so this location or the requested window falls outside ' +
+        'this dataset’s coverage rather than the names being unserved.',
+    );
+  });
+
+  /*
+   * Each tool hands its default model to the coverage analysis: a call naming that model
+   * is not told to omit models, which would read the same model again; a call naming
+   * another model still is.
+   */
+  const ANOTHER = 'Try another model.';
+  const OR_OMIT = 'Try another model, or omit models to use the default.';
+  const window = { start_date: week[0] as string, end_date: week[6] as string };
+
+  /** One daily variable, every value null under a real unit. */
+  const emptyDaily = (variable: string, unit: string) => ({
+    ...ENVELOPE,
+    daily_units: { time: 'iso8601', [variable]: unit },
+    daily: { time: week, [variable]: empty },
+  });
+
+  const callClimate = (models: string[]) => {
+    service.getClimate.mockResolvedValue(emptyDaily('rain_sum', 'mm'));
+    return runToolContract(openmeteoGetClimateTool, {
+      ...POINT,
+      ...window,
+      daily_variables: ['rain_sum'],
+      models,
+    });
+  };
+  const callHistorical = (models: string[]) => {
+    service.getHistorical.mockResolvedValue(emptyDaily('precipitation_sum', 'mm'));
+    return runToolContract(openmeteoGetHistoricalTool, {
+      ...POINT,
+      ...window,
+      daily_variables: ['precipitation_sum'],
+      models,
+    });
+  };
+  const callForecast = (models: string[]) => {
+    service.getForecast.mockResolvedValue(emptyDaily('precipitation_sum', 'mm'));
+    return runToolContract(openmeteoGetForecastTool, {
+      ...POINT,
+      daily_variables: ['precipitation_sum'],
+      forecast_days: 7,
+      models,
+    });
+  };
+  const callMarine = (models: string[]) => {
+    service.getMarine.mockResolvedValue(emptyDaily('wave_height_max', 'm'));
+    return runToolContract(openmeteoGetMarineTool, {
+      ...POINT,
+      daily_variables: ['wave_height_max'],
+      forecast_days: 7,
+      models,
+    });
+  };
+  /** Two models, each with its control run and one member null under a real unit. */
+  const callEnsemble = (models: string[]) => {
+    const columns = models.flatMap((model) => [
+      `snow_depth_${model}`,
+      `snow_depth_member01_${model}`,
+    ]);
+    service.getEnsemble.mockResolvedValue({
+      ...ENVELOPE,
+      hourly_units: { time: 'iso8601', ...Object.fromEntries(columns.map((c) => [c, 'm'])) },
+      hourly: { time: day, ...Object.fromEntries(columns.map((c) => [c, day.map(() => null)])) },
+    });
+    return runToolContract(openmeteoGetEnsembleTool, {
+      ...POINT,
+      hourly_variables: ['snow_depth'],
+      models: models.join(','),
+      forecast_days: 1,
+    });
+  };
+
+  it.each([
+    ['openmeteo_get_climate', ['MRI_AGCM3_2_S'], callClimate, ANOTHER],
+    ['openmeteo_get_climate', ['EC_Earth3P_HR'], callClimate, OR_OMIT],
+    ['openmeteo_get_historical', ['best_match'], callHistorical, ANOTHER],
+    ['openmeteo_get_historical', ['era5_land'], callHistorical, OR_OMIT],
+    ['openmeteo_get_forecast', ['best_match'], callForecast, ANOTHER],
+    ['openmeteo_get_forecast', ['ecmwf_ifs025'], callForecast, OR_OMIT],
+    ['openmeteo_get_marine', ['best_match'], callMarine, ANOTHER],
+    ['openmeteo_get_marine', ['ecmwf_wam'], callMarine, OR_OMIT],
+    ['openmeteo_get_ensemble', ['ecmwf_ifs025_ensemble', 'ncep_gefs025'], callEnsemble, ANOTHER],
+    ['openmeteo_get_ensemble', ['gem_global_ensemble', 'ncep_gefs025'], callEnsemble, OR_OMIT],
+  ] as const)(
+    '%s: models %j gives an empty variable only remedies that change the request',
+    async (_tool, models, call, remedy) => {
+      const result = await call([...models]);
+
+      // Every fixture empties one column per model, so the sentence names each model once.
+      const carry = models.length === 1 ? 'does not carry it' : 'do not carry them';
+      const notice = noticeOf(result);
+      expect(notice).toContain(`or ${models.join(', ')} ${carry}. ${remedy}`);
+      if (remedy === ANOTHER) expect(notice).not.toContain('omit models');
+      expect(renderedText(trailerOf(result))).toBe(notice);
+    },
+  );
+
+  /*
+   * The climate tool hands over its closed set of seven CMIP6 models, so a call naming all
+   * of them is offered no other model. Every other tool's catalog is open — upstream serves
+   * names it does not list — so a call naming each documented model keeps the remedy.
+   */
+  const window3 = dates(3, '2040-01-01');
+
+  /** Live shape: 0, -140 with cell_selection "sea" — every model's soil moisture null under m³/m³. */
+  const callClimateAtSea = (models: readonly string[]) => {
+    const columns = models.flatMap((model) => [
+      [`temperature_2m_max_${model}`, '°C', [26.6, 26.7, 26.6]],
+      [`soil_moisture_0_to_10cm_mean_${model}`, 'm³/m³', [null, null, null]],
+    ]);
+    service.getClimate.mockResolvedValue({
+      ...ENVELOPE,
+      daily_units: {
+        time: 'iso8601',
+        ...Object.fromEntries(columns.map(([column, unit]) => [column, unit])),
+      },
+      daily: {
+        time: window3,
+        ...Object.fromEntries(columns.map(([column, , values]) => [column, values])),
+      },
+    });
+    return runToolContract(openmeteoGetClimateTool, {
+      latitude: 0,
+      longitude: -140,
+      start_date: '2040-01-01',
+      end_date: '2040-01-03',
+      daily_variables: ['temperature_2m_max', 'soil_moisture_0_to_10cm_mean'],
+      models: [...models],
+      cell_selection: 'sea',
+    });
+  };
+
+  const SOIL_ALL_NULL =
+    'No daily data for soil_moisture_0_to_10cm_mean_CMCC_CM2_VHR4, soil_moisture_0_to_10cm_mean_FGOALS_f3_H, soil_moisture_0_to_10cm_mean_HiRAM_SIT_HR, soil_moisture_0_to_10cm_mean_MRI_AGCM3_2_S, and';
+
+  it('openmeteo_get_climate: a call naming all seven models gets no other model to try', async () => {
+    const result = await callClimateAtSea(CLIMATE_MODELS);
+
+    expect(noticeOf(result)).toBe(
+      `${SOIL_ALL_NULL} 3 more anywhere in the requested window — all 3 values are null even though the units are real, so this location or the requested window falls outside this dataset’s coverage, or CMCC_CM2_VHR4, FGOALS_f3_H, HiRAM_SIT_HR, MRI_AGCM3_2_S, and 3 more do not carry them.`,
+    );
+    expect(renderedText(trailerOf(result))).toBe(noticeOf(result));
+  });
+
+  it('openmeteo_get_climate: a call naming six of the seven models keeps another model', async () => {
+    const result = await callClimateAtSea(CLIMATE_MODELS.filter((m) => m !== 'NICAM16_8S'));
+
+    expect(noticeOf(result)).toBe(
+      `${SOIL_ALL_NULL} 2 more anywhere in the requested window — all 3 values are null even though the units are real, so this location or the requested window falls outside this dataset’s coverage, or CMCC_CM2_VHR4, FGOALS_f3_H, HiRAM_SIT_HR, MRI_AGCM3_2_S, and 2 more do not carry them. ${ANOTHER}`,
+    );
+    expect(renderedText(trailerOf(result))).toBe(noticeOf(result));
+  });
+
+  /** One daily variable, every requested model's column null under a real unit. */
+  const emptyDailyPerModel = (variable: string, unit: string, models: readonly string[]) => ({
+    ...ENVELOPE,
+    daily_units: {
+      time: 'iso8601',
+      ...Object.fromEntries(models.map((model) => [`${variable}_${model}`, unit])),
+    },
+    daily: {
+      time: week,
+      ...Object.fromEntries(models.map((model) => [`${variable}_${model}`, empty])),
+    },
+  });
+
+  it.each([
+    [
+      'openmeteo_get_historical',
+      ARCHIVE_MODELS.map((m) => m.name),
+      (models: string[]) => {
+        service.getHistorical.mockResolvedValue(
+          emptyDailyPerModel('precipitation_sum', 'mm', models),
+        );
+        return runToolContract(openmeteoGetHistoricalTool, {
+          ...POINT,
+          ...window,
+          daily_variables: ['precipitation_sum'],
+          models,
+        });
+      },
+    ],
+    [
+      'openmeteo_get_forecast',
+      [...FORECAST_MODELS],
+      (models: string[]) => {
+        service.getForecast.mockResolvedValue(
+          emptyDailyPerModel('precipitation_sum', 'mm', models),
+        );
+        return runToolContract(openmeteoGetForecastTool, {
+          ...POINT,
+          daily_variables: ['precipitation_sum'],
+          forecast_days: 7,
+          models,
+        });
+      },
+    ],
+    [
+      'openmeteo_get_marine',
+      MARINE_MODELS.map((m) => m.name),
+      (models: string[]) => {
+        service.getMarine.mockResolvedValue(emptyDailyPerModel('wave_height_max', 'm', models));
+        return runToolContract(openmeteoGetMarineTool, {
+          ...POINT,
+          daily_variables: ['wave_height_max'],
+          forecast_days: 7,
+          models,
+        });
+      },
+    ],
+    ['openmeteo_get_ensemble', ENSEMBLE_MODELS.map((m) => m.name), callEnsemble],
+  ] as const)(
+    '%s: a call naming every documented model keeps another model, since its catalog is open',
+    async (_tool, models, call) => {
+      const result = await call([...models]);
+
+      const notice = noticeOf(result);
+      expect(notice).toContain(` more do not carry them. ${ANOTHER}`);
+      expect(notice).not.toContain('omit models');
+      expect(renderedText(trailerOf(result))).toBe(notice);
+    },
+  );
 });
 
 // --- short-window edge gaps (#91) --------------------------------------------
@@ -563,5 +858,81 @@ describe('a horizon or archive-start gap under six null rows (#91)', () => {
       'Partial daily coverage for temperature_2m_max: data runs 2026-08-01 to 2026-11-03, and 5 ' +
         'of 100 rows are null.',
     );
+  });
+});
+
+// --- the plane of a tilted variable (#101) ------------------------------------
+
+/*
+ * `tiltNotice` lives in `tilt-input.ts`, beside the inputs, and is tabled in
+ * tilt-input.test.ts. Here: each tool that serves global_tilted_irradiance composes it
+ * into the notice, and content[] reads it back exactly — underscores and all.
+ */
+describe('the plane of a tilted variable (#101)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const HORIZONTAL =
+    'global_tilted_irradiance was computed for a horizontal surface because tilt was not set: the same irradiance as shortwave_radiation. Set tilt (degrees from horizontal, 0–90) and azimuth (0 south, -90 east, 90 west, ±180 north) for the plane of a tilted panel.';
+
+  /** Two hours of an untilted global_tilted_irradiance column from `from`. */
+  const tiltedBlock = (from: string) => ({
+    hourly_units: { time: 'iso8601', global_tilted_irradiance: 'W/m²' },
+    hourly: { time: hours(2, from), global_tilted_irradiance: [594, 616] },
+  });
+
+  it('openmeteo_get_forecast: names the horizontal surface on both surfaces', async () => {
+    service.getForecast.mockResolvedValue({ ...ENVELOPE, ...tiltedBlock('2026-11-16T12:00') });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...POINT,
+      hourly_variables: ['global_tilted_irradiance'],
+      forecast_days: 1,
+    });
+
+    expect(noticeOf(result)).toBe(HORIZONTAL);
+    expect(renderedText(trailerOf(result))).toBe(HORIZONTAL);
+  });
+
+  it('openmeteo_get_historical: names the horizontal surface on both surfaces', async () => {
+    service.getHistorical.mockResolvedValue({ ...ENVELOPE, ...tiltedBlock('2025-12-21T12:00') });
+
+    const result = await runToolContract(openmeteoGetHistoricalTool, {
+      ...POINT,
+      start_date: '2025-12-21',
+      end_date: '2025-12-21',
+      hourly_variables: ['global_tilted_irradiance'],
+    });
+
+    expect(noticeOf(result)).toBe(HORIZONTAL);
+    expect(renderedText(trailerOf(result))).toBe(HORIZONTAL);
+  });
+
+  it('openmeteo_get_ensemble: names the horizontal surface on both surfaces', async () => {
+    // Every member's column carries the plane; the notice names the variable once.
+    const time = hours(2, '2026-11-18T12:00');
+    service.getEnsemble.mockResolvedValue({
+      ...ENVELOPE,
+      hourly_units: {
+        time: 'iso8601',
+        global_tilted_irradiance: 'W/m²',
+        global_tilted_irradiance_member01: 'W/m²',
+      },
+      hourly: {
+        time,
+        global_tilted_irradiance: [626, 640],
+        global_tilted_irradiance_member01: [631, 645],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...POINT,
+      hourly_variables: ['global_tilted_irradiance'],
+      forecast_days: 1,
+    });
+
+    expect(noticeOf(result)).toBe(HORIZONTAL);
+    expect(renderedText(trailerOf(result))).toBe(HORIZONTAL);
   });
 });

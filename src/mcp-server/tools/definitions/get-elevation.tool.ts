@@ -10,6 +10,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import {
   RATE_LIMITED_ERROR,
+  UPSTREAM_REJECTED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
   UPSTREAM_UNAVAILABLE_ERROR,
 } from '../upstream-error.js';
@@ -35,6 +36,7 @@ export const openmeteoGetElevationTool = tool('openmeteo_get_elevation', {
     RATE_LIMITED_ERROR,
     UPSTREAM_UNAVAILABLE_ERROR,
     UPSTREAM_TIMEOUT_ERROR,
+    UPSTREAM_REJECTED_ERROR,
   ],
 
   input: z.object({

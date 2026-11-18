@@ -2,10 +2,13 @@
  * @fileoverview Tool: openmeteo_get_marine — marine wave and ocean forecast plus archive,
  * with an optional current-conditions block. Reshapes columnar response into per-timestamp
  * records. Serves either the forecast window (forecast_days + past_days) or an archive
- * range (start_date + end_date), which upstream treats as mutually exclusive. A wide
- * window reaches the same payload class as the other spill-capable tools, so it carries
- * the shared spillover pattern: spill to DataCanvas when canvas is enabled, bounded
- * preview with truncated: true when it is not.
+ * range (start_date + end_date), which upstream treats as mutually exclusive. Omitting
+ * `models` reads Open-Meteo's best_match blend, whose wave data stops after about 9 of
+ * the 16 forecast days; a `models` selection reaches further or compares wave models,
+ * each column suffixed with its model once two or more are requested. A wide window
+ * reaches the same payload class as the other spill-capable tools, so it carries the
+ * shared spillover pattern: spill to DataCanvas when canvas is enabled, bounded preview
+ * with truncated: true when it is not.
  * @module mcp-server/tools/definitions/get-marine
  */
 
@@ -13,18 +16,25 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
+import { MARINE_NAME_A_MODEL, MARINE_NO_WAVE_DATA } from '@/services/open-meteo/coverage-gap.js';
 import {
   getOpenMeteoService,
   type MarineParams,
 } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
+import { currentMultiModelMessage } from '../current-input.js';
 import { CalendarDateSchema } from '../date-input.js';
+import { MARINE_MODEL_LIST, MARINE_MODEL_NAMES, MARINE_MODELS } from '../model-catalog.js';
 import { cleanNames, nameList } from '../name-input.js';
 import { formatCurrent, formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
+  columnModel,
   composeNotice,
+  describeAnsweringModel,
   describeCoverageGaps,
   describeCurrentGaps,
+  describeDroppedModels,
+  describeModelUnserved,
   findCoverageGaps,
   findCurrentGaps,
   renderNotice,
@@ -36,6 +46,7 @@ import {
   canvasPointerNotice,
   exceedsInlineBudget,
   inlineBudget,
+  narrowingWithModels,
   noCanvasLine,
   noCanvasNotice,
   stageSpill,
@@ -53,8 +64,10 @@ import {
   isDateOutOfRangeReason,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
+  UPSTREAM_REJECTED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
   UPSTREAM_UNAVAILABLE_ERROR,
+  variableOrModelRecovery,
 } from '../upstream-error.js';
 import {
   describeCadenceMismatches,
@@ -71,43 +84,70 @@ import {
 const PAYLOAD_NARROWING =
   'fewer past_days / forecast_days or a shorter start_date–end_date range, or fewer current_variables / hourly_variables / daily_variables';
 
+/** The variable half of the `invalid_variable` recovery; see {@link variableOrModelRecovery}. */
+const VARIABLE_RECOVERY =
+  'Check variable names against Open-Meteo marine docs. Common: wave_height, wave_direction, wave_period, wind_wave_height, swell_wave_height, wave_height_max.';
+
+/**
+ * The marine all-null wording: no model has wave data on land or under sea ice (every
+ * global model is all-null at −90, 0), and the default blend has gaps a single model fills
+ * (all-null at −60, 0, where ecmwf_wam returns values) — so neither claims a model covers
+ * the point. With no models sent, land is the likelier cause, so it leads.
+ */
+const MARINE_ALL_NULL_WORDING = {
+  unselected: `the default blend has no data for this location or window. ${MARINE_NO_WAVE_DATA} ${MARINE_NAME_A_MODEL}`,
+  noSource: MARINE_NO_WAVE_DATA,
+};
+
+/** What to check a name the marine endpoint answered with the unit "undefined" against. */
+const MARINE_NAME_CHECK =
+  'Check it against the marine variable list (wave_height, wave_period, swell_wave_height, sea_surface_temperature, …); weather variables belong in openmeteo_get_forecast.';
+
+/**
+ * The sentence for the plain-named columns upstream reported with the unit "undefined",
+ * or `undefined` when there are none. The marine endpoint shares the forecast API's
+ * variable parser, so a weather or air-quality name it does not serve comes back that
+ * way rather than rejected. Once `models` was sent, the model that answered is the other
+ * cause: `ecmwf_wam` answers `ocean_current_velocity` so, and `meteofrance_currents` every
+ * wave variable. A plain column on a 2+-model call comes from the one model upstream kept,
+ * which the response does not name. Omitting `models` reads best_match, so it is offered
+ * only when best_match was not requested: one that was either answered this call or was
+ * left out of the response for having no data at the coordinate.
+ */
+function describeUnservedNames(
+  columns: readonly string[],
+  models: readonly string[] | undefined,
+): string | undefined {
+  if (columns.length === 0) return;
+  const named = columns.join(', ');
+  if (!models) {
+    return `${named} returned no data — Open-Meteo reported the unit as "undefined", which means the marine endpoint does not serve that name. ${MARINE_NAME_CHECK}`;
+  }
+  const requested = [...new Set(models)];
+  const answered = describeAnsweringModel(requested);
+  const orOmit = requested.includes('best_match') ? '' : ', or omit models';
+  return `${named} returned no data — Open-Meteo reported the unit as "undefined", which means the marine endpoint does not serve that name, or ${answered} does not serve it. ${MARINE_NAME_CHECK} Read a marine name that model does not serve from another model${orOmit}.`;
+}
+
 export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
   description:
-    'Marine wave and ocean conditions for a coastal or ocean coordinate: wave height, wave period, ' +
-    'wave direction, wind-wave height, swell height, sea-surface temperature. Forecast horizon up to ' +
-    '8 days, with optional past_days (up to 92) for recent history — or start_date and end_date ' +
-    'together for an archive range, which returns real wave values back to at least 2022. One window ' +
-    'per call: a date range is mutually exclusive with forecast_days and past_days, and needs both ' +
-    'ends — a lone start_date or end_date is rejected. ' +
-    'Returns per-timestamp records — each entry contains a "time" field plus one key per requested variable. Best for open-ocean ' +
-    'and coastal exposed points — sheltered water such as a sound or bay returns near-zero wave ' +
-    'values, and a land point well inland returns null values, which the notice reports. A land point ' +
-    'near the coast is answered from a nearby sea cell with real values and no notice, so check the ' +
-    'response latitude and longitude is the water you meant. ' +
-    'Common hourly variables: wave_height, wave_direction, wave_period, wind_wave_height, ' +
-    'wind_wave_direction, wind_wave_period, swell_wave_height, swell_wave_direction, ' +
-    'swell_wave_period. Common daily: wave_height_max, wave_direction_dominant, wave_period_max. ' +
-    'Note: ocean_current_velocity is null for non-open-ocean coordinates. ' +
-    'Set current_variables for conditions at this instant — Open-Meteo serves those from ' +
-    '15-minute model data, and the response carries a current object plus a current_units map, ' +
-    'alongside either window. length_unit "imperial" returns heights in ft, wind_speed_unit sets ' +
-    'the ocean_current_velocity unit, and temperature_unit the sea_surface_temperature unit — ' +
-    'converted upstream, with every unit read from the *_units maps. ' +
-    'A wide window — a large past_days or date range plus many variables — produces thousands of ' +
-    'records; these spill to a DataCanvas when canvas is enabled, returning canvas_id and ' +
-    'table_name with truncated: true — inspect the staged columns with ' +
-    'openmeteo_dataframe_describe, then query the full set with openmeteo_dataframe_query. ' +
-    'With canvas disabled they return a bounded preview instead. ' +
-    'At least one of current_variables, hourly_variables, or daily_variables is required.',
+    'Marine wave and ocean conditions for a coastal or ocean coordinate: wave height, wave period, wave direction, wind-wave height, swell height, sea-surface temperature. Forecast horizon up to 16 days, with optional past_days (up to 92) for recent history — or start_date and end_date together for an archive range, which returns real wave values back to at least 2022. One window per call: a date range is mutually exclusive with forecast_days and past_days, and needs both ends — a lone start_date or end_date is rejected. With models omitted the data is Open-Meteo\'s best_match blend, whose wave data runs about 9 days — later days come back null and the notice says where the data ends. Set models to reach further (ncep_gfswave025 runs 16 days, ecmwf_wam about 15) or to compare wave models side by side; with 2+ models every hourly and daily key carries the model name as a suffix (wave_height_ecmwf_wam). Returns per-timestamp records — each entry contains a "time" field plus one key per requested variable. Best for open-ocean and coastal exposed points — sheltered water such as a sound or bay returns near-zero wave values, and a land point well inland returns null values, which the notice reports. A land point near the coast is answered from a nearby sea cell with real values and no notice, so check the response latitude and longitude is the water you meant. Common hourly variables: wave_height, wave_direction, wave_period, wind_wave_height, wind_wave_direction, wind_wave_period, swell_wave_height, swell_wave_direction, swell_wave_period. Common daily: wave_height_max, wave_direction_dominant, wave_period_max. Note: ocean_current_velocity is null for non-open-ocean coordinates. Set current_variables for conditions at this instant — Open-Meteo serves those from 15-minute model data, and the response carries a current object plus a current_units map, alongside either window. length_unit "imperial" returns heights in ft, wind_speed_unit sets the ocean_current_velocity unit, and temperature_unit the sea_surface_temperature unit — converted upstream, with every unit read from the *_units maps. A wide window — a large past_days or date range plus many variables — produces thousands of records; these spill to a DataCanvas when canvas is enabled, returning canvas_id and table_name with truncated: true — inspect the staged columns with openmeteo_dataframe_describe, then query the full set with openmeteo_dataframe_query. With canvas disabled they return a bounded preview instead. At least one of current_variables, hourly_variables, or daily_variables is required.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
     {
       reason: 'invalid_variable',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An unknown marine variable name was requested.',
+      when: 'An unknown marine variable name or marine model was requested.',
+      recovery: variableOrModelRecovery(VARIABLE_RECOVERY, MARINE_MODEL_NAMES),
+      retryable: false,
+    },
+    {
+      reason: 'current_multi_model',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'current_variables was combined with two or more models — Open-Meteo answers current conditions from a single model in one unsuffixed block, so the values could not be attributed — caught before the request is sent.',
       recovery:
-        'Check variable names against Open-Meteo marine docs. Common: wave_height, wave_direction, wave_period, wind_wave_height, swell_wave_height, wave_height_max.',
+        'Send current_variables with at most one model, and compare models through hourly_variables or daily_variables, whose columns carry a per-model suffix.',
       retryable: false,
     },
     {
@@ -169,13 +209,14 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       reason: 'request_too_large',
       code: JsonRpcErrorCode.ValidationError,
       when: 'Open-Meteo refused the request as asking for too much data in one call.',
-      recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}. Every requested name is valid — the size of the request is what was rejected, so re-checking spelling will not help.`,
+      recovery: `Narrow the request and retry: ${PAYLOAD_NARROWING}, or fewer models when several were requested. Every requested name is valid — the size of the request is what was rejected, so re-checking spelling will not help.`,
       retryable: false,
     },
     coverageGapContract('marine'),
     RATE_LIMITED_ERROR,
     UPSTREAM_UNAVAILABLE_ERROR,
     UPSTREAM_TIMEOUT_ERROR,
+    UPSTREAM_REJECTED_ERROR,
   ],
 
   // Open-Meteo's own parameter names for the three variable lists.
@@ -195,7 +236,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       ),
     longitude: z.number().min(-180).max(180).describe('Longitude in decimal degrees.'),
     current_variables: nameList(50).describe(
-      'Marine variables to return for the current instant (e.g., ["wave_height", "wave_period", "wave_direction", "sea_surface_temperature"]). Uses Open-Meteo\'s 15-minute current-conditions data, so it answers "what are the waves right now?" without requesting an hourly series and picking a row. Takes the hourly variable names — a daily aggregate such as wave_height_max belongs in daily_variables and is rejected here. Combines with past_days or a start_date/end_date range; the current block is always the present instant. Satisfies the variable requirement on its own.',
+      'Marine variables to return for the current instant (e.g., ["wave_height", "wave_period", "wave_direction", "sea_surface_temperature"]). Uses Open-Meteo\'s 15-minute current-conditions data, so it answers "what are the waves right now?" without requesting an hourly series and picking a row. Takes the hourly variable names — a daily aggregate such as wave_height_max belongs in daily_variables and is rejected here. Combines with past_days or a start_date/end_date range; the current block is always the present instant. Takes at most one model. Satisfies the variable requirement on its own.',
     ),
     hourly_variables: nameList(50).describe(
       'Hourly marine variables (e.g., ["wave_height", "wave_direction", "wave_period", "wind_wave_height", "swell_wave_height"]). Hourly names only — a daily aggregate such as wave_height_max or wave_direction_dominant belongs in daily_variables and is rejected here. At least one of current_variables, hourly_variables, or daily_variables is required.',
@@ -203,14 +244,17 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     daily_variables: nameList(50).describe(
       'Daily marine summary variables (e.g., ["wave_height_max", "wave_direction_dominant", "wave_period_max"]). Daily names only — an hourly name such as wave_height belongs in hourly_variables and is rejected here; for a daily summary use its published aggregate (wave_height_max). At least one of current_variables, hourly_variables, or daily_variables is required.',
     ),
+    models: nameList(MARINE_MODELS.length).describe(
+      `Marine models to read from — to reach past the default blend's horizon of about 9 days, or to compare wave models side by side. Documented: ${MARINE_MODEL_LIST}. Omit to use Open-Meteo's best_match blend. With 2+ models every hourly and daily column and unit key is suffixed with the model name (wave_height_ecmwf_wam, and best_match's as wave_height_marine_best_match); one model keeps plain names. A regional model serves only its own domain: when every requested model misses the coordinate the call fails as coverage_gap, and when only some do, Open-Meteo drops those and the notice names them, or, when one model is left with unsuffixed columns, says the values cannot be attributed to a model. current_variables takes at most one model. Works with either window. A name outside this list is sent upstream rather than rejected here.`,
+    ),
     forecast_days: z
       .number()
       .int()
       .min(1)
-      .max(8)
+      .max(16)
       .optional()
       .describe(
-        'Forecast horizon in days (1–8). Omit for the upstream default of 7. Mutually exclusive with start_date/end_date — omit it entirely when pulling an archive range.',
+        "Forecast horizon in days (1–16). Omit for the upstream default of 7. The default blend's wave data runs about 9 days, so later days come back null and the notice says where the data ends — set models to a model that runs longer, such as ncep_gfswave025 (16 days). Mutually exclusive with start_date/end_date — omit it entirely when pulling an archive range.",
       ),
     past_days: z
       .number()
@@ -250,9 +294,23 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
   }),
 
   output: z.object({
-    latitude: z.number().describe('Snapped latitude'),
-    longitude: z.number().describe('Snapped longitude'),
+    latitude: z
+      .number()
+      .describe(
+        'Latitude of the grid cell that answered — with models set, on the grid of the first listed model that covers the coordinate',
+      ),
+    longitude: z
+      .number()
+      .describe(
+        'Longitude of the grid cell that answered (with models set, on the grid of the first listed model that covers the coordinate)',
+      ),
     timezone: z.string().describe('Resolved IANA timezone'),
+    models: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Marine models requested — echoes the models input. Absent when models was omitted, which means the data came from Open-Meteo's best_match blend.",
+      ),
     record_count: z
       .number()
       .describe(
@@ -276,13 +334,13 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .array(z.record(z.string(), z.unknown()))
       .optional()
       .describe(
-        'Per-hour records with "time" (ISO 8601) + one key per requested variable (e.g., wave_height, wave_direction, wave_period). Units are in the hourly_units map: heights follow length_unit, ocean_current_velocity follows wind_speed_unit, sea_surface_temperature follows temperature_unit. Absent when only daily_variables were requested. When truncated, contains only a preview — query canvas_id for the full dataset when one is present.',
+        'Per-hour records with "time" (ISO 8601) + one key per requested variable (e.g., wave_height, wave_direction, wave_period) — one key per variable per model, suffixed with the model name (wave_height_ecmwf_wam), when 2+ models were requested. Units are in the hourly_units map: heights follow length_unit, ocean_current_velocity follows wind_speed_unit, sea_surface_temperature follows temperature_unit. Absent when only daily_variables were requested. When truncated, contains only a preview — query canvas_id for the full dataset when one is present.',
       ),
     daily: z
       .array(z.record(z.string(), z.unknown()))
       .optional()
       .describe(
-        'Per-day summary records with "time" (YYYY-MM-DD) + variable keys (e.g., wave_height_max, wave_direction_dominant, wave_period_max). Units are in the daily_units map; heights follow length_unit. Absent when only hourly_variables were requested. When truncated, contains only a preview — query canvas_id for the full dataset when one is present.',
+        'Per-day summary records with "time" (YYYY-MM-DD) + variable keys (e.g., wave_height_max, wave_direction_dominant, wave_period_max) — per model, suffixed with the model name, when 2+ models were requested. Units are in the daily_units map; heights follow length_unit. Absent when only hourly_variables were requested. When truncated, contains only a preview — query canvas_id for the full dataset when one is present.',
       ),
     current_units: z
       .record(z.string(), z.string())
@@ -294,13 +352,13 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .record(z.string(), z.string())
       .optional()
       .describe(
-        'Variable → unit string for hourly data, as Open-Meteo labels it (e.g., {"wave_height": "ft", "wave_period": "s"} under length_unit "imperial"). Absent when no hourly_variables were requested.',
+        'Variable → unit string for hourly data, as Open-Meteo labels it (e.g., {"wave_height": "ft", "wave_period": "s"} under length_unit "imperial"), keyed by the same model-suffixed names as the records when 2+ models were requested. Absent when no hourly_variables were requested.',
       ),
     daily_units: z
       .record(z.string(), z.string())
       .optional()
       .describe(
-        'Variable → unit string for daily data. Absent when no daily_variables were requested.',
+        'Variable → unit string for daily data, model-suffixed like the records when 2+ models were requested. Absent when no daily_variables were requested.',
       ),
     canvas_id: z
       .string()
@@ -326,7 +384,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve); current values that are null under a real unit (no coverage at this location, such as a point well inland); recognized variables whose requested window or location falls outside the data\'s coverage (a point well inland returns nulls), with the timestamps that do carry values; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the endpoint returned with the unit "undefined" (a name it parsed but does not serve, or — on a model-suffixed column, or the plain column of a call that sent models — a variable that model does not serve); requested models Open-Meteo left out for having no data at this coordinate, or the plain-named columns a multi-model request cannot attribute to one model; current values that are null under a real unit (no coverage at this location, such as a point well inland); recognized variables whose requested window or location falls outside the data\'s coverage (a point well inland returns nulls, and a forecast window past the model\'s horizon ends in nulls), with the timestamps that do carry values — a variable null across the whole window is attributed to the selected model that returned it empty when another selected model returned values for it; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
 
@@ -338,6 +396,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       current_variables: cleanNames(args.current_variables),
       hourly_variables: cleanNames(args.hourly_variables),
       daily_variables: cleanNames(args.daily_variables),
+      models: cleanNames(args.models),
     };
     const hasCurrent = (input.current_variables?.length ?? 0) > 0;
     const hasHourly = (input.hourly_variables?.length ?? 0) > 0;
@@ -348,6 +407,10 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
         'Provide at least one of current_variables, hourly_variables, or daily_variables — blank or whitespace-only entries do not count.',
       );
     }
+
+    // A current block comes from one model however many are sent, so it cannot sit beside a comparison.
+    const multiModel = currentMultiModelMessage(input.current_variables, input.models);
+    if (multiModel) throw ctx.fail('current_multi_model', multiModel);
 
     /*
      * Reject a confident misplacement before the call. Upstream rejects a wrong-bucket
@@ -427,6 +490,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
         current: input.current_variables,
         hourly: input.hourly_variables,
         daily: input.daily_variables,
+        models: input.models,
         ...window,
         /*
          * Each unit input defaults to the endpoint's own default, which goes out as no
@@ -453,14 +517,27 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       if (isRequestTooLargeReason(data.reason)) {
         throw ctx.fail(
           'request_too_large',
-          frameRequestTooLargeMessage(data.reason, PAYLOAD_NARROWING),
+          frameRequestTooLargeMessage(
+            data.reason,
+            narrowingWithModels(PAYLOAD_NARROWING, input.models),
+          ),
         );
       }
       // An archive range outside what upstream accepts — its message names the range.
       if (isDateOutOfRangeReason(data.reason)) {
         throw ctx.fail('date_out_of_range', data.reason);
       }
-      throw ctx.fail('invalid_variable', frameInvalidVariableMessage(data.reason));
+      /*
+       * An unknown model arrives through the same envelope as an unknown variable
+       * ("Cannot initialize MultiDomains from invalid String value <name>"), and the
+       * models list goes out with a literal comma, so upstream names only the offender.
+       * With no models sent, the hint drops the model list along with the model label.
+       */
+      throw ctx.fail(
+        'invalid_variable',
+        frameInvalidVariableMessage(data.reason, input.models ? 'variable or model' : 'variable'),
+        input.models ? undefined : { recovery: { hint: VARIABLE_RECOVERY } },
+      );
     }
 
     const rawHourlyUnits = toUnitsMap(data.hourly_units as Record<string, unknown> | undefined);
@@ -483,37 +560,53 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     const notice = composeNotice(ctx);
 
     /*
-     * Backstop for a name the catalog does not carry: the marine endpoint shares the
-     * forecast API's variable parser, so a weather or air-quality name it does not
-     * serve — temperature_2m, pm2_5 — comes back as HTTP 200 with an all-null column
-     * whose unit is the literal string "undefined" rather than a rejection. Left unsaid
-     * that reads as a genuine data gap. Only a name the parser cannot resolve at all is
-     * rejected upstream.
+     * Backstop for a name the catalog does not carry: a column Open-Meteo answered with
+     * the unit "undefined" rather than a rejection, which left unsaid reads as a genuine
+     * data gap. Only a name the parser cannot resolve at all is rejected upstream. On a
+     * `<variable>_<model>` column the unit means that model does not serve the variable
+     * (swell_wave_height_ecmwf_wam), which the marine-name advice would misdirect, so
+     * those get their own sentence.
      */
-    const emptyColumns = undefinedUnitColumns(rawHourlyUnits, rawDailyUnits, rawCurrentUnits);
-    if (emptyColumns.length > 0) {
-      notice.add(
-        `${emptyColumns.join(', ')} returned no data — Open-Meteo reported the unit as "undefined", which means the marine endpoint does not serve that name. Check it against the marine variable list (wave_height, wave_period, swell_wave_height, sea_surface_temperature, …); weather variables belong in openmeteo_get_forecast.`,
-      );
-    }
+    const selection = {
+      defaultModel: 'best_match',
+      models: input.models,
+      variables: [...(input.hourly_variables ?? []), ...(input.daily_variables ?? [])],
+      allNullWording: MARINE_ALL_NULL_WORDING,
+    };
+    const unservedColumns = undefinedUnitColumns(rawHourlyUnits, rawDailyUnits, rawCurrentUnits);
+    notice.add(describeModelUnserved(unservedColumns, selection));
+    notice.add(
+      describeUnservedNames(
+        unservedColumns.filter((column) => !columnModel(column, selection)),
+        input.models,
+      ),
+    );
+
+    // A model Open-Meteo dropped from a multi-model request for having no data here.
+    notice.add(describeDroppedModels(selection, data.hourly, data.daily));
 
     /*
-     * Coverage, the case the check above cannot see: a served variable the wave model
+     * Coverage, the case the checks above cannot see: a served variable the wave model
      * carries nothing for at this coordinate — every wave variable at a land point,
-     * ocean_current_velocity away from open ocean — comes back null with its real unit
-     * intact.
+     * ocean_current_velocity away from open ocean — or past its horizon comes back null
+     * with its real unit intact. The selection decides whom an all-null column is put
+     * on: ecmwf_wam returns wave_height empty over a 2024 range beside an era5_ocean
+     * column with values.
      */
     notice.add(describeCurrentGaps(findCurrentGaps(data.current, rawCurrentUnits)));
     notice.add(
       describeCoverageGaps(
-        findCoverageGaps('hourly', data.hourly, rawHourlyUnits),
-        findCoverageGaps('daily', data.daily, rawDailyUnits),
+        findCoverageGaps('hourly', data.hourly, rawHourlyUnits, undefined, selection),
+        findCoverageGaps('daily', data.daily, rawDailyUnits, undefined, selection),
       ),
     );
     notice.add(
       unitsTrimmedNotice(
         omittedUnits,
-        'fewer current_variables / hourly_variables / daily_variables',
+        narrowingWithModels(
+          'fewer current_variables / hourly_variables / daily_variables',
+          input.models,
+        ),
       ),
     );
 
@@ -544,6 +637,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
           latitude: data.latitude,
           longitude: data.longitude,
           timezone: data.timezone,
+          models: input.models,
           record_count: handle.rowCount,
           current: data.current,
           hourly: preview.hourly,
@@ -568,12 +662,13 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
        * omitted rows are behind no canvas at all. The notice trailer carries it into
        * content[] as well, so format() renders only the short line.
        */
-      notice.add(noCanvasNotice(PAYLOAD_NARROWING));
+      notice.add(noCanvasNotice(narrowingWithModels(PAYLOAD_NARROWING, input.models)));
       const preview = boundedPreviewByCadence(hourlyRecords, dailyRecords, rowBudget);
       return {
         latitude: data.latitude,
         longitude: data.longitude,
         timezone: data.timezone,
+        models: input.models,
         record_count: allRecords.length,
         current: data.current,
         hourly: preview.hourly,
@@ -591,6 +686,7 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
       latitude: data.latitude,
       longitude: data.longitude,
       timezone: data.timezone,
+      models: input.models,
       record_count: allRecords.length,
       current: data.current,
       hourly: hourlyRecords,
@@ -608,14 +704,15 @@ export const openmeteoGetMarineTool = tool('openmeteo_get_marine', {
     const lines = [
       '## Marine conditions',
       `**Location:** ${result.latitude}, ${result.longitude} | **Timezone:** ${result.timezone}`,
-      `**Records:** ${result.record_count} | **Truncated:** ${result.truncated}`,
-      '',
     ];
+    // Only when requested: an omitted models list is best_match, and renders as it always has.
+    if (result.models) lines.push(`**Models:** ${result.models.join(', ')}`);
+    lines.push(`**Records:** ${result.record_count} | **Truncated:** ${result.truncated}`, '');
 
     if (result.truncated && result.canvas_id) {
       lines.push(canvasPointerLine(result.canvas_id, result.table_name ?? ''), '');
     } else if (result.truncated) {
-      lines.push(noCanvasLine(PAYLOAD_NARROWING), '');
+      lines.push(noCanvasLine(narrowingWithModels(PAYLOAD_NARROWING, result.models)), '');
     }
 
     if (result.current_units) {

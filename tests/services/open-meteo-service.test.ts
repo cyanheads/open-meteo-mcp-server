@@ -10,12 +10,14 @@ import type { AddressInfo } from 'node:net';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { openmeteoGetEnsembleTool } from '@/mcp-server/tools/definitions/get-ensemble.tool.js';
 import { openmeteoGetMarineTool } from '@/mcp-server/tools/definitions/get-marine.tool.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '@/mcp-server/tools/reshape-utils.js';
 import {
   getOpenMeteoService,
   initOpenMeteoService,
 } from '@/services/open-meteo/open-meteo-service.js';
+import { wireError } from '../helpers/wire-error.js';
 
 const fetchMock = vi.fn();
 
@@ -65,7 +67,7 @@ describe('OpenMeteoService upstream classification', () => {
     const ctx = createMockContext();
 
     const error = await getOpenMeteoService()
-      .getEnsemble(47.6, -122.3, { hourly: ['temperature_2m'], models: 'icon_eu_eps' }, ctx)
+      .getEnsemble(47.6, -122.3, { hourly: ['temperature_2m'], models: ['icon_eu_eps'] }, ctx)
       .catch((e: Error) => e);
 
     expect(error).toMatchObject({ code: JsonRpcErrorCode.ValidationError });
@@ -210,7 +212,7 @@ describe('OpenMeteoService upstream classification', () => {
       .getEnsemble(
         47.6,
         -122.3,
-        { hourly: ['temperature_2m'], models: 'meteoswiss_icon_ch1_ensemble' },
+        { hourly: ['temperature_2m'], models: ['meteoswiss_icon_ch1_ensemble'] },
         ctx,
       )
       .catch((e: Error) => e);
@@ -224,12 +226,11 @@ describe('OpenMeteoService upstream classification', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('names the grid rather than a models parameter marine does not expose (#45)', async () => {
+  it('names a single model and open water, never the grid, at a marine point the default blend misses (#45)', async () => {
     /*
-     * Live body from the marine endpoint at the South Pole — the wave grid has no cell
-     * there, and the endpoint reports it through the same envelope the meteoswiss_*
-     * ensemble pair uses. openmeteo_get_marine has no models input, so the #33 wording
-     * asked the caller to change a parameter that does not exist on the tool.
+     * Live body from the marine endpoint at the South Pole for a call without models — the
+     * default blend has no cell there, and the endpoint reports it through the same
+     * envelope the meteoswiss_* ensemble pair uses. No wave model has data there either.
      */
     respondWith('{"error":true,"reason":"No data is available for this location"}', 400);
     const ctx = createMockContext();
@@ -243,10 +244,89 @@ describe('OpenMeteoService upstream classification', () => {
     expect(error.message).toContain('no data for this location');
     // The refused coordinate, so the caller sees which input was rejected.
     expect(error.message).toContain('-90, 0');
-    expect(error.message).toContain("marine dataset's grid does not cover this coordinate");
-    expect(error.message).not.toMatch(/model/i);
-    expect(error.message).not.toMatch(/switch/i);
+    expect(error.message).toBe(
+      'Open-Meteo returned no data for this location (-90, 0). A point on land or under sea ice has no wave data from any model, so there the remedy is a coordinate in open water. For a point in open water, name a model in models: the default blend has gaps a single wave model can fill. Retrying returns the same response.',
+    );
+    // The declared recovery of a call without models: nothing to carry as a hint.
+    expect((error as McpError).data).toEqual({ reason: 'coverage_gap' });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('names another model or the default blend, and carries it as the hint, when a marine call sent models (#104)', async () => {
+    // Live: models=ewam at 45, −30 answers HTTP 400 "No data is available for this
+    // location" — ewam covers Europe only.
+    respondWith('{"error":true,"reason":"No data is available for this location"}', 400);
+    const switchModels =
+      'Name another model, or omit models to read the default blend. A point on land or under sea ice has no wave data from any model, so there the remedy is a coordinate in open water. Retrying returns the same response.';
+
+    const error = await getOpenMeteoService()
+      .getMarine(45, -30, { hourly: ['wave_height'], models: ['ewam'] }, createMockContext())
+      .catch((e: Error) => e);
+
+    expect(error).toBeInstanceOf(McpError);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: `Open-Meteo returned no data for this location (45, -30). ${switchModels}`,
+      data: { reason: 'coverage_gap', recovery: { hint: switchModels } },
+    });
+    expect(requestedUrls()).toEqual([
+      expect.stringContaining(
+        '/v1/marine?latitude=45&longitude=-30&hourly=wave_height&models=ewam&',
+      ),
+    ]);
+  });
+
+  it.each([
+    {
+      sent: 'models naming a model that missed',
+      models: ['ewam'],
+      cause: 'a regional model reports a coordinate outside the area it covers',
+      remedy:
+        'Name another model, or omit models to read the default blend. A point on land or under sea ice has no wave data from any model, so there the remedy is a coordinate in open water.',
+    },
+    {
+      sent: 'no models',
+      models: undefined,
+      cause: 'the endpoint reports a coordinate outside the grid it covers',
+      remedy:
+        'A point on land or under sea ice has no wave data from any model, so there the remedy is a coordinate in open water. For a point in open water, name a model in models: the default blend has gaps a single wave model can fill.',
+    },
+  ])(
+    'words the cause of a marine nan body by the models sent, with $sent (#104)',
+    async ({ models, cause, remedy }) => {
+      respondWith(
+        '{"latitude":nan,"longitude":nan,"generationtime_ms":0.01,"utc_offset_seconds":0,"timezone":"GMT","timezone_abbreviation":"GMT"}',
+      );
+
+      const error = await getOpenMeteoService()
+        .getMarine(45, -30, { hourly: ['wave_height'], models }, createMockContext())
+        .catch((e: Error) => e);
+
+      expect(error).toBeInstanceOf(McpError);
+      expect((error as McpError).message).toBe(
+        `Open-Meteo returned no data for this location (45, -30) — the response carried nan coordinates and no data blocks, which is how ${cause}. ${remedy} Retrying returns the same response.`,
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('sends the marine models list with a literal comma, and omits it when absent (#104)', async () => {
+    respondWith('{"latitude":45,"longitude":-30}');
+    const ctx = createMockContext();
+    const service = getOpenMeteoService();
+
+    await service.getMarine(45, -30, { hourly: ['wave_height'] }, ctx);
+    await service.getMarine(
+      45,
+      -30,
+      { hourly: ['wave_height'], models: ['ecmwf_wam', 'ncep_gfswave016'] },
+      ctx,
+    );
+
+    const [withoutModels, withModels] = requestedUrls().map((url) => new URL(url));
+    expect(withoutModels?.searchParams.has('models')).toBe(false);
+    expect(withModels?.searchParams.get('models')).toBe('ecmwf_wam,ncep_gfswave016');
+    expect(withModels?.search).not.toContain('%2C');
   });
 
   it('names the grid on the flood endpoint, which reaches the gap through the nan body (#45)', async () => {
@@ -423,7 +503,7 @@ describe('OpenMeteoService upstream classification', () => {
         getOpenMeteoService().getEnsemble(
           -90,
           0,
-          { hourly: ['temperature_2m'], models: 'icon_eu_eps' },
+          { hourly: ['temperature_2m'], models: ['icon_eu_eps'] },
           createMockContext(),
         ),
     ],
@@ -498,7 +578,7 @@ describe('OpenMeteoService upstream classification', () => {
     const body = await getOpenMeteoService().getEnsemble(
       47.6,
       -122.3,
-      { hourly: ['temperature_2m'], models: 'BOGUS_MODEL' },
+      { hourly: ['temperature_2m'], models: ['BOGUS_MODEL'] },
       ctx,
     );
 
@@ -711,7 +791,7 @@ describe('OpenMeteoService failure reasons (#77)', () => {
         getOpenMeteoService().getEnsemble(
           47.6,
           -122.3,
-          { hourly: ['temperature_2m'], models: 'icon_d2_eps' },
+          { hourly: ['temperature_2m'], models: ['icon_d2_eps'] },
           ctx,
         ),
     ],
@@ -818,6 +898,175 @@ describe('OpenMeteoService failure reasons (#77)', () => {
     // The caller's own abort reason, neither tagged nor rewrapped as an outage.
     expect(error).toBe(controller.signal.reason);
   });
+});
+
+/**
+ * A 4xx is classified by status ahead of body shape. Open-Meteo rejects a caller's input
+ * with HTTP 400 and its error envelope; any other 4xx but a 429 or a 414 comes from the
+ * configured endpoint or a layer in front of it, and fails once as `upstream_rejected`.
+ */
+describe('OpenMeteoService 4xx classification (#99)', () => {
+  const rejected = (status: number) =>
+    `Open-Meteo answered HTTP ${status} without an input rejection, so the request's arguments did not cause this.`;
+  const EXHAUSTED = 'Open-Meteo API unavailable after 3 attempts.';
+
+  type Outcome = { value: unknown } | { error: McpError };
+
+  /** Answer every request with `body` and `status`; run a forecast call past the whole backoff. */
+  const settleForecast = async (body: string, status: number): Promise<Outcome> => {
+    fetchMock.mockImplementation(() => Promise.resolve(new Response(body, { status })));
+    const pending = getOpenMeteoService()
+      .getForecast(47.6, -122.3, { hourly: ['temperature_2m'] }, createMockContext())
+      .then(
+        (value: unknown) => ({ value }),
+        (error: unknown) => ({ error: error as McpError }),
+      );
+    await vi.advanceTimersByTimeAsync(10_000);
+    return pending;
+  };
+
+  /** The rejection a settled call ended in; fails the test when the call returned a body. */
+  const errorOf = (outcome: Outcome): McpError => {
+    if (!('error' in outcome)) throw new Error('Expected the call to reject');
+    return outcome.error;
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', fetchMock);
+    initOpenMeteoService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ['a JSON body without the envelope', 404, '{"message":"Not Found"}'],
+    ['a JSON auth error', 401, '{"error":"unauthorized"}'],
+    ['a JSON body without error or reason', 400, '{"detail":"bad request","code":17}'],
+    ['an empty body', 404, ''],
+    ['a plain-text body', 404, 'Not Found'],
+    ['an HTML page', 403, '<!DOCTYPE html><html><body><h1>403 Forbidden</h1></body></html>'],
+    ['an HTML page', 400, '<html><body>400 Bad Request</body></html>'],
+    [
+      "Open-Meteo's envelope for a path its host does not serve",
+      404,
+      '{"error":true,"reason":"Not Found"}',
+    ],
+    ['an envelope saying error: false', 405, '{"error":false,"reason":"Method Not Allowed"}'],
+    ['an envelope saying error: false', 400, '{"error":false,"reason":"Bad Request"}'],
+    ['a JSON error string', 400, '{"error":"bad request"}'],
+    [
+      'an input-rejection envelope on a status other than 400',
+      403,
+      '{"error":true,"reason":"Invalid value: Cannot initialize ForecastVariable from invalid String value bogus."}',
+    ],
+    ['a JSON null', 404, 'null'],
+    ['a JSON null', 400, 'null'],
+    ['a JSON array', 400, '[]'],
+  ])('fails %s (HTTP %i) once as upstream_rejected', async (_label, status, body) => {
+    const error = errorOf(await settleForecast(body, status));
+
+    expect(error).toBeInstanceOf(McpError);
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.message).toBe(rejected(status));
+    expect(error.data).toEqual({ reason: 'upstream_rejected', status, retryable: false });
+    expect(error.cause).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      'an unknown name',
+      '{"error":true,"reason":"Invalid value: Cannot initialize ForecastVariable from invalid String value bogus."}',
+    ],
+    [
+      'too much data',
+      '{"error":true,"reason":"Your API call requests too much data. Please reduce the number of variables, locations and/or weather models."}',
+    ],
+    [
+      'a date out of range',
+      '{"error":true,"reason":"Parameter \'start_date\' is out of allowed range from 2016-01-01 to 2026-12-03"}',
+    ],
+    ['an unknown time zone', '{"reason":"Invalid timezone","error":true}'],
+  ])(
+    'hands an enveloped HTTP 400 for %s back to the handler, after one request',
+    async (_label, body) => {
+      const outcome = await settleForecast(body, 400);
+
+      expect(outcome).toEqual({ value: JSON.parse(body) });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    [
+      'an over-long request (HTTP 414) answered with an HTML page',
+      414,
+      '<html><head><title>414 Request-URI Too Large</title></head><body><center><h1>414 Request-URI Too Large</h1></center></body></html>',
+    ],
+    ['a 200 HTML page', 200, '<!DOCTYPE html><html><body>Service starting</body></html>'],
+  ])('keeps %s on the retry ladder', async (_label, status, body) => {
+    const error = errorOf(await settleForecast(body, status));
+
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.message).toBe(EXHAUSTED);
+    expect(error.data).toEqual({ reason: 'upstream_unavailable', retryAttempts: 3 });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    [
+      'an HTML page',
+      '<html><head><title>408 Request Time-out</title></head><body>408</body></html>',
+    ],
+    ['a JSON body without the envelope', '{"message":"Request Timeout"}'],
+    ['an empty body', ''],
+  ])(
+    'retries a request timeout (HTTP 408) with %s by status, then reports the outage',
+    async (_label, body) => {
+      const error = errorOf(await settleForecast(body, 408));
+
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.message).toBe(EXHAUSTED);
+      expect(error.data).toEqual({ reason: 'upstream_unavailable', retryAttempts: 3 });
+      expect((error.cause as Error | undefined)?.message).toBe(
+        'Open-Meteo API returned 408. (failed after 3 attempts)',
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it('keeps a 414 JSON body without the envelope as the unretried ValidationError it was', async () => {
+    const error = errorOf(await settleForecast('{"message":"URI Too Long"}', 414));
+
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.message).toBe('Open-Meteo API returned 414.');
+    expect(error.data).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['a JSON null', 200, 'null'],
+    ['a JSON null', 503, 'null'],
+    ['a bare JSON string', 200, '"ok"'],
+  ])(
+    'reads %s (HTTP %i) as an unparseable response, retried to the outage',
+    async (_label, status, body) => {
+      const error = errorOf(await settleForecast(body, status));
+
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.message).toBe(EXHAUSTED);
+      expect(error.data).toEqual({ reason: 'upstream_unavailable', retryAttempts: 3 });
+      expect((error.cause as Error | undefined)?.message).toBe(
+        'Open-Meteo API returned unparseable response. (failed after 3 attempts)',
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    },
+  );
 });
 
 /**
@@ -1169,6 +1418,71 @@ describe('OpenMeteoService request encoding', () => {
     expect(sent).toEqual([[], ['land'], ['sea'], ['nearest']]);
   });
 
+  type Plane = { tilt?: number; azimuth?: number };
+  it.each([
+    [
+      'forecast',
+      (plane: Plane, ctx: ReturnType<typeof createMockContext>) =>
+        getOpenMeteoService().getForecast(
+          33.45,
+          -112.07,
+          { hourly: ['global_tilted_irradiance'], ...plane },
+          ctx,
+        ),
+    ],
+    [
+      'archive',
+      (plane: Plane, ctx: ReturnType<typeof createMockContext>) =>
+        getOpenMeteoService().getHistorical(
+          33.45,
+          -112.07,
+          {
+            start_date: '2025-12-21',
+            end_date: '2025-12-21',
+            hourly: ['global_tilted_irradiance'],
+            ...plane,
+          },
+          ctx,
+        ),
+    ],
+    [
+      'ensemble',
+      (plane: Plane, ctx: ReturnType<typeof createMockContext>) =>
+        getOpenMeteoService().getEnsemble(
+          33.45,
+          -112.07,
+          { hourly: ['global_tilted_irradiance'], ...plane },
+          ctx,
+        ),
+    ],
+  ])('sends tilt and azimuth on the %s request only when set (#101)', async (_label, send) => {
+    /*
+     * Omitted reaches the wire as no parameter, so the request is the one sent without
+     * them; an explicit 0 is a plane the caller chose and goes out as written.
+     */
+    const ctx = createMockContext();
+    const planes: Plane[] = [
+      {},
+      { tilt: 33 },
+      { azimuth: -90 },
+      { tilt: 0, azimuth: 0 },
+      { tilt: 33.5, azimuth: -180 },
+    ];
+    for (const plane of planes) await send(plane, ctx);
+
+    const sent = requestedUrls().map((url) => {
+      const query = new URL(url).searchParams;
+      return [query.getAll('tilt'), query.getAll('azimuth')];
+    });
+    expect(sent).toEqual([
+      [[], []],
+      [['33'], []],
+      [[], ['-90']],
+      [['0'], ['0']],
+      [['33.5'], ['-180']],
+    ]);
+  });
+
   it('sends the climate models list with a literal comma so upstream isolates the offender (#34)', async () => {
     /*
      * Percent-encoding the comma makes upstream reject the list as one value:
@@ -1193,6 +1507,50 @@ describe('OpenMeteoService request encoding', () => {
     const url = requestedUrls()[0] ?? '';
     expect(url).toContain('models=MRI_AGCM3_2_S,EC_Earth3P_HR');
     expect(url).not.toContain('%2C');
+  });
+
+  it('sends the ensemble models list with a literal comma, like every other models list (#98)', async () => {
+    await getOpenMeteoService().getEnsemble(
+      47.6,
+      -122.3,
+      { hourly: ['temperature_2m'], models: ['ecmwf_ifs025_ensemble', 'ncep_gefs025'] },
+      createMockContext(),
+    );
+
+    const url = requestedUrls()[0] ?? '';
+    expect(new URL(url).searchParams.get('models')).toBe('ecmwf_ifs025_ensemble,ncep_gefs025');
+    expect(url).not.toContain('%2C');
+  });
+
+  it('names only the unknown model of an ensemble pair the tool sends (#98)', async () => {
+    /*
+     * Live /v1/ensemble answers to the two spellings of one pair: a literal comma is split,
+     * and only the unknown name is rejected; an encoded one is read as a single name, so
+     * the rejection names the valid ncep_gefs025 as well.
+     */
+    const rejectedValue = new Map([
+      ['ncep_gefs025,not_a_model', 'not_a_model'],
+      ['ncep_gefs025%2Cnot_a_model', 'ncep_gefs025,not_a_model'],
+    ]);
+    fetchMock.mockImplementation((url: unknown) => {
+      const sent = /[?&]models=([^&]*)/.exec(String(url))?.[1] ?? '';
+      const reason = `Invalid value: Cannot initialize MultiDomains from invalid String value ${rejectedValue.get(sent)}`;
+      return Promise.resolve(
+        new Response(JSON.stringify({ error: true, reason }), { status: 400 }),
+      );
+    });
+
+    const error = await wireError(openmeteoGetEnsembleTool, {
+      latitude: 47.6,
+      longitude: -122.3,
+      daily_variables: ['temperature_2m_max'],
+      models: 'ncep_gefs025, not_a_model',
+    });
+
+    expect(requestedUrls()).toEqual([expect.stringContaining('&models=ncep_gefs025,not_a_model&')]);
+    expect(error.data?.reason).toBe('invalid_variable');
+    expect(error.message).toMatch(/^Unknown variable or model name: not_a_model\. /);
+    expect(error.message).not.toContain('ncep_gefs025');
   });
 
   it.each([
@@ -1340,22 +1698,21 @@ describe('OpenMeteoService request encoding', () => {
 
   it('omits an empty scalar rather than sending a bare key=', async () => {
     /*
-     * `models` is a free-form optional string, so a form-based client can send it
-     * blank. `models=` is not "no model" upstream — it draws
-     * `No data is available for this location`, pointing the caller at the coordinate
-     * for what is an empty field.
+     * `timezone` is a free-form string, so a form-based client can send it blank. The
+     * builder omits it rather than sending a bare `timezone=`: the absent parameter the
+     * tools' blank-timezone guard is written against.
      */
     const ctx = createMockContext();
     await getOpenMeteoService().getEnsemble(
       47.6,
       -122.3,
-      { hourly: ['temperature_2m'], models: '' },
+      { hourly: ['temperature_2m'], timezone: '' },
       ctx,
     );
 
     const url = requestedUrls()[0] ?? '';
     expect(url).toContain('hourly=temperature_2m');
-    expect(url).not.toContain('models=');
+    expect(url).not.toContain('timezone=');
   });
 
   it('sends past_days=0 rather than dropping it as falsy', async () => {

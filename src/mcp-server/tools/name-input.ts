@@ -1,12 +1,13 @@
 /**
  * @fileoverview Shared input handling for the variable- and model-name lists of the
  * seven weather tools. {@link nameList} is the schema of every list field: it also takes
- * the names as one comma-joined string, Open-Meteo's own list format. Open-Meteo answers
- * a blank name with a timestamp-only success and rejects a padded one under a message
- * that prints it as a valid-looking name, so each handler trims every name and drops the
- * blank ones before its cadence check, its `no_variables_requested` guard, and the
- * upstream request. A field left with no names reads as not provided. Names are not
- * checked against any allowlist here.
+ * the names as one comma-joined string, Open-Meteo's own list format. Open-Meteo reads
+ * every comma in a list value as a separator, answers a blank name with a timestamp-only
+ * success, and rejects a padded one under a message that prints it as a valid-looking
+ * name. So each handler runs its lists through {@link cleanNames} before its cadence
+ * check, its other guards, and the upstream request: an element holding a comma becomes
+ * the names it joins, every name is trimmed, and blank ones are dropped. A field left
+ * with no names reads as not provided. Names are not checked against any allowlist here.
  * @module mcp-server/tools/name-input
  */
 
@@ -14,8 +15,8 @@ import { z } from '@cyanheads/mcp-ts-core';
 
 /**
  * Splits a comma-joined string into its names. A string opening with `[` or `{` is left
- * whole for the framework's JSON-string repair, and an array passes through unchanged:
- * its elements are not split.
+ * whole for the framework's JSON-string repair, and an array passes through unchanged,
+ * so the schema's cap counts its elements; {@link cleanNames} splits them later.
  */
 function splitJoinedNames(value: unknown): unknown {
   if (typeof value !== 'string') return value;
@@ -39,8 +40,10 @@ function notANameList(value: unknown): string {
  * An optional list of at most `maxNames` variable or model names, also accepted as one
  * comma-joined string. Advertises exactly `z.array(z.string()).max(maxNames).optional()`:
  * `tools/list` emits only the inner schema of a preprocess, so the string form is
- * accepted without being offered. Put the field's `.describe()` on the result. Blank
- * segments survive the split and count toward `maxNames`; {@link cleanNames} drops them.
+ * accepted without being offered. Put the field's `.describe()` on the result. The cap
+ * counts array elements and the segments of a joined string, blank ones included; an
+ * array element holding a comma counts once however many names it joins.
+ * {@link cleanNames} splits those elements and drops the blank names.
  */
 export function nameList(maxNames: number) {
   return z.preprocess(
@@ -54,13 +57,14 @@ export function nameList(maxNames: number) {
   );
 }
 
-/** Trims each name and drops blank ones; `undefined` when none remain. */
+/**
+ * Splits each element on commas, trims every name, and drops blank ones, keeping the
+ * order; `undefined` when none remain. `["a,b"]` and `["a", "b"]` come out the same.
+ */
 export function cleanNames(names: readonly string[] | undefined): string[] | undefined {
-  const cleaned = names?.map((name) => name.trim()).filter((name) => name !== '');
+  const cleaned = names
+    ?.flatMap((name) => name.split(','))
+    .map((name) => name.trim())
+    .filter((name) => name !== '');
   return cleaned?.length ? cleaned : undefined;
-}
-
-/** Trims a single name; `undefined` when it is blank. */
-export function cleanName(name: string | undefined): string | undefined {
-  return name?.trim() || undefined;
 }

@@ -10,6 +10,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createCounter, escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
+import { integerCheck } from '../integer-check.js';
 import { ROW_DATA_CEILING_CHARS, rowsWithinCeiling } from '../row-data-ceiling.js';
 
 /** Rows a call returns when it passes no `limit`, unless the per-call cap is lower. */
@@ -249,19 +250,19 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
     sql: z
       .string()
       .describe(
-        "Read-only SELECT statement. Reference table names from openmeteo_dataframe_describe; in the examples below, replace <table_name> with a staged table and <column> with one of its columns. time is ISO 8601 text — YYYY-MM-DDTHH:MM on hourly rows, YYYY-MM-DD on daily rows — as are daily sunrise and sunset, so date functions need a cast: CAST(time AS TIMESTAMP). WHERE time LIKE '%T%' selects the hourly rows of a table that holds both cadences. Monthly means: `SELECT strftime(CAST(time AS TIMESTAMP), '%Y-%m') AS month, AVG(<column>) AS mean FROM <table_name> GROUP BY month ORDER BY month`. An openmeteo_get_ensemble table carries one column per member (precipitation_member01, precipitation_member02, …) beside the unsuffixed control run; count members per row with `SELECT time, list_count(list_filter([*COLUMNS('^precipitation_member\\d+$')], lambda x: x > 0.5)) AS members_over, list_count([*COLUMNS('^precipitation_member\\d+$')]) AS members_reporting FROM <table_name> ORDER BY time` — the anchored pattern leaves out the control column, and members_reporting is the per-row denominator, since rows past a model's last forecast hour carry no member values. Write lambdas with the lambda x: syntax.",
+        "Read-only SELECT statement. Reference table names from openmeteo_dataframe_describe; in the examples below, replace <table_name> with a staged table and <column> with one of its columns. time is ISO 8601 text — YYYY-MM-DDTHH:MM on hourly rows, YYYY-MM-DD on daily rows — as are daily sunrise and sunset, so date functions need a cast: CAST(time AS TIMESTAMP). WHERE time LIKE '%T%' selects the hourly rows of a table that holds both cadences. Monthly means: `SELECT strftime(CAST(time AS TIMESTAMP), '%Y-%m') AS month, AVG(<column>) AS mean FROM <table_name> GROUP BY month ORDER BY month`. An openmeteo_get_ensemble table carries one column per member (precipitation_member01, precipitation_member02, …) beside the unsuffixed control run; count members per row with `SELECT time, list_count(list_filter([*COLUMNS('^precipitation_member\\d+$')], lambda x: x > 0.5)) AS members_over, list_count([*COLUMNS('^precipitation_member\\d+$')]) AS members_reporting FROM <table_name> ORDER BY time` — the anchored pattern leaves out the control column, and members_reporting is the per-row denominator, since rows past a model's last forecast hour carry no member values. A table from a call that named several ensemble models ends every column in the model's name (precipitation_member01_ncep_gefs025, control run precipitation_ncep_gefs025), where that pattern matches nothing: put the model in it, '^precipitation_member\\d+_ncep_gefs025$', and count each model on its own. Write lambdas with the lambda x: syntax.",
       ),
     /**
      * Both the advertised `maximum` and the description are getters, read each time the
      * schema is emitted, the default is a function read then and at parse time, and the
      * strict-mode bound is a `.check()` read at parse time — so all four follow the
-     * configuration rather than its state at import. A bare
-     * `.int()` would advertise `Number.MAX_SAFE_INTEGER` as the maximum; the getter's
-     * `undefined` while clamping leaves no maximum at all.
+     * configuration rather than its state at import; the getter's `undefined` while
+     * clamping leaves no maximum at all. The integer rule is {@link integerCheck}, and the
+     * `type` meta keeps the advertised `integer` that `.int()` would give.
      */
     limit: z
       .number()
-      .int()
+      .check(integerCheck)
       .min(1)
       .check((ctx) => {
         const cap = limitCap();
@@ -276,6 +277,7 @@ export const openmeteoDataframeQueryTool = tool('openmeteo_dataframe_query', {
         }
       })
       .meta({
+        type: 'integer',
         get maximum() {
           return getServerConfig().clampLimits ? undefined : limitCap();
         },

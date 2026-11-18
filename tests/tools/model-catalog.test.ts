@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CLIMATE_MODEL_LIST,
   CLIMATE_MODELS,
+  DEFAULT_CLIMATE_MODEL,
   DEFAULT_ENSEMBLE_MODEL,
   ENSEMBLE_MODEL_LIST,
   ENSEMBLE_MODEL_NAMES,
@@ -17,6 +18,9 @@ import {
   FLOOD_MODELS,
   FORECAST_MODEL_NAMES,
   FORECAST_MODELS,
+  MARINE_MODEL_LIST,
+  MARINE_MODEL_NAMES,
+  MARINE_MODELS,
 } from '@/mcp-server/tools/model-catalog.js';
 
 describe('catalog contents', () => {
@@ -24,6 +28,11 @@ describe('catalog contents', () => {
     expect(CLIMATE_MODELS).toHaveLength(7);
     expect(CLIMATE_MODELS).toContain('MRI_AGCM3_2_S');
     expect(CLIMATE_MODELS).toContain('NICAM16_8S');
+  });
+
+  it('defaults the climate tool to the documented model the endpoint answers an omitted models with', () => {
+    expect(DEFAULT_CLIMATE_MODEL).toBe('MRI_AGCM3_2_S');
+    expect(CLIMATE_MODELS).toContain(DEFAULT_CLIMATE_MODEL);
   });
 
   it('publishes the ensemble models the docs page emits, not the retired short names', () => {
@@ -89,6 +98,26 @@ describe('catalog contents', () => {
       'consolidated_v4 (reanalysis from 1997-01-01 through 2025-05-31',
     );
     expect(FLOOD_MODEL_LIST).toContain('forecast_v4 (forecast runs from 2023-06-01');
+  });
+
+  it('publishes the ten marine models the docs page offers, best_match first as the default (#104)', () => {
+    expect(MARINE_MODELS.map((m) => m.name)).toEqual([
+      'best_match',
+      'meteofrance_wave',
+      'meteofrance_currents',
+      'ecmwf_wam',
+      'ecmwf_wam025',
+      'ncep_gfswave025',
+      'ncep_gfswave016',
+      'ewam',
+      'gwam',
+      'era5_ocean',
+    ]);
+    expect(MARINE_MODEL_NAMES.split(', ')).toEqual(MARINE_MODELS.map((m) => m.name));
+    // The two regional models carry their domain in the advertised list.
+    expect(MARINE_MODEL_LIST).toContain('ewam (Europe only');
+    expect(MARINE_MODEL_LIST).toContain('ncep_gfswave016 (52.5°N to 15°S');
+    expect(MARINE_MODEL_LIST).toContain('ncep_gfswave025 (global 0.25°, 16 days)');
   });
 
   it('dates GloFAS discharge from 1997-01-01, not the 1984 request floor (#92)', () => {

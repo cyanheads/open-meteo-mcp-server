@@ -1,17 +1,19 @@
 /**
  * @fileoverview Documented model sets for the tools that take a `models` input
  * (openmeteo_get_forecast, openmeteo_get_ensemble, openmeteo_get_climate,
- * openmeteo_get_historical, openmeteo_get_flood).
+ * openmeteo_get_historical, openmeteo_get_flood, openmeteo_get_marine).
  *
- * These are NOT allowlists. Nothing here is checked, before a request or after: a model
- * name the catalog does not carry goes upstream untouched, so a model Open-Meteo adds
- * after this file was written keeps working, and a rejection is reported in the terms
- * upstream used. Open-Meteo stays the authority on which models exist. The catalog's main
+ * These are NOT allowlists. No request is validated against them, before it is sent or
+ * after: a model name the catalog does not carry goes upstream untouched, so a model
+ * Open-Meteo adds after this file was written keeps working, and a rejection is reported
+ * in the terms upstream used. Open-Meteo stays the authority on which models exist. The catalog's main
  * job is keeping the advertised lists honest — the tool description, the `models` field
  * description, and the `invalid_variable` recovery hint all render from here, so they
  * cannot drift apart. The ensemble member counts also rank the lighter models the
- * ensemble tool's narrowing hint offers, and `DEFAULT_ENSEMBLE_MODEL` is the model an
- * omitted ensemble `models` selects.
+ * ensemble tool's narrowing hint offers, `DEFAULT_ENSEMBLE_MODEL` and
+ * `DEFAULT_CLIMATE_MODEL` are the models an omitted ensemble or climate `models` sends,
+ * and the climate set, the one closed catalog, tells the coverage analysis when a call
+ * has named every model there is.
  *
  * The climate tool also used to reconstruct the offending model locally, because a
  * percent-encoded comma made upstream echo the whole requested list. The service now
@@ -25,6 +27,8 @@
  *   climate  — https://open-meteo.com/en/docs/climate-api (read 2026-07-30)
  *   archive  — https://open-meteo.com/en/docs/historical-weather-api (read 2026-09-09)
  *   flood    — https://open-meteo.com/en/docs/flood-api (read 2026-10-24; spans measured live)
+ *   marine   — https://open-meteo.com/en/docs/marine-weather-api (read 2026-11-18; horizons
+ *              measured live)
  * The ensemble names are the values that page emits in its own `models=` URL, plus
  * `bom_access_global_ensemble`, which the page lists in its model table (as ACCESS-GE)
  * without offering a selector for it — the value is served all the same. Older
@@ -199,6 +203,44 @@ export const FORECAST_MODELS: readonly string[] = [
 export const FORECAST_MODEL_NAMES = FORECAST_MODELS.join(', ');
 
 /**
+ * Documented marine models (10), each with the coverage its documentation table publishes
+ * and how far its data runs, as measured live on 2026-11-18 over a 16-day window at two
+ * open-ocean points: the default blend stops after about 9 days, which is why reaching a
+ * 16-day horizon takes a model that runs longer. `best_match` is the value an omitted
+ * `models` selects.
+ *
+ * `ewam` and `ncep_gfswave016` are regional: a point outside their domain is dropped from a
+ * multi-model response, or rejected as a coverage gap when every requested model misses it.
+ * `meteofrance_currents` serves currents and sea-surface temperature but no wave variable
+ * (`wave_height` comes back with the unit `"undefined"`), and `era5_ocean` is a reanalysis
+ * whose forecast days are null. `dwd_ewam` also resolves upstream as an older spelling.
+ */
+export const MARINE_MODELS: readonly CatalogModel[] = [
+  { name: 'best_match', note: 'default, about 9 days' },
+  { name: 'meteofrance_wave', note: 'global 0.08°, about 9 days' },
+  {
+    name: 'meteofrance_currents',
+    note: 'global 0.08°, ocean currents and sea-surface temperature, no wave variables',
+  },
+  { name: 'ecmwf_wam', note: 'global 9 km, about 15 days' },
+  { name: 'ecmwf_wam025', note: 'global 0.25°, about 15 days' },
+  { name: 'ncep_gfswave025', note: 'global 0.25°, 16 days' },
+  { name: 'ncep_gfswave016', note: '52.5°N to 15°S, 0.16°, 16 days' },
+  { name: 'ewam', note: 'Europe only, 0.05°, about 3 days' },
+  { name: 'gwam', note: 'global 0.25°, about 7 days' },
+  {
+    name: 'era5_ocean',
+    note: 'global 0.5° reanalysis, about 5 days behind, so forecast days are null',
+  },
+];
+
+/** The advertised marine list — `name (coverage, horizon)`, comma-joined. */
+export const MARINE_MODEL_LIST = MARINE_MODELS.map((m) => `${m.name} (${m.note})`).join(', ');
+
+/** The advertised marine names alone, for a recovery hint with no room for notes. */
+export const MARINE_MODEL_NAMES = MARINE_MODELS.map((m) => m.name).join(', ');
+
+/**
  * First day GloFAS carries discharge, as a GMT model date (a timezone east of GMT labels
  * it a day later). Upstream accepts a range from 1984-01-01, the floor the flood tool
  * keeps, but `seamless_v4`, `consolidated_v4`, and both v3 reanalysis models answer
@@ -258,7 +300,14 @@ export const FLOOD_MODEL_LIST = FLOOD_MODELS.map((m) => `${m.name} (${m.note})`)
 /** The advertised flood names alone, for a recovery hint with no room for notes. */
 export const FLOOD_MODEL_NAMES = FLOOD_MODELS.map((m) => m.name).join(', ');
 
-/** Documented CMIP6 climate models (7). */
+/**
+ * Documented CMIP6 climate models (7) — the one closed catalog here, so the climate tool
+ * hands it to the coverage analysis as its whole model set. Measured live 2026-11-17, the
+ * Climate API rejects every other CMIP6 spelling tried (`FGOALS_f3_H_highresSST`,
+ * `HiRAM_SIT_LR`, lowercase `mri_agcm3_2_s`) with HTTP 400. The other names it parses are
+ * forecast and archive domains, not projections: `best_match` answers with
+ * `MRI_AGCM3_2_S`'s values and `era5` with reanalysis for past dates only.
+ */
 export const CLIMATE_MODELS: readonly string[] = [
   'CMCC_CM2_VHR4',
   'FGOALS_f3_H',
@@ -275,6 +324,15 @@ export const CLIMATE_MODELS: readonly string[] = [
  * ("Model 'best_match' is not supported by the Ensemble API"), so the tool always sends one.
  */
 export const DEFAULT_ENSEMBLE_MODEL = 'ecmwf_ifs025_ensemble';
+
+/**
+ * The model an omitted or blank `models` sends on openmeteo_get_climate. The Climate API
+ * documents `models` as required with no default, yet answers a request without it from
+ * this model: measured live 2026-11-17, the omitted response matched `MRI_AGCM3_2_S` value
+ * for value, and no other model, at three locations, two years, and two variables. Sending
+ * it keeps the tool off that undocumented behavior and lets the response name its source.
+ */
+export const DEFAULT_CLIMATE_MODEL = 'MRI_AGCM3_2_S';
 
 /** The advertised ensemble list — `name (members, coverage)`, comma-joined. */
 export const ENSEMBLE_MODEL_LIST = ENSEMBLE_MODELS.map((m) => `${m.name} (${m.note})`).join(', ');

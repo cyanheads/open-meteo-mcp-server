@@ -6,12 +6,15 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { createCounter, escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { getServerConfig } from '@/config/server-config.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import type { GeocodingResult } from '@/services/open-meteo/types.js';
-import { renderNotice } from '../response-notice.js';
+import { integerCheck } from '../integer-check.js';
+import { composeNotice, renderNotice } from '../response-notice.js';
 import {
   RATE_LIMITED_ERROR,
+  UPSTREAM_REJECTED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
   UPSTREAM_UNAVAILABLE_ERROR,
 } from '../upstream-error.js';
@@ -58,6 +61,30 @@ function inferLanguageFromScript(name: string): string | undefined {
  */
 const CONFIDENT_MATCH_POPULATION = 100_000;
 
+/** Matches a call returns when it passes no `count`. */
+const DEFAULT_COUNT = 5;
+
+/**
+ * Most matches one call returns: the geocoder's own page maximum. It answers `count=101`
+ * with HTTP 400 "Parameter count must be between 1 and 100." and has no offset, so a
+ * place it ranks past this is out of reach whatever the call asks for.
+ */
+const MAX_COUNT = 100;
+
+function countDescription(): string {
+  const bound = getServerConfig().clampLimits
+    ? `Default ${DEFAULT_COUNT}; a larger value returns at most ${MAX_COUNT} and says so.`
+    : `Default ${DEFAULT_COUNT}, at most ${MAX_COUNT}.`;
+  return `Matches to return, most relevant first. ${bound} Ask for more to reach smaller places that share a common name such as "Springfield" or "Portland": the geocoder has no offset, so a place ranked past count is reached only by a larger count or by setting country.`;
+}
+
+/** Calls whose `count` was lowered to {@link MAX_COUNT}. */
+const countClamped = createCounter(
+  'openmeteo.search_locations.count_clamped',
+  'openmeteo_search_locations calls whose count was lowered to the geocoder maximum',
+  '{calls}',
+);
+
 /** Normalize raw API results — coalesce fields the API omits on sparse features. */
 function normalizeResults(results: GeocodingResult[] | undefined) {
   return (results ?? []).map((r) => ({
@@ -78,14 +105,7 @@ function normalizeResults(results: GeocodingResult[] | undefined) {
 
 export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
   description:
-    'Resolve a place name to ranked coordinate matches with country, region, elevation, ' +
-    'timezone, and population. Required prerequisite for name-based queries — all weather ' +
-    'tools take latitude/longitude, not place names. Search by a bare place name (city, ' +
-    'region, or landmark); never fold a qualifier into it — pass "Baoding", not "Baoding ' +
-    'Hebei", and "Paris", not "Paris, France". To disambiguate places that share a name, set ' +
-    'the country input (ISO 3166-1 alpha-2, e.g. "US") and/or read the admin1 and country ' +
-    'fields on each ranked result — admin1 is a result field for choosing among matches, not a ' +
-    'search input. Returns up to 10 matches ranked by population/relevance.',
+    'Resolve a place name to ranked coordinate matches with country, region, elevation, timezone, and population. Required prerequisite for name-based queries — all weather tools take latitude/longitude, not place names. Search by a bare place name (city, region, or landmark); never fold a qualifier into it — pass "Baoding", not "Baoding Hebei", and "Paris", not "Paris, France". To disambiguate places that share a name, set the country input (ISO 3166-1 alpha-2, e.g. "US") and/or read the admin1 and country fields on each ranked result — admin1 is a result field for choosing among matches, not a search input. Returns up to count matches (default 5, at most 100), ranked by population and relevance.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -100,6 +120,7 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
     RATE_LIMITED_ERROR,
     UPSTREAM_UNAVAILABLE_ERROR,
     UPSTREAM_TIMEOUT_ERROR,
+    UPSTREAM_REJECTED_ERROR,
   ],
 
   input: z.object({
@@ -120,15 +141,38 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
       .describe(
         'ISO 3166-1 alpha-2 country code (e.g. "US", "FR") to disambiguate places that share a name. Omit for a global search.',
       ),
+    /**
+     * The shape of openmeteo_dataframe_query's `limit`: the advertised `maximum` and the
+     * description are getters read each time the schema is emitted, and the strict-mode
+     * bound is a `.check()` read at parse time, so all three follow OPENMETEO_CLAMP_LIMITS
+     * rather than its state at import. The integer rule is {@link integerCheck}, and the
+     * `type` meta keeps the advertised `integer` that `.int()` would give.
+     */
     count: z
       .number()
-      .int()
+      .check(integerCheck)
       .min(1)
-      .max(10)
-      .default(5)
-      .describe(
-        'Max results to return (1–10). Default 5. Return more when disambiguating common names like "Springfield" or "Portland".',
-      ),
+      .check((ctx) => {
+        if (!getServerConfig().clampLimits && ctx.value > MAX_COUNT) {
+          ctx.issues.push({
+            code: 'too_big',
+            origin: 'number',
+            maximum: MAX_COUNT,
+            inclusive: true,
+            input: ctx.value,
+          });
+        }
+      })
+      .meta({
+        type: 'integer',
+        get maximum() {
+          return getServerConfig().clampLimits ? undefined : MAX_COUNT;
+        },
+        get description() {
+          return countDescription();
+        },
+      })
+      .default(DEFAULT_COUNT),
     language: z
       .string()
       .default('en')
@@ -190,7 +234,7 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
       .string()
       .optional()
       .describe(
-        'Advisory on the confidence of the top match, present only when its population is null or under 100,000 — the shape a historic or colonial exonym returns, where the upstream index answers with an unrelated small feature and never surfaces the modern city. Names the returned place, country, and feature_code, and asks the caller to verify the coordinates or retry with the place’s current official name. Never changes results or count.',
+        'Everything this response needs to say beyond the data, composed into one advisory: when count was above the geocoder’s maximum of 100, the requested and the applied count; and when the top match’s population is null or under 100,000 — the shape a historic or colonial exonym returns, where the upstream index answers with an unrelated small feature and never surfaces the modern city — the returned place, country, and feature_code, with a request to verify the coordinates or retry with the place’s current official name. Never changes results.',
       ),
     effective_language: z
       .string()
@@ -209,13 +253,27 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
   async handler(input, ctx) {
     const service = getOpenMeteoService();
     const country = input.country?.toUpperCase();
-    const response = await service.getGeocode(
-      input.name,
-      input.count,
-      input.language,
-      country,
-      ctx,
-    );
+    // One notice, composed — ctx.enrich.notice is last-write-wins on a single key.
+    const notice = composeNotice(ctx);
+
+    /*
+     * In strict mode the schema already rejected an over-cap count; while clamping, one is
+     * lowered here, so the geocoder is never sent a count it answers with HTTP 400.
+     */
+    const count = Math.min(input.count, MAX_COUNT);
+    if (count < input.count) {
+      countClamped.add(1);
+      ctx.log.info('Geocode count lowered to the geocoder maximum', {
+        name: input.name,
+        requested: input.count,
+        applied: count,
+      });
+      notice.add(
+        `count ${input.count} is above the geocoder’s maximum of ${MAX_COUNT} matches, so ${count} was applied.${country ? '' : ` The geocoder has no offset, so matches past the ${MAX_COUNT}th are out of reach; set country to search one country’s matches alone.`}`,
+      );
+    }
+
+    const response = await service.getGeocode(input.name, count, input.language, country, ctx);
     let results = normalizeResults(response.results);
 
     // Native-script fallback: the "en" index has no entry for e.g. "上海", so an
@@ -228,7 +286,7 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
           name: input.name,
           language: inferred,
         });
-        const retry = await service.getGeocode(input.name, input.count, inferred, country, ctx);
+        const retry = await service.getGeocode(input.name, count, inferred, country, ctx);
         results = normalizeResults(retry.results);
         // Names in the results are now localized in `inferred`, not the requested "en".
         if (results.length > 0) ctx.enrich({ effective_language: inferred });
@@ -252,12 +310,8 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
         top.population == null
           ? 'no recorded population'
           : `a population of ${top.population.toLocaleString('en-US')}`;
-      ctx.enrich.notice(
-        `Low-confidence match: the top result "${top.name}" (${where}feature_code ${top.feature_code}) has ` +
-          `${size}, below the ${CONFIDENT_MATCH_POPULATION.toLocaleString('en-US')} this tool reads as a ` +
-          'confident city match. Verify the coordinates before passing them to a weather tool. If the query ' +
-          'was a historic or colonial exonym, the index may hold no entry for it at all and has returned an ' +
-          'unrelated feature — retry with the place’s current official name.',
+      notice.add(
+        `Low-confidence match: the top result "${top.name}" (${where}feature_code ${top.feature_code}) has ${size}, below the ${CONFIDENT_MATCH_POPULATION.toLocaleString('en-US')} this tool reads as a confident city match. Verify the coordinates before passing them to a weather tool. If the query was a historic or colonial exonym, the index may hold no entry for it at all and has returned an unrelated feature — retry with the place’s current official name.`,
       );
     }
 

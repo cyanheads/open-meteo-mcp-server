@@ -14,14 +14,20 @@ import * as definitions from '@/mcp-server/tools/definitions/index.js';
 
 /**
  * Reasons each tool marks `thrownBy: 'service'`. The Open-Meteo client raises
- * `rate_limited` on HTTP 429, and `upstream_unavailable` or `upstream_timeout` when its
- * retries run out, for every tool that calls upstream; `coverage_gap` only on the five
+ * `rate_limited` on HTTP 429, `upstream_rejected` on any other 4xx that is not an input
+ * rejection, and `upstream_unavailable` or `upstream_timeout` when its retries run out,
+ * for every tool that calls upstream; `coverage_gap` only on the five
  * tools whose endpoint can answer a coordinate with no data. Every other declared
  * reason is thrown by the handler itself — the canvas and SQL-gate failures the
  * dataframe tools declare are caught from the framework and rethrown through
  * `ctx.fail`, so they count as handler-thrown too.
  */
-const UPSTREAM = ['rate_limited', 'upstream_timeout', 'upstream_unavailable'] as const;
+const UPSTREAM = [
+  'rate_limited',
+  'upstream_rejected',
+  'upstream_timeout',
+  'upstream_unavailable',
+] as const;
 const SERVICE_MARKED: Record<string, readonly string[]> = {
   openmeteo_dataframe_describe: [],
   openmeteo_dataframe_drop: [],

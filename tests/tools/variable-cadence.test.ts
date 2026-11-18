@@ -35,15 +35,49 @@ describe('findCadenceMismatches', () => {
     });
   });
 
-  it('catches the silent direction — a daily variable in hourly_variables (#26)', () => {
-    const mismatches = findCadenceMismatches(FORECAST_CADENCE, ['temperature_2m_max'], undefined);
+  it('catches a daily variable in hourly_variables (#26)', () => {
+    const mismatches = findCadenceMismatches(FORECAST_CADENCE, ['precipitation_sum'], undefined);
 
     expect(mismatches).toHaveLength(1);
     expect(mismatches[0]).toMatchObject({
-      variable: 'temperature_2m_max',
+      variable: 'precipitation_sum',
       passedIn: 'hourly_variables',
       belongsIn: 'daily_variables',
     });
+  });
+
+  it('accepts at hourly cadence the daily names forecast and archive also serve hourly', () => {
+    expect(
+      findCadenceMismatches(
+        FORECAST_CADENCE,
+        ['temperature_2m_max', 'temperature_2m_min', 'growing_degree_days_base_0_limit_50'],
+        undefined,
+      ),
+    ).toEqual([]);
+    expect(
+      findCadenceMismatches(
+        HISTORICAL_CADENCE,
+        ['temperature_2m_max', 'temperature_2m_min'],
+        undefined,
+      ),
+    ).toEqual([]);
+  });
+
+  it('accepts at daily cadence the hourly names the ensemble API also serves daily', () => {
+    expect(
+      findCadenceMismatches(ENSEMBLE_CADENCE, undefined, ['sunshine_duration', 'weather_code']),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['forecast', FORECAST_CADENCE],
+    ['archive', HISTORICAL_CADENCE],
+  ])('still rejects on the %s catalog the daily names refused at hourly cadence', (_e, catalog) => {
+    const refused = ['precipitation_sum', 'wind_speed_10m_max', 'temperature_2m_mean'];
+
+    expect(findCadenceMismatches(catalog, refused, undefined).map((m) => m.variable)).toEqual(
+      refused,
+    );
   });
 
   it('passes an unknown name through — the catalogs are not an allowlist (#7)', () => {
@@ -77,12 +111,11 @@ describe('findCadenceMismatches', () => {
     expect(mismatches.map((m) => m.variable)).toEqual(['precipitation_sum', 'cloud_cover']);
   });
 
-  it('uses a per-endpoint catalog: temperature_2m_max is hourly on the ensemble API', () => {
-    // The ensemble endpoint publishes it as a 3-hourly aggregation; the forecast
-    // endpoint publishes it under daily only. A shared catalog would reject a valid
-    // ensemble request.
-    expect(findCadenceMismatches(ENSEMBLE_CADENCE, ['temperature_2m_max'], undefined)).toEqual([]);
-    expect(findCadenceMismatches(FORECAST_CADENCE, ['temperature_2m_max'], undefined)).toHaveLength(
+  it('uses a per-endpoint catalog: a name another endpoint files is unknown here', () => {
+    // precipitation_sum is a forecast daily name; the marine catalog does not carry it,
+    // so it goes to the marine endpoint unchecked.
+    expect(findCadenceMismatches(MARINE_CADENCE, ['precipitation_sum'], undefined)).toEqual([]);
+    expect(findCadenceMismatches(FORECAST_CADENCE, ['precipitation_sum'], undefined)).toHaveLength(
       1,
     );
   });
@@ -94,10 +127,10 @@ describe('findCadenceMismatches', () => {
       ),
     ).toEqual(['wave_height_max', 'wave_height']);
     expect(
-      findCadenceMismatches(HISTORICAL_CADENCE, ['temperature_2m_max'], ['temperature_2m']).map(
+      findCadenceMismatches(HISTORICAL_CADENCE, ['precipitation_sum'], ['temperature_2m']).map(
         (m) => m.variable,
       ),
-    ).toEqual(['temperature_2m_max', 'temperature_2m']);
+    ).toEqual(['precipitation_sum', 'temperature_2m']);
   });
 
   it('checks current_variables against the hourly set and points a daily name at daily_variables (#81)', () => {
@@ -162,12 +195,12 @@ describe('describeCadenceMismatches', () => {
 
   it('offers the base variable for a misplaced aggregate', () => {
     const text = describeCadenceMismatches(
-      findCadenceMismatches(FORECAST_CADENCE, ['temperature_2m_max'], undefined),
+      findCadenceMismatches(FORECAST_CADENCE, ['precipitation_sum'], undefined),
     );
 
-    expect(text).toContain('temperature_2m_max is not valid in hourly_variables');
+    expect(text).toContain('precipitation_sum is not valid in hourly_variables');
     expect(text).toContain('Move it to daily_variables');
-    expect(text).toContain('temperature_2m');
+    expect(text).toContain('stay in hourly_variables with precipitation.');
   });
 
   it('falls back to "or remove it" when the endpoint publishes no counterpart', () => {

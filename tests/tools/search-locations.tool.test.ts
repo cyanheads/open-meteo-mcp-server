@@ -4,8 +4,13 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  createMockContext,
+  getEnrichment,
+  type MockContextLogger,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoSearchLocationsTool } from '@/mcp-server/tools/definitions/search-locations.tool.js';
 import { renderedText } from '../helpers/commonmark.js';
 import { firstText } from '../helpers/content.js';
@@ -15,6 +20,17 @@ const mockGetGeocode = vi.fn();
 
 vi.mock('@/services/open-meteo/open-meteo-service.js', () => ({
   getOpenMeteoService: () => ({ getGeocode: mockGetGeocode }),
+}));
+
+/** Stands in for every counter the tool creates, so a test can count its increments. */
+const clampCounter = vi.hoisted(() => ({ add: vi.fn() }));
+
+/** Hands out {@link clampCounter}, recording the metric name each counter is created under. */
+const createCounter = vi.hoisted(() => vi.fn((_name: string) => clampCounter));
+
+vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>()),
+  createCounter,
 }));
 
 const SEATTLE_RESULT = {
@@ -735,5 +751,330 @@ describe('openmeteoSearchLocationsTool effective_language (#69)', () => {
       error: { code: JsonRpcErrorCode.NotFound, data: { reason: 'no_results' } },
     });
     expect(allText(result)).not.toContain('Effective language');
+  });
+});
+
+describe('openmeteoSearchLocationsTool count (#102)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /** A fresh tool module, so its server config parses the `OPENMETEO_CLAMP_LIMITS` stubbed here. */
+  async function loadTool(clampLimits: string | undefined) {
+    vi.resetModules();
+    vi.stubEnv('OPENMETEO_CLAMP_LIMITS', clampLimits);
+    return (await import('@/mcp-server/tools/definitions/search-locations.tool.js'))
+      .openmeteoSearchLocationsTool;
+  }
+
+  /** The `count` property of the inputSchema tools/list advertises, as it crosses the wire. */
+  function advertisedCount(tool: typeof openmeteoSearchLocationsTool): unknown {
+    const schema = tool.input['~standard'].jsonSchema.input({ target: 'draft-2020-12' }) as {
+      properties: Record<string, unknown>;
+    };
+    return JSON.parse(JSON.stringify(schema.properties.count));
+  }
+
+  type SearchResult = Awaited<ReturnType<typeof runToolContract>>;
+
+  const noticeOf = (result: SearchResult) =>
+    (result.structuredContent as { notice?: string }).notice;
+
+  /** The notice trailer line in content[], as a CommonMark parse reads it. */
+  const trailerOf = (result: SearchResult) => {
+    const trailer = result.content.at(-1);
+    return renderedText(trailer?.type === 'text' ? trailer.text : '');
+  };
+
+  /** The count each upstream call was sent, in call order. */
+  const sentCounts = () => mockGetGeocode.mock.calls.map((call) => call[1]);
+
+  /** `n` well-populated places sharing a name, ids 1…n in rank order. */
+  const ranked = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      ...SEATTLE_RESULT,
+      id: i + 1,
+      name: 'Springfield',
+      population: 900_000 - i,
+    }));
+
+  /** Live rank 11 for Springfield with country US — out of reach at count 10. */
+  const SPRINGFIELD_PA = {
+    id: 4561407,
+    name: 'Springfield',
+    latitude: 39.93067,
+    longitude: -75.32019,
+    elevation: 76.0,
+    feature_code: 'PPL',
+    country_code: 'US',
+    country: 'United States',
+    admin1: 'Pennsylvania',
+    admin2: 'Delaware',
+    timezone: 'America/New_York',
+    population: 23363,
+  };
+
+  const CLAMPED_500 =
+    'count 500 is above the geocoder’s maximum of 100 matches, so 100 was applied.';
+  const COUNTRY_REMEDY =
+    'The geocoder has no offset, so matches past the 100th are out of reach; set country to search one country’s matches alone.';
+  const COUNT_TAIL =
+    'Ask for more to reach smaller places that share a common name such as "Springfield" or "Portland": the geocoder has no offset, so a place ranked past count is reached only by a larger count or by setting country.';
+
+  it.each([undefined, 1, 5, 10])(
+    'sends count %s and returns the same output as before, with no notice',
+    async (count) => {
+      const tool = await loadTool(undefined);
+      mockGetGeocode.mockResolvedValue({ results: [SEATTLE_RESULT] });
+
+      const result = await runToolContract(tool, {
+        name: 'Seattle',
+        ...(count === undefined ? {} : { count }),
+      });
+
+      expect(mockGetGeocode.mock.calls.map((call) => call.slice(0, 4))).toEqual([
+        ['Seattle', count ?? 5, 'en', undefined],
+      ]);
+      expect(result.structuredContent).toEqual({ results: [SEATTLE_RESULT], count: 1 });
+      expect(clampCounter.add).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reads a count sent as the string "7" as the number 7', async () => {
+    const tool = await loadTool(undefined);
+    mockGetGeocode.mockResolvedValue({ results: [SEATTLE_RESULT] });
+
+    const result = await runToolContract(tool, { name: 'Seattle', count: '7' as never });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentCounts()).toEqual([7]);
+  });
+
+  it.each([11, 100])(
+    'accepts count %i and returns every row the geocoder ranked',
+    async (count) => {
+      const tool = await loadTool(undefined);
+      const rows = ranked(count);
+      rows[10] = SPRINGFIELD_PA;
+      mockGetGeocode.mockResolvedValue({ results: rows });
+
+      const result = await runToolContract(tool, { name: 'Springfield', country: 'US', count });
+
+      expect(result.isError).toBeFalsy();
+      expect(sentCounts()).toEqual([count]);
+      const structured = result.structuredContent as {
+        count: number;
+        results: { id: number; admin1: string | null }[];
+      };
+      expect(structured.count).toBe(count);
+      expect(structured.results.map((r) => r.id)).toEqual(rows.map((r) => r.id));
+      expect(structured.results[10]).toMatchObject({ id: 4561407, admin1: 'Pennsylvania' });
+      expect(noticeOf(result)).toBeUndefined();
+      expect(firstText(result.content)).toContain('United States, Pennsylvania, Delaware');
+    },
+  );
+
+  it.each([
+    [500, CLAMPED_500],
+    [
+      1e20,
+      'count 100000000000000000000 is above the geocoder’s maximum of 100 matches, so 100 was applied.',
+    ],
+  ])('lowers count %d to 100 and says so on both surfaces', async (count, clamped) => {
+    const tool = await loadTool(undefined);
+    mockGetGeocode.mockResolvedValue({ results: ranked(100) });
+
+    const result = await runToolContract(tool, { name: 'Springfield', country: 'US', count });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentCounts()).toEqual([100]);
+    expect(result.structuredContent).toMatchObject({ count: 100, notice: clamped });
+    expect(trailerOf(result)).toBe(clamped);
+  });
+
+  it('names country as the way past the 100th match only when country was not set', async () => {
+    const tool = await loadTool(undefined);
+    mockGetGeocode.mockResolvedValue({ results: ranked(100) });
+
+    const global = await runToolContract(tool, { name: 'Springfield', count: 500 });
+    const inCountry = await runToolContract(tool, {
+      name: 'Springfield',
+      country: 'US',
+      count: 500,
+    });
+
+    expect(noticeOf(global)).toBe(`${CLAMPED_500} ${COUNTRY_REMEDY}`);
+    expect(trailerOf(global)).toBe(`${CLAMPED_500} ${COUNTRY_REMEDY}`);
+    expect(noticeOf(inCountry)).toBe(CLAMPED_500);
+  });
+
+  it('logs one info line and adds one to the clamp counter per clamped call, and neither at 100', async () => {
+    const tool = await loadTool(undefined);
+    expect(createCounter.mock.calls.map(([name]) => name)).toEqual([
+      'openmeteo.search_locations.count_clamped',
+    ]);
+    mockGetGeocode.mockResolvedValue({ results: ranked(100) });
+    const call = async (count: number) => {
+      const ctx = createMockContext({ errors: tool.errors });
+      await tool.handler(tool.input.parse({ name: 'Springfield', count }), ctx);
+      const lowered = (ctx.log as MockContextLogger).calls.filter(
+        (c) => c.msg === 'Geocode count lowered to the geocoder maximum',
+      );
+      return { lowered, enrichment: getEnrichment(ctx) };
+    };
+
+    clampCounter.add.mockClear();
+    const clamped = await call(500);
+    expect(clamped.lowered).toEqual([
+      {
+        level: 'info',
+        msg: 'Geocode count lowered to the geocoder maximum',
+        data: expect.objectContaining({ requested: 500, applied: 100 }),
+      },
+    ]);
+    expect(clampCounter.add).toHaveBeenCalledTimes(1);
+    expect(clampCounter.add).toHaveBeenCalledWith(1);
+
+    clampCounter.add.mockClear();
+    const atCap = await call(100);
+    expect(atCap.lowered).toEqual([]);
+    expect(clampCounter.add).not.toHaveBeenCalled();
+    expect(atCap.enrichment).toEqual({});
+  });
+
+  it('composes the clamp and the low-confidence advisory into one notice on both surfaces', async () => {
+    const tool = await loadTool(undefined);
+    mockGetGeocode.mockResolvedValue({ results: [SPRINGFIELD_PA, ...ranked(99)] });
+
+    const result = await runToolContract(tool, {
+      name: 'Springfield',
+      country: 'US',
+      count: 500,
+    });
+
+    const notice = noticeOf(result) ?? '';
+    expect(notice.startsWith(`${CLAMPED_500} Low-confidence match: `)).toBe(true);
+    expect(notice).toContain(
+      'the top result "Springfield" (United States, feature_code PPL) has a population of 23,363',
+    );
+    expect(trailerOf(result)).toBe(notice);
+  });
+
+  it('sends the applied count on the script-inferred language retry', async () => {
+    const tool = await loadTool(undefined);
+    mockGetGeocode
+      .mockResolvedValueOnce({ generationtime_ms: 0.1 })
+      .mockResolvedValueOnce({ results: [SHANGHAI_ZH_RESULT] });
+
+    const result = await runToolContract(tool, { name: '上海', count: 500 });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockGetGeocode.mock.calls.map((call) => call.slice(1, 3))).toEqual([
+      [100, 'en'],
+      [100, 'zh'],
+    ]);
+  });
+
+  it('advertises a default of 5 and no maximum while clamping is on', async () => {
+    expect(advertisedCount(await loadTool(undefined))).toStrictEqual({
+      default: 5,
+      type: 'integer',
+      minimum: 1,
+      description: `Matches to return, most relevant first. Default 5; a larger value returns at most 100 and says so. ${COUNT_TAIL}`,
+    });
+  });
+
+  it('advertises maximum 100 when OPENMETEO_CLAMP_LIMITS=false', async () => {
+    expect(advertisedCount(await loadTool('false'))).toStrictEqual({
+      default: 5,
+      type: 'integer',
+      minimum: 1,
+      maximum: 100,
+      description: `Matches to return, most relevant first. Default 5, at most 100. ${COUNT_TAIL}`,
+    });
+  });
+
+  it('rejects a count above 100 when OPENMETEO_CLAMP_LIMITS=false, naming the maximum, before any request', async () => {
+    const tool = await loadTool('false');
+    for (const count of [101, 500, 1e20]) {
+      const err = await wireError(tool, { name: 'Springfield', count });
+      expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err.message).toContain('count: Too big: expected number to be <=100');
+    }
+    expect(mockGetGeocode).not.toHaveBeenCalled();
+  });
+
+  it('accepts count 100 when OPENMETEO_CLAMP_LIMITS=false', async () => {
+    const tool = await loadTool('false');
+    mockGetGeocode.mockResolvedValue({ results: ranked(100) });
+
+    const result = await runToolContract(tool, { name: 'Springfield', count: 100 });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentCounts()).toEqual([100]);
+    expect(noticeOf(result)).toBeUndefined();
+  });
+
+  it.each([
+    ['on', undefined],
+    ['off', 'false'],
+  ])('rejects count 0 and 2.5 with clamping %s, before any request', async (_mode, clampLimits) => {
+    const tool = await loadTool(clampLimits);
+    for (const [count, problem] of [
+      [0, 'count: Too small: expected number to be >=1'],
+      [2.5, 'count: Invalid input: expected int, received number'],
+    ] as const) {
+      const err = await wireError(tool, { name: 'Springfield', count });
+      expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(err.message).toContain(problem);
+    }
+    expect(mockGetGeocode).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['on', undefined],
+    ['off', 'false'],
+  ])(
+    'rejects a fraction on the integer rule alone and a count below 1 on the floor alone, with clamping %s, before any request',
+    async (_mode, clampLimits) => {
+      const tool = await loadTool(clampLimits);
+      const NOT_INT = 'Invalid input: expected int, received number';
+      const BELOW_FLOOR = 'Too small: expected number to be >=1';
+      for (const [count, issueCode, problem] of [
+        [0.5, 'invalid_type', NOT_INT],
+        [-0.5, 'invalid_type', NOT_INT],
+        [-1.5, 'invalid_type', NOT_INT],
+        [1e-7, 'invalid_type', NOT_INT],
+        [2.5, 'invalid_type', NOT_INT],
+        [101.5, 'invalid_type', NOT_INT],
+        [0, 'too_small', BELOW_FLOOR],
+        [-1, 'too_small', BELOW_FLOOR],
+        [-1e20, 'too_small', BELOW_FLOOR],
+      ] as const) {
+        const parsed = tool.input.safeParse({ name: 'Springfield', count });
+        expect(
+          parsed.error?.issues.map(({ code, path, message }) => ({ code, path, message })),
+        ).toEqual([{ code: issueCode, path: ['count'], message: problem }]);
+        const err = await wireError(tool, { name: 'Springfield', count });
+        expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(err.message).toBe(
+          `Input validation error: Invalid arguments for tool openmeteo_search_locations: count: ${problem}`,
+        );
+      }
+      expect(mockGetGeocode).not.toHaveBeenCalled();
+    },
+  );
+
+  it('states the 100 cap, never the old 1–10 range, in the tool and notice descriptions', async () => {
+    const tool = await loadTool(undefined);
+    expect(tool.description).toContain('default 5, at most 100');
+    expect(tool.description).not.toMatch(/up to 10 |1–10/);
+    expect(tool.enrichment?.notice?.description ?? '').toContain(
+      'when count was above the geocoder’s maximum of 100',
+    );
   });
 });

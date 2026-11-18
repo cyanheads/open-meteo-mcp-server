@@ -92,7 +92,7 @@ const CALLS = [
       daily: { time: ['2024-01-10'], wind_speed_10m_mean: [5.1] },
     },
     omittedUrl:
-      'https://climate-api.open-meteo.com/v1/climate?latitude=37.49&longitude=-122.5&start_date=2024-01-10&end_date=2024-01-10&daily=wind_speed_10m_mean&temperature_unit=celsius&wind_speed_unit=kmh&precipitation_unit=mm&timezone=auto',
+      'https://climate-api.open-meteo.com/v1/climate?latitude=37.49&longitude=-122.5&start_date=2024-01-10&end_date=2024-01-10&daily=wind_speed_10m_mean&models=MRI_AGCM3_2_S&temperature_unit=celsius&wind_speed_unit=kmh&precipitation_unit=mm&timezone=auto',
   },
 ] as const;
 

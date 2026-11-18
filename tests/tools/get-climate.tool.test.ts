@@ -126,6 +126,26 @@ const MOCK_SINGLE_MODEL_RESPONSE = {
   },
 };
 
+/**
+ * Live response for Phoenix (33.45, -112.07), 2040-07-01…03, daily=temperature_2m_max —
+ * byte for byte the body upstream returns with models omitted and with
+ * models=MRI_AGCM3_2_S, apart from generationtime_ms.
+ */
+const PHOENIX_2040_RESPONSE = {
+  latitude: 33.5,
+  longitude: -112.1,
+  generationtime_ms: 0.0751,
+  utc_offset_seconds: -25200,
+  timezone: 'America/Phoenix',
+  timezone_abbreviation: 'GMT-7',
+  elevation: 335.0,
+  daily_units: { time: 'iso8601', temperature_2m_max: '°C' },
+  daily: {
+    time: ['2040-07-01', '2040-07-02', '2040-07-03'],
+    temperature_2m_max: [46.2, 44.7, 41.2],
+  },
+};
+
 describe('openmeteoGetClimateTool', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -196,23 +216,122 @@ describe('openmeteoGetClimateTool', () => {
     expect(result.models).toEqual(['CMCC_CM2_VHR4']);
   });
 
-  it('omits models from output when models was not requested', async () => {
-    mockGetClimate.mockResolvedValue(MOCK_SINGLE_MODEL_RESPONSE);
+  it('sends MRI_AGCM3_2_S when models is omitted and echoes it, with the rows unchanged', async () => {
+    mockGetClimate.mockResolvedValue(PHOENIX_2040_RESPONSE);
     const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
     const input = openmeteoGetClimateTool.input.parse({
-      latitude: 47.6,
-      longitude: -122.33,
-      start_date: '2049-01-01',
-      end_date: '2049-01-02',
+      latitude: 33.45,
+      longitude: -112.07,
+      start_date: '2040-07-01',
+      end_date: '2040-07-03',
       daily_variables: ['temperature_2m_max'],
     });
     const result = await openmeteoGetClimateTool.handler(input, ctx);
-    expect(result.models).toBeUndefined();
+
+    const params = mockGetClimate.mock.calls[0]?.[2] as { models?: string[] };
+    expect(params.models).toEqual(['MRI_AGCM3_2_S']);
+    expect(result.models).toEqual(['MRI_AGCM3_2_S']);
+    // One model keeps plain names: the rows and units are the response's own.
+    expect(result.daily).toEqual([
+      { time: '2040-07-01', temperature_2m_max: 46.2 },
+      { time: '2040-07-02', temperature_2m_max: 44.7 },
+      { time: '2040-07-03', temperature_2m_max: 41.2 },
+    ]);
+    expect(result.daily_units).toEqual({ time: 'iso8601', temperature_2m_max: '°C' });
+  });
+
+  it('names MRI_AGCM3_2_S on both surfaces of an omitted-models call', async () => {
+    mockGetClimate.mockResolvedValue(PHOENIX_2040_RESPONSE);
+    const result = await runToolContract(openmeteoGetClimateTool, {
+      latitude: 33.45,
+      longitude: -112.07,
+      start_date: '2040-07-01',
+      end_date: '2040-07-03',
+      daily_variables: ['temperature_2m_max'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ models: ['MRI_AGCM3_2_S'] });
+    expect(firstText(result.content)).toContain('**Models:** MRI_AGCM3_2_S');
+    expect(firstText(result.content)).not.toContain('API default');
+  });
+
+  it('names MRI_AGCM3_2_S on both surfaces of an omitted-models call that spills, columns unsuffixed', async () => {
+    const days = 2000;
+    const time = dailyDates(days, '2045-01-01');
+    mockGetClimate.mockResolvedValue({
+      ...PHOENIX_2040_RESPONSE,
+      daily: { time, temperature_2m_max: time.map((_, i) => 30 + (i % 15) + 0.5) },
+    });
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: days, tableName: 'spilled_cl103' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-cl-103' }) };
+
+    const result = await runToolContract(openmeteoGetClimateTool, {
+      latitude: 33.45,
+      longitude: -112.07,
+      start_date: '2045-01-01',
+      end_date: '2050-06-23',
+      daily_variables: ['temperature_2m_max'],
+    });
+
+    expect(result.structuredContent).toMatchObject({
+      models: ['MRI_AGCM3_2_S'],
+      truncated: true,
+      canvas_id: 'canvas-cl-103',
+    });
+    expect(firstText(result.content)).toContain('**Models:** MRI_AGCM3_2_S');
+    const [opts] = mockSpillover.mock.calls[0] as [{ schema?: { name: string }[] }];
+    expect(opts.schema?.map((c) => c.name)).toEqual(['time', 'temperature_2m_max']);
+    expect(spilledSchemaType('temperature_2m_max')).toBe('DOUBLE');
+  });
+
+  it('names MRI_AGCM3_2_S on both surfaces of an omitted-models call bounded without a canvas', async () => {
+    const time = dailyDates(2000, '2045-01-01');
+    mockGetClimate.mockResolvedValue({
+      ...PHOENIX_2040_RESPONSE,
+      daily: { time, temperature_2m_max: time.map((_, i) => 30 + (i % 15) + 0.5) },
+    });
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const result = await runToolContract(openmeteoGetClimateTool, {
+      latitude: 33.45,
+      longitude: -112.07,
+      start_date: '2045-01-01',
+      end_date: '2050-06-23',
+      daily_variables: ['temperature_2m_max'],
+    });
+
+    expect(result.structuredContent).toMatchObject({
+      models: ['MRI_AGCM3_2_S'],
+      truncated: true,
+      record_count: 2000,
+    });
+    expect(firstText(result.content)).toContain('**Models:** MRI_AGCM3_2_S');
+  });
+
+  it('names the omitted-models default on every description, never "API default"', () => {
+    const advertised = openmeteoGetClimateTool.input['~standard'].jsonSchema.input({
+      target: 'draft-2020-12',
+    }) as { properties: Record<string, { description?: string }> };
+    const outputDescription = openmeteoGetClimateTool.output.shape.models.description ?? '';
+
+    expect(advertised.properties.models?.description).toMatch(/Omit[^.]*MRI_AGCM3_2_S/);
+    expect(outputDescription).toContain('["MRI_AGCM3_2_S"] when models was omitted or blank');
+    const surfaces = JSON.stringify([
+      openmeteoGetClimateTool.description,
+      advertised,
+      outputDescription,
+    ]);
+    expect(surfaces).not.toMatch(/API default|provenance/);
   });
 
   it.each([
     { models: [' CMCC_CM2_VHR4 ', ''], echoed: ['CMCC_CM2_VHR4'] },
-    { models: [''], echoed: undefined },
+    { models: [''], echoed: ['MRI_AGCM3_2_S'] },
   ])('sends and echoes models $models as $echoed (#62)', async ({ models, echoed }) => {
     mockGetClimate.mockResolvedValue(MOCK_SINGLE_MODEL_RESPONSE);
     const ctx = createMockContext({ errors: openmeteoGetClimateTool.errors });
@@ -581,7 +700,12 @@ describe('openmeteoGetClimateTool', () => {
       message: expect.stringMatching(/^Unknown variable or model name: bogus_var\./),
       data: { reason: 'invalid_variable' },
     });
-    // No models went upstream, so the rejected name is a variable: the hint lists no models.
+    /*
+     * The caller named no model, so only the default went upstream and the rejected name
+     * is a variable: the hint lists no models.
+     */
+    const params = mockGetClimate.mock.calls[0]?.[2] as { models?: string[] };
+    expect(params.models).toEqual(['MRI_AGCM3_2_S']);
     const hint = (await wireError(openmeteoGetClimateTool, input)).data?.recovery?.hint ?? '';
     expect(hint).toMatch(/^Check names against Open-Meteo Climate API docs\./);
     expect(hint).not.toContain('Documented models');
@@ -863,7 +987,7 @@ describe('openmeteoGetClimateTool', () => {
       longitude: -122.3,
       elevation: 17,
       timezone: 'GMT',
-      models: undefined,
+      models: ['MRI_AGCM3_2_S'],
       date_range: { start: '2020-01-01', end: '2050-12-31' },
       record_count: 11322,
       daily: [{ time: '2020-01-01', temperature_2m_max: 5.0 }],
@@ -874,7 +998,7 @@ describe('openmeteoGetClimateTool', () => {
     });
     expect(firstText(blocks)).toContain('canvas-xyz-789');
     expect(firstText(blocks)).toContain('spilled_clim789'); // #18: table name named in the hint
-    expect(firstText(blocks)).toContain('API default');
+    expect(firstText(blocks)).toContain('**Models:** MRI_AGCM3_2_S');
     // Format uses bold label: **Truncated:** true
     expect(firstText(blocks)).toContain('Truncated:');
     expect(firstText(blocks)).toContain('true');
@@ -896,7 +1020,7 @@ describe('openmeteoGetClimateTool', () => {
         longitude: -122.3,
         elevation: 17,
         timezone: 'GMT',
-        models: undefined,
+        models: ['MRI_AGCM3_2_S'],
         date_range: { start: '2049-01-01', end: '2049-02-04' },
         record_count: 35,
         daily,

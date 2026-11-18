@@ -10,3 +10,9 @@ export function firstText(blocks: readonly ContentBlock[]): string {
   const block = blocks.find((candidate) => candidate.type === 'text');
   return block?.type === 'text' ? block.text : '';
 }
+
+/** The text of a result's last `content[]` block, where the framework appends the notice trailer. */
+export function trailerOf(result: { readonly content: readonly ContentBlock[] }): string {
+  const block = result.content.at(-1);
+  return block?.type === 'text' ? block.text : '';
+}

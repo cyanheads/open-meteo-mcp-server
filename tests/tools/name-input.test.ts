@@ -1,10 +1,12 @@
 /**
  * @fileoverview Blank and whitespace-padded variable names across the seven weather
- * tools, plus the `cleanNames` / `cleanName` helpers behind them. Every name is trimmed
- * and a blank one dropped before the cadence check, the `no_variables_requested` guard,
- * and the upstream request — so a field holding only blanks counts as not provided and a
- * padded name reaches Open-Meteo as the name. How each tool sends and echoes a cleaned
- * `models` value is pinned in that tool's own test file.
+ * tools, plus the `cleanNames` helper behind them. Every element is split
+ * on commas, every name trimmed, and a blank one dropped before the cadence check, the
+ * `no_variables_requested` guard, and the upstream request — so a field holding only
+ * blanks counts as not provided and a padded name reaches Open-Meteo as the name. How
+ * each tool sends and echoes a cleaned `models` value is pinned in that tool's own test
+ * file; a comma inside an element is tabled across every field in
+ * `name-list-input.test.ts`.
  * @module tests/tools/name-input.test
  */
 
@@ -19,8 +21,9 @@ import {
   openmeteoGetHistoricalTool,
   openmeteoGetMarineTool,
 } from '@/mcp-server/tools/definitions/index.js';
-import { cleanName, cleanNames } from '@/mcp-server/tools/name-input.js';
+import { cleanNames } from '@/mcp-server/tools/name-input.js';
 import { firstText } from '../helpers/content.js';
+import { cpuMicrosPerCall } from '../helpers/cpu-time.js';
 import { upstream } from '../helpers/upstream-spy.js';
 import { type WireError, wireError } from '../helpers/wire-error.js';
 
@@ -50,7 +53,7 @@ const PARAM = {
 type VariableField = keyof typeof PARAM;
 
 /**
- * The 13 variable fields: each tool, the rest of an otherwise valid call, and a name its
+ * The 14 variable fields: each tool, the rest of an otherwise valid call, and a name its
  * catalog files under that field's cadence (so a misplacement check cannot fire).
  */
 const FIELDS: {
@@ -89,6 +92,7 @@ const FIELDS: {
     field: 'daily_variables',
     name: 'temperature_2m_max',
   },
+  { tool: openmeteoGetMarineTool, rest: SEATTLE, field: 'current_variables', name: 'wave_height' },
   { tool: openmeteoGetMarineTool, rest: SEATTLE, field: 'hourly_variables', name: 'wave_height' },
   {
     tool: openmeteoGetMarineTool,
@@ -135,7 +139,7 @@ beforeEach(() => {
   upstream.mockReset();
 });
 
-describe('cleanNames / cleanName', () => {
+describe('cleanNames', () => {
   it('trims every name and keeps the order', () => {
     expect(cleanNames([' temperature_2m ', '\tprecipitation\n'])).toEqual([
       'temperature_2m',
@@ -157,13 +161,75 @@ describe('cleanNames / cleanName', () => {
     expect(cleanNames(undefined)).toBeUndefined();
   });
 
-  it('trims a single name and turns a blank one into undefined', () => {
-    expect(cleanName(' gem_global_ensemble')).toBe('gem_global_ensemble');
-    expect(cleanName('gfs025')).toBe('gfs025');
-    expect(cleanName(' ')).toBeUndefined();
-    expect(cleanName('')).toBeUndefined();
-    expect(cleanName(undefined)).toBeUndefined();
+  it('splits an element on commas into the names it joins, in order', () => {
+    expect(cleanNames(['temperature_2m,wind_speed_10m', 'precipitation'])).toEqual([
+      'temperature_2m',
+      'wind_speed_10m',
+      'precipitation',
+    ]);
   });
+
+  it('trims every segment of a split element and drops the blank ones', () => {
+    expect(cleanNames([' temperature_2m , wind_speed_10m'])).toEqual([
+      'temperature_2m',
+      'wind_speed_10m',
+    ]);
+    expect(cleanNames(['temperature_2m,', ',precipitation', 'rain,,\tsnowfall\n'])).toEqual([
+      'temperature_2m',
+      'precipitation',
+      'rain',
+      'snowfall',
+    ]);
+  });
+
+  it('reads elements holding only commas and whitespace as not provided', () => {
+    expect(cleanNames([','])).toBeUndefined();
+    expect(cleanNames([' , ', ',,', ''])).toBeUndefined();
+  });
+});
+
+describe('cleanNames running time', () => {
+  /** Generous CPU ceiling per character, in microseconds, held at every size. */
+  const CPU_MICROS_PER_CHAR = 1;
+  const BASE = 5_000;
+  const LARGEST = 320_000;
+
+  /** Shapes grown by doubling from 5k characters to 320k, the full 64× span. */
+  const SHAPES: [string, (size: number) => string[]][] = [
+    ['commas throughout', (size) => [','.repeat(size)]],
+    ['padded names between commas', (size) => [' a ,'.repeat(size / 4)]],
+    ['a whitespace run inside one name', (size) => [`a${' '.repeat(size)}b`]],
+    [
+      'a whitespace run around one name',
+      (size) => [`${' '.repeat(size / 2)}a${' '.repeat(size / 2)}`],
+    ],
+    ['one long line ending in a break', (size) => [`${'§1 x'.repeat(size / 4)}\ny`]],
+    ['breaks throughout', (size) => ['  \r\n'.repeat(size / 4)]],
+    ['fifty elements of commas', (size) => Array.from({ length: 50 }, () => ','.repeat(size / 50))],
+  ];
+
+  it.each(SHAPES)(
+    'stays linear on %s',
+    (_shape, build) => {
+      const timeAt = (size: number) => {
+        const names = build(size);
+        return cpuMicrosPerCall(() => cleanNames(names), Math.max(4, Math.ceil(400_000 / size)));
+      };
+
+      expect(timeAt(BASE)).toBeLessThan(BASE * CPU_MICROS_PER_CHAR);
+      let ratio = 1;
+      for (let size = BASE * 2; size <= LARGEST; size *= 2) {
+        const base = timeAt(BASE);
+        const atSize = timeAt(size);
+        expect(atSize, `${size} characters`).toBeLessThan(size * CPU_MICROS_PER_CHAR);
+        ratio = atSize / base;
+      }
+
+      // Linear growth over the 64× span is its own size; quadratic would be its square.
+      expect(ratio).toBeLessThan(256);
+    },
+    0,
+  );
 });
 
 describe('blank-only variable fields', () => {
@@ -239,16 +305,16 @@ describe('padded names and the cadence check', () => {
   it('names the trimmed value in the misplacement message on both surfaces', async () => {
     const result = await callTool(openmeteoGetHistoricalTool, {
       ...HISTORICAL,
-      hourly_variables: ['  temperature_2m_max'],
+      hourly_variables: ['  precipitation_sum'],
     });
 
     expect(result.isError).toBe(true);
-    expect(firstText(result.content)).toContain('temperature_2m_max');
-    expect(firstText(result.content)).not.toContain('  temperature_2m_max');
+    expect(firstText(result.content)).toContain('precipitation_sum');
+    expect(firstText(result.content)).not.toContain('  precipitation_sum');
     const { error } = result.structuredContent as { error: WireError };
     expect(error.data?.reason).toBe('variable_wrong_cadence');
-    expect(error.message).toContain('temperature_2m_max');
-    expect(error.message).not.toContain('  temperature_2m_max');
+    expect(error.message).toContain('precipitation_sum');
+    expect(error.message).not.toContain('  precipitation_sum');
   });
 });
 
@@ -265,13 +331,13 @@ describe('list forms the framework already accepts', () => {
     expect(sentParams().hourly).toEqual(['temperature_2m', 'precipitation']);
   });
 
-  it('sends an array element holding a comma as that one element (#98)', async () => {
-    await callTool(openmeteoGetForecastTool, {
-      ...SEATTLE,
-      hourly_variables: ['temperature_2m,precipitation'],
-    });
+  it.each([
+    ['an array', ['temperature_2m,precipitation', 'wind_speed_10m']],
+    ['a JSON-stringified array', '["temperature_2m,precipitation","wind_speed_10m"]'],
+  ])('splits an element of %s holding a comma into the names it joins', async (_label, list) => {
+    await callTool(openmeteoGetForecastTool, { ...SEATTLE, hourly_variables: list });
 
-    expect(sentParams().hourly).toEqual(['temperature_2m,precipitation']);
+    expect(sentParams().hourly).toEqual(['temperature_2m', 'precipitation', 'wind_speed_10m']);
   });
 
   it('reads null as not provided', async () => {

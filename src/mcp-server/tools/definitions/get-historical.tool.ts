@@ -37,6 +37,7 @@ import {
   stageSpill,
   unitsTrimmedNotice,
 } from '../spill-utils.js';
+import { azimuthInput, tiltInput, tiltNotice } from '../tilt-input.js';
 import {
   BLANK_TIMEZONE_MESSAGE,
   frameInvalidTimezoneMessage,
@@ -49,6 +50,7 @@ import {
   isDateOutOfRangeReason,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
+  UPSTREAM_REJECTED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
   UPSTREAM_UNAVAILABLE_ERROR,
   variableOrModelRecovery,
@@ -122,7 +124,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     {
       reason: 'variable_wrong_cadence',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'A variable sat in the cadence field Open-Meteo does not document it under — for example cloud_cover in daily_variables, or temperature_2m_max in hourly_variables — caught before the request is sent.',
+      when: 'A variable sat in the cadence field Open-Meteo does not serve it under — for example cloud_cover in daily_variables, or precipitation_sum in hourly_variables — caught before the request is sent.',
       recovery:
         'Move each variable the message names to the field the message names, or drop it — hourly_variables and daily_variables take separate archive variable sets, and the message lists the same-cadence alternatives when the archive publishes any.',
       retryable: false,
@@ -146,6 +148,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     RATE_LIMITED_ERROR,
     UPSTREAM_UNAVAILABLE_ERROR,
     UPSTREAM_TIMEOUT_ERROR,
+    UPSTREAM_REJECTED_ERROR,
   ],
 
   // Open-Meteo's own parameter names for the two variable lists.
@@ -167,7 +170,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       'End date (YYYY-MM-DD, inclusive). Must be on or after start_date. For the last few days, either request models: ["ecmwf_ifs"] or use openmeteo_get_forecast with past_days.',
     ),
     hourly_variables: nameList(50).describe(
-      'Hourly archive variables (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "relative_humidity_2m", "cloud_cover", "soil_moisture_0_to_7cm"]). Hourly names only — a daily aggregate such as temperature_2m_max or precipitation_sum belongs in daily_variables and is rejected here. At least one of hourly_variables or daily_variables required.',
+      'Hourly archive variables (e.g., ["temperature_2m", "precipitation", "wind_speed_10m", "relative_humidity_2m", "cloud_cover", "soil_moisture_0_to_7cm"]). Hourly names only — a daily aggregate such as precipitation_sum or wind_speed_10m_max belongs in daily_variables and is rejected here. At least one of hourly_variables or daily_variables required.',
     ),
     daily_variables: nameList(50).describe(
       'Daily summary variables (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_max"]). Daily names only — an hourly name such as cloud_cover or temperature_2m belongs in hourly_variables and is rejected here; for a daily summary of an hourly variable use its published aggregate (cloud_cover_max, cloud_cover_mean, cloud_cover_min). At least one of hourly_variables or daily_variables required.',
@@ -193,6 +196,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .describe(
         'Which grid cell answers the coordinate. Omitted, Open-Meteo picks a land cell, so a point offshore reads conditions on shore. Set "sea" for a point on the water — wind for sailing, surf, or offshore wind — so a water cell answers; keep the default for a point on land, which "sea" moves onto the water. "nearest" takes the closest cell, land or water. The response latitude and longitude name the cell that answered.',
       ),
+    tilt: tiltInput,
+    azimuth: azimuthInput,
     timezone: z.string().default('auto').describe('IANA timezone or "auto". Default "auto".'),
     canvas_id: CanvasIdSchema.optional().describe(
       'DataCanvas token for multi-year or multi-variable queries. When a result is too large to return inline — driven by total payload size, so a wide multi-variable pull can spill at any row count — it spills to this canvas: pass the returned token to openmeteo_dataframe_describe to list the staged table and its columns, then to openmeteo_dataframe_query to run SQL against it. Omit to create a fresh canvas.',
@@ -275,7 +280,7 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
       .string()
       .optional()
       .describe(
-        'Everything this response needs to say beyond the data, composed into one advisory: columns the archive returned with the unit "undefined" (a name it parsed but does not serve in the requested cadence, or — on a model-suffixed column — a variable that model does not serve); requested models the archive left out for having no data at this coordinate, or the plain-named columns a multi-model request cannot attribute to one model; recognized variables that came back null under a real unit, with the timestamps that do carry values — a variable null across the whole window is attributed to the selected model that returned it empty when another selected model returned values for it, and otherwise to the location, the window, or the selected models; and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
+        'Everything this response needs to say beyond the data, composed into one advisory: columns the archive returned with the unit "undefined" (a name it parsed but does not serve, or — on a model-suffixed column — a variable that model does not serve); requested models the archive left out for having no data at this coordinate, or the plain-named columns a multi-model request cannot attribute to one model; recognized variables that came back null under a real unit, with the timestamps that do carry values — a variable null across the whole window is attributed to the selected model that returned it empty when another selected model returned values for it, and otherwise to the location, the window, or the selected models; the plane Open-Meteo filled in for a requested global_tilted_irradiance or global_tilted_irradiance_instant (a horizontal surface when tilt was omitted, a south-facing panel when tilt was set without azimuth); and, when the result spilled, either the canvas and table holding the full row set plus the two dataframe tools that read it, or — with DataCanvas disabled — why there is no canvas_id and how to reach the rows the preview omits.',
       ),
   },
 
@@ -298,11 +303,11 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     }
 
     /*
-     * Reject a confident misplacement before the call. The archive answers one
-     * direction with a 400 that rejects the name as an unknown one — naming the value
-     * but not the field it belongs in, nor a same-cadence alternative — and the other
-     * with a successful all-null column. Unknown names are not misplacements and go
-     * upstream untouched.
+     * Reject a confident misplacement before the call. The archive rejects a name filed
+     * under the other cadence alone, in either direction, with a 400 that reads it as an
+     * unknown name — naming the value but not the field it belongs in, nor a
+     * same-cadence alternative. Unknown names are not misplacements and go upstream
+     * untouched.
      */
     const mismatches = findCadenceMismatches(
       HISTORICAL_CADENCE,
@@ -350,6 +355,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
         wind_speed_unit: input.wind_speed_unit,
         precipitation_unit: input.precipitation_unit,
         cell_selection: input.cell_selection,
+        tilt: input.tilt,
+        azimuth: input.azimuth,
         timezone: input.timezone,
       },
       ctx,
@@ -404,20 +411,24 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
     const notice = composeNotice(ctx);
 
     /*
-     * Backstop for a name the catalog does not carry: the archive answers some
-     * wrong-cadence names with HTTP 200 and an all-null column whose unit is the
-     * literal string "undefined". Left unsaid that reads as a genuine data gap. On a
-     * model-suffixed column the same unit means that model does not serve the variable,
-     * which the cadence advice would misdirect — that case gets its own sentence.
+     * Backstop for a name the catalog does not carry: the archive parses some names it
+     * does not serve at all — hourly=pm2_5, an air-quality name — and answers them with
+     * HTTP 200 and an all-null column whose unit is the literal string "undefined".
+     * Forecast-only names such as uv_index come back the same way. Left unsaid that reads
+     * as a genuine data gap. On a model-suffixed column the same unit means that model
+     * does not serve the variable, so the remedy is another model — that case gets its own
+     * sentence.
      */
     const selection = {
+      defaultModel: 'best_match',
       models: input.models,
       variables: [...(input.hourly_variables ?? []), ...(input.daily_variables ?? [])],
     };
     notice.add(
       describeUnservedColumns(undefinedUnitColumns(rawHourlyUnits, rawDailyUnits), selection, {
         server: 'the archive',
-        fields: 'hourly_variables or daily_variables',
+        servedBy:
+          'forecast-only variables (uv_index, …) from openmeteo_get_forecast (its past_days reaches 92 days back), marine variables (wave_height, ocean_current_velocity, …) from openmeteo_get_marine, air-quality variables (pm2_5, ozone, …) from openmeteo_get_air_quality',
       }),
     );
 
@@ -440,6 +451,8 @@ export const openmeteoGetHistoricalTool = tool('openmeteo_get_historical', {
         findCoverageGaps('daily', data.daily, rawDailyUnits, undefined, selection),
       ),
     );
+    // A tilted variable computed on a plane upstream filled in, under a name that says otherwise.
+    notice.add(tiltNotice(input, input.hourly_variables));
     notice.add(
       unitsTrimmedNotice(omittedUnits, 'fewer hourly_variables / daily_variables, or fewer models'),
     );

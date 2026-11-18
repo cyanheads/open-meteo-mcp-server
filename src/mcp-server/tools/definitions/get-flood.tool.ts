@@ -59,6 +59,7 @@ import {
   isDateOutOfRangeReason,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
+  UPSTREAM_REJECTED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
   UPSTREAM_UNAVAILABLE_ERROR,
   variableOrModelRecovery,
@@ -148,6 +149,7 @@ export const openmeteoGetFloodTool = tool('openmeteo_get_flood', {
     RATE_LIMITED_ERROR,
     UPSTREAM_UNAVAILABLE_ERROR,
     UPSTREAM_TIMEOUT_ERROR,
+    UPSTREAM_REJECTED_ERROR,
   ],
 
   // Open-Meteo's own parameter name for the variable list.

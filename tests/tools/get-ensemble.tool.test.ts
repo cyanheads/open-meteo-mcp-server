@@ -8,7 +8,9 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetEnsembleTool } from '@/mcp-server/tools/definitions/get-ensemble.tool.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
-import { firstText } from '../helpers/content.js';
+import { ENSEMBLE_CADENCE, findCadenceMismatches } from '@/mcp-server/tools/variable-cadence.js';
+import { renderedText } from '../helpers/commonmark.js';
+import { firstText, trailerOf } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
 import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
 import { wireError } from '../helpers/wire-error.js';
@@ -219,6 +221,10 @@ describe('openmeteoGetEnsembleTool', () => {
     { models: 'ncep_gefs05', echoed: 'ncep_gefs05' },
     { models: ' ', echoed: 'ecmwf_ifs025_ensemble' },
     { models: '', echoed: 'ecmwf_ifs025_ensemble' },
+    // A blank segment drops, a lone comma reads as omitted, and a repeat is one model (#98).
+    { models: 'ecmwf_ifs025_ensemble,', echoed: 'ecmwf_ifs025_ensemble' },
+    { models: ' , ', echoed: 'ecmwf_ifs025_ensemble' },
+    { models: 'ncep_gefs025, ncep_gefs025', echoed: 'ncep_gefs025' },
   ])('sends and echoes models "$models" as $echoed (#62, #73)', async ({ models, echoed }) => {
     mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
     const ctx = createMockContext({ errors: openmeteoGetEnsembleTool.errors });
@@ -230,8 +236,8 @@ describe('openmeteoGetEnsembleTool', () => {
     });
     const result = await openmeteoGetEnsembleTool.handler(input, ctx);
 
-    const params = mockGetEnsemble.mock.calls[0]?.[2] as { models?: string };
-    expect(params.models).toBe(echoed);
+    const params = mockGetEnsemble.mock.calls[0]?.[2] as { models?: string[] };
+    expect(params.models).toEqual([echoed]);
     expect(openmeteoGetEnsembleTool.output.parse(result).model).toBe(echoed);
     const text = firstText(openmeteoGetEnsembleTool.format!(result));
     expect(text).toContain(`**Model:** ${echoed}`);
@@ -251,8 +257,8 @@ describe('openmeteoGetEnsembleTool', () => {
     });
 
     expect(result.isError).toBeFalsy();
-    const params = mockGetEnsemble.mock.calls[0]?.[2] as { models?: string };
-    expect(params.models).toBe('ecmwf_ifs025_ensemble');
+    const params = mockGetEnsemble.mock.calls[0]?.[2] as { models?: string[] };
+    expect(params.models).toEqual(['ecmwf_ifs025_ensemble']);
     expect((result.structuredContent as { model?: string }).model).toBe('ecmwf_ifs025_ensemble');
     expect(firstText(result.content)).toContain('**Model:** ecmwf_ifs025_ensemble');
     expect(firstText(result.content)).not.toContain('default blend');
@@ -288,8 +294,8 @@ describe('openmeteoGetEnsembleTool', () => {
 
     const result = await openmeteoGetEnsembleTool.handler(input, ctx);
 
-    const params = mockGetEnsemble.mock.calls[0]?.[2] as { models?: string };
-    expect(params?.models).toBe('a_model_open_meteo_added_later');
+    const params = mockGetEnsemble.mock.calls[0]?.[2] as { models?: string[] };
+    expect(params?.models).toEqual(['a_model_open_meteo_added_later']);
     expect(result.model).toBe('a_model_open_meteo_added_later');
   });
 
@@ -334,6 +340,22 @@ describe('openmeteoGetEnsembleTool', () => {
       data: { reason: 'variable_wrong_cadence' },
     });
     expect(mockGetEnsemble).not.toHaveBeenCalled();
+  });
+
+  it('declares variable_wrong_cadence by the cadence the ensemble API serves a name under', () => {
+    // The ensemble daily catalog holds weather_code and sunshine_duration, which the API
+    // serves daily although its docs list them hourly only — the rule is what it serves.
+    const when = openmeteoGetEnsembleTool.errors?.find(
+      (entry) => entry.reason === 'variable_wrong_cadence',
+    )?.when;
+    expect(when).toBe(
+      'A variable sat in the cadence field the ensemble API does not serve it under — for example precipitation_sum in hourly_variables, or precipitation in daily_variables — caught before the request is sent.',
+    );
+    expect(
+      findCadenceMismatches(ENSEMBLE_CADENCE, ['precipitation_sum'], ['precipitation']).map(
+        (m) => m.variable,
+      ),
+    ).toEqual(['precipitation_sum', 'precipitation']);
   });
 
   it('accepts temperature_2m_max in hourly_variables — the ensemble API publishes it there', async () => {
@@ -418,8 +440,57 @@ describe('openmeteoGetEnsembleTool', () => {
     await openmeteoGetEnsembleTool.handler(input, ctx);
 
     const notice = String(getEnrichment(ctx).notice);
-    expect(notice).toContain('which means ecmwf_ifs025_ensemble does not carry that name');
+    expect(notice).toContain('which means ecmwf_ifs025_ensemble does not serve that name.');
     expect(notice).not.toContain('default blend');
+  });
+
+  it('points names from another endpoint’s family at the tool that serves them', async () => {
+    // Live: /v1/ensemble answers hourly=pm2_5 and hourly=wave_height with HTTP 200 and
+    // every member's column all null under the unit "undefined".
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: {
+        time: 'iso8601',
+        pm2_5_member01: 'undefined',
+        wave_height_member01: 'undefined',
+      },
+      hourly: { time: ['2026-06-03T00:00'], pm2_5_member01: [null], wave_height_member01: [null] },
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['pm2_5', 'wave_height'],
+    });
+
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    expect(notice).toBe(
+      'pm2_5, wave_height returned no data on any member — Open-Meteo reported the unit as "undefined", which means ecmwf_ifs025_ensemble does not serve those names. Request pm2_5, wave_height from the tool that serves that kind of variable — air-quality variables (pm2_5, …) from openmeteo_get_air_quality, marine variables (wave_height, …) from openmeteo_get_marine — or drop them.',
+    );
+    expect(firstText(result.content.slice(-1))).toContain('openmeteo_get_air_quality');
+  });
+
+  it('offers no other model for a name no requested model serves (#98)', async () => {
+    // Live: hourly=pm2_5 comes back under the unit "undefined" from ecmwf_ifs025_ensemble and
+    // from ncep_gefs025 alike, so sending the caller to another model loops.
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', pm2_5: 'undefined', pm2_5_member01: 'undefined' },
+      hourly: { time: ['2026-06-03T00:00'], pm2_5: [null], pm2_5_member01: [null] },
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      latitude: 47.6,
+      longitude: -122.3,
+      hourly_variables: ['pm2_5'],
+      models: 'ncep_gefs025',
+    });
+
+    const notice = String((result.structuredContent as { notice?: string }).notice);
+    expect(notice).toBe(
+      'pm2_5 returned no data on any member — Open-Meteo reported the unit as "undefined", which means ncep_gefs025 does not serve that name. Request pm2_5 from the tool that serves that kind of variable — air-quality variables (pm2_5, …) from openmeteo_get_air_quality, marine variables (wave_height, …) from openmeteo_get_marine — or drop it.',
+    );
+    expect(notice).not.toMatch(/another model|models value/);
   });
 
   it('stays quiet when every requested column carries a real unit', async () => {
@@ -1683,4 +1754,503 @@ describe('openmeteoGetEnsembleTool', () => {
       'fewer hourly_variables / daily_variables, or a models value with fewer members (icon_seamless_eps has 40, bom_access_global_ensemble 18).',
     );
   });
+
+  // --- several models in one models value (#98) --------------------------------
+
+  /**
+   * One model's columns for `variable`: the control run, then `members` perturbed
+   * members. Beside another model upstream ends each in `_<model>`
+   * (`temperature_2m_max_member01_ncep_gefs025`); alone, or as the one model left after
+   * upstream dropped the rest, they carry plain names — pass no `model` for that shape.
+   */
+  const modelColumns = (
+    time: readonly string[],
+    variable: string,
+    members: number,
+    valueAt: (row: number, member: number) => number | null,
+    model?: string,
+  ): Record<string, (number | null)[]> => {
+    const suffix = model ? `_${model}` : '';
+    const block: Record<string, (number | null)[]> = {};
+    for (let m = 0; m <= members; m++) {
+      const member = m === 0 ? '' : `_member${String(m).padStart(2, '0')}`;
+      block[`${variable}${member}${suffix}`] = time.map((_, row) => valueAt(row, m));
+    }
+    return block;
+  };
+
+  /** The units map upstream sends beside `columns`: `time`, then one entry per column. */
+  const unitsFor = (columns: Record<string, unknown>, unit: string): Record<string, string> => ({
+    time: 'iso8601',
+    ...Object.fromEntries(Object.keys(columns).map((column) => [column, unit])),
+  });
+
+  const PAIR = 'ecmwf_ifs025_ensemble,ncep_gefs025';
+  const SEATTLE = { latitude: 47.61, longitude: -122.33 };
+
+  /** The notice a successful `runToolContract` result carries in `structuredContent`. */
+  const noticeOf = (result: Awaited<ReturnType<typeof runToolContract>>): string => {
+    expect(result.isError).toBeFalsy();
+    return String((result.structuredContent as { notice?: unknown }).notice);
+  };
+
+  it('answers a comma pair as both models: every column, the joined echo, and both models’ members (#98)', async () => {
+    // Live shape of the pair at Seattle, forecast_days 1: 50 + 30 members, each model's
+    // control run beside them, every column ending in its model's name.
+    const time = ['2026-11-17'];
+    const columns = {
+      ...modelColumns(time, 'temperature_2m_max', 50, (_, m) => 100 + m, 'ecmwf_ifs025_ensemble'),
+      ...modelColumns(time, 'temperature_2m_max', 30, (_, m) => 200 + m, 'ncep_gefs025'),
+    };
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: undefined,
+      hourly_units: undefined,
+      daily: { time, ...columns },
+      daily_units: unitsFor(columns, '°C'),
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...SEATTLE,
+      daily_variables: ['temperature_2m_max'],
+      models: PAIR,
+      forecast_days: 1,
+    });
+
+    const params = mockGetEnsemble.mock.calls[0]?.[2] as { models?: string[] };
+    expect(params.models).toEqual(['ecmwf_ifs025_ensemble', 'ncep_gefs025']);
+    const structured = result.structuredContent as {
+      daily: Record<string, unknown>[];
+      member_count?: number;
+      model: string;
+    };
+    expect(structured.model).toBe(PAIR);
+    expect(structured.member_count).toBe(80);
+    expect(Object.keys(structured.daily[0] ?? {})).toHaveLength(83);
+    expect(structured.daily[0]).toMatchObject({
+      temperature_2m_max_ecmwf_ifs025_ensemble: 100,
+      temperature_2m_max_member50_ecmwf_ifs025_ensemble: 150,
+      temperature_2m_max_ncep_gefs025: 200,
+      temperature_2m_max_member30_ncep_gefs025: 230,
+    });
+
+    const notice = noticeOf(result);
+    expect(notice).toBe(
+      'This response carries 2 ensemble models, so every column ends in the name of its model: temperature_2m_max_ecmwf_ifs025_ensemble is the control run of ecmwf_ifs025_ensemble and temperature_2m_max_member01_ecmwf_ifs025_ensemble its member 01. Members per model, control runs not counted: ecmwf_ifs025_ensemble 50, ncep_gefs025 30; member_count is their sum.',
+    );
+    expect(renderedText(trailerOf(result))).toBe(notice);
+    expect(firstText(result.content)).toContain(`**Models:** ${PAIR} | **Members:** 80`);
+  });
+
+  it('groups coverage gaps per variable and model, and offers fewer models as the lever (#98)', async () => {
+    // Live E4 shape: over 16 days ecmwf_ifs025_ensemble runs out 18 hourly rows before the
+    // end and ncep_gefs025 131 rows before it.
+    const time = hourlyTimes(384);
+    const columns = {
+      ...modelColumns(
+        time,
+        'temperature_2m',
+        50,
+        (row) => (row <= 365 ? 5 : null),
+        'ecmwf_ifs025_ensemble',
+      ),
+      ...modelColumns(time, 'temperature_2m', 30, (row) => (row <= 252 ? 6 : null), 'ncep_gefs025'),
+    };
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: { time, ...columns },
+      hourly_units: unitsFor(columns, '°C'),
+    });
+    mockCanvasInstance = undefined;
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m'],
+      models: PAIR,
+      forecast_days: 16,
+    });
+
+    const notice = noticeOf(result);
+    // Every coverage sentence in the notice, each naming one variable–model group.
+    expect(
+      notice.match(/Partial hourly coverage for [^:]+: data runs \S+ to \S+, and [^.]+\./g),
+    ).toEqual([
+      `Partial hourly coverage for temperature_2m_ecmwf_ifs025_ensemble: data runs ${time[0]} to ${time[365]}, and 18 of 384 rows are null.`,
+      `Partial hourly coverage for temperature_2m_ncep_gefs025: data runs ${time[0]} to ${time[252]}, and 131 of 384 rows are null.`,
+    ]);
+    expectNoCanvasDisclosureOnce(
+      result,
+      'fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or fewer models',
+    );
+  });
+
+  it('names the model whose members return a variable under the unit "undefined" (#98)', async () => {
+    // A model that does not serve a name answers it with every member's column all null
+    // under the unit "undefined" — here ncep_gefs025, beside ecmwf_ifs025_ensemble's values.
+    const time = hourlyTimes(24);
+    const served = modelColumns(time, 'temperature_2m_max', 2, () => 7, 'ecmwf_ifs025_ensemble');
+    const unserved = modelColumns(time, 'temperature_2m_max', 2, () => null, 'ncep_gefs025');
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: { time, ...served, ...unserved },
+      hourly_units: { ...unitsFor(served, '°C'), ...unitsFor(unserved, 'undefined') },
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m_max'],
+      models: PAIR,
+      forecast_days: 1,
+    });
+
+    expect(noticeOf(result)).toContain(
+      'temperature_2m_max returned no data on any member of ncep_gefs025 — Open-Meteo reported the unit as "undefined", which means ncep_gefs025 does not serve that name. Read temperature_2m_max from ecmwf_ifs025_ensemble.',
+    );
+    expect(noticeOf(result)).not.toContain('member01_ncep_gefs025 returned');
+    expect(noticeOf(result)).not.toContain('openmeteo_get_air_quality');
+  });
+
+  it('reads one name from the model that serves it and routes the name none serves (#98)', async () => {
+    // temperature_2m_max: values from ecmwf_ifs025_ensemble, "undefined" from ncep_gefs025;
+    // pm2_5: "undefined" from both, as live.
+    const time = hourlyTimes(24);
+    const served = modelColumns(time, 'temperature_2m_max', 2, () => 7, 'ecmwf_ifs025_ensemble');
+    const unserved = {
+      ...modelColumns(time, 'temperature_2m_max', 2, () => null, 'ncep_gefs025'),
+      ...modelColumns(time, 'pm2_5', 2, () => null, 'ecmwf_ifs025_ensemble'),
+      ...modelColumns(time, 'pm2_5', 2, () => null, 'ncep_gefs025'),
+    };
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: { time, ...served, ...unserved },
+      hourly_units: { ...unitsFor(served, '°C'), ...unitsFor(unserved, 'undefined') },
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m_max', 'pm2_5'],
+      models: PAIR,
+      forecast_days: 1,
+    });
+
+    const notice = noticeOf(result);
+    expect(notice).toContain(
+      'temperature_2m_max, pm2_5 returned no data on any member of ncep_gefs025 — Open-Meteo reported the unit as "undefined", which means ncep_gefs025 does not serve those names. pm2_5 returned no data on any member of ecmwf_ifs025_ensemble — Open-Meteo reported the unit as "undefined", which means ecmwf_ifs025_ensemble does not serve that name. Read temperature_2m_max from ecmwf_ifs025_ensemble. Request pm2_5 from the tool that serves that kind of variable — air-quality variables (pm2_5, …) from openmeteo_get_air_quality, marine variables (wave_height, …) from openmeteo_get_marine — or drop it.',
+    );
+    expect(renderedText(trailerOf(result))).toBe(notice);
+  });
+
+  it('calls the one model left after upstream dropped the other unattributable, not a pair (#98)', async () => {
+    // Live shape: icon_d2_eps has no data at Seattle, so upstream leaves it out with HTTP
+    // 200 and the survivor's 31 columns come back with plain names.
+    const time = ['2026-11-17'];
+    const columns = modelColumns(time, 'temperature_2m_max', 30, (_, m) => 200 + m);
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: undefined,
+      hourly_units: undefined,
+      daily: { time, ...columns },
+      daily_units: unitsFor(columns, '°C'),
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...SEATTLE,
+      daily_variables: ['temperature_2m_max'],
+      models: 'icon_d2_eps,ncep_gefs025',
+      forecast_days: 1,
+    });
+
+    const structured = result.structuredContent as { member_count?: number; model: string };
+    expect(structured.model).toBe('icon_d2_eps,ncep_gefs025');
+    expect(structured.member_count).toBe(30);
+    expect(noticeOf(result)).toBe(
+      'temperature_2m_max came back without a model suffix although 2 models were requested (icon_d2_eps, ncep_gefs025) — Open-Meteo leaves out a requested model that has no data at this coordinate (typically a regional model outside its domain), and the columns of the one left carry plain names, so these values are unattributable: they come from one of icon_d2_eps, ncep_gefs025, and the response does not say which. Request one model at a time to attribute them.',
+    );
+  });
+
+  it('names a model upstream left out of a three-model call and counts the two it kept (#98)', async () => {
+    // Live shape: icon_d2_eps dropped at Seattle, the two global models suffixed.
+    const time = ['2026-11-17'];
+    const columns = {
+      ...modelColumns(time, 'temperature_2m_max', 30, () => 9, 'ncep_gefs025'),
+      ...modelColumns(time, 'temperature_2m_max', 20, () => 8, 'gem_global_ensemble'),
+    };
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: undefined,
+      hourly_units: undefined,
+      daily: { time, ...columns },
+      daily_units: unitsFor(columns, '°C'),
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...SEATTLE,
+      daily_variables: ['temperature_2m_max'],
+      models: 'icon_d2_eps,ncep_gefs025,gem_global_ensemble',
+      forecast_days: 1,
+    });
+
+    expect((result.structuredContent as { member_count?: number }).member_count).toBe(50);
+    const notice = noticeOf(result);
+    expect(notice).toContain(
+      'Members per model, control runs not counted: ncep_gefs025 30, gem_global_ensemble 20; member_count is their sum.',
+    );
+    expect(notice).toContain(
+      'Open-Meteo returned no columns for icon_d2_eps — it leaves a requested model out of the response when it has no data at this coordinate (typically a regional model outside its domain), so this response compares only ncep_gefs025, gem_global_ensemble.',
+    );
+  });
+
+  it('gives a column to the longest requested model name it ends in (#98)', async () => {
+    // An uncatalogued name goes upstream as sent; gefs025 must not claim ncep_gefs025's columns.
+    const time = ['2026-11-17'];
+    const columns = {
+      ...modelColumns(time, 'temperature_2m_max', 2, () => 8, 'gefs025'),
+      ...modelColumns(time, 'temperature_2m_max', 3, () => 9, 'ncep_gefs025'),
+    };
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: undefined,
+      hourly_units: undefined,
+      daily: { time, ...columns },
+      daily_units: unitsFor(columns, '°C'),
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...SEATTLE,
+      daily_variables: ['temperature_2m_max'],
+      models: 'gefs025,ncep_gefs025',
+      forecast_days: 1,
+    });
+
+    expect((result.structuredContent as { member_count?: number }).member_count).toBe(5);
+    expect(noticeOf(result)).toContain(
+      'Members per model, control runs not counted: gefs025 2, ncep_gefs025 3; member_count is their sum.',
+    );
+  });
+
+  it('names the one model of a pair that answered when its plain columns carry the unit "undefined" (#98)', async () => {
+    // icon_d2_eps dropped at Seattle; the plain-named columns are ncep_gefs025's, and it
+    // answers pm2_5 with the unit "undefined" — which model that is, the response does not say.
+    const time = hourlyTimes(2);
+    const values = modelColumns(time, 'temperature_2m', 2, () => 7);
+    const unserved = modelColumns(time, 'pm2_5', 2, () => null);
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: { time, ...values, ...unserved },
+      hourly_units: { ...unitsFor(values, '°C'), ...unitsFor(unserved, 'undefined') },
+    });
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m', 'pm2_5'],
+      models: 'icon_d2_eps,ncep_gefs025',
+      forecast_days: 1,
+    });
+
+    const notice = noticeOf(result);
+    expect(notice).toContain(
+      'pm2_5 returned no data on any member — Open-Meteo reported the unit as "undefined", which means the one of icon_d2_eps, ncep_gefs025 that answered does not serve that name.',
+    );
+    expect(renderedText(trailerOf(result))).toBe(notice);
+  });
+
+  it('offers fewer models in the request_too_large message of a multi-model call (#98)', async () => {
+    const error = await tooLargeError(PAIR);
+
+    expect(error.data).toMatchObject({ reason: 'request_too_large' });
+    expect(error.message).toContain(
+      'narrow the request and retry: fewer forecast_days / past_days, fewer hourly_variables / daily_variables, or fewer models.',
+    );
+  });
+
+  it('declares a request_too_large recovery that fits a one-model and a several-model call (#98)', async () => {
+    const recovery = openmeteoGetEnsembleTool.errors?.find(
+      (entry) => entry.reason === 'request_too_large',
+    )?.recovery;
+    expect(recovery).toBe(
+      'Narrow the request and retry: fewer forecast_days / past_days, fewer hourly_variables / daily_variables, fewer models when several were requested, or, with one model, a models value with fewer members where the message names one. Every requested name and model is valid — the size of the request is what was rejected.',
+    );
+
+    // On a pair the message offers fewer models, and the hint beside it names the same lever.
+    const error = await tooLargeError(PAIR);
+    expect(error.message).toContain('or fewer models.');
+    expect(error.data?.recovery?.hint).toBe(recovery);
+  });
+
+  it('tells a pair rejected for one unknown model to correct that one and keep the other (#98)', async () => {
+    // Live shape: the models list goes out with a literal comma, so upstream names only the
+    // unknown model, never the valid one beside it.
+    mockGetEnsemble.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      error: true,
+      reason: 'Invalid value: Cannot initialize MultiDomains from invalid String value not_a_model',
+    });
+
+    const error = await wireError(openmeteoGetEnsembleTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m'],
+      models: 'ecmwf_ifs025_ensemble,not_a_model',
+      forecast_days: 1,
+    });
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_variable' },
+    });
+    expect(error.message).toMatch(/^Unknown variable or model name: not_a_model\./);
+    expect(error.data?.recovery?.hint).toContain(
+      'When the message names one model, correct that one and keep the rest of the models list; if another model in it is also unknown, the retry names it.',
+    );
+  });
+
+  it('keeps the single-model notice free of the per-model naming sentence (#98)', async () => {
+    mockGetEnsemble.mockResolvedValue(MOCK_RESPONSE);
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...SEATTLE,
+      hourly_variables: ['temperature_2m'],
+      models: 'ncep_gefs025',
+      forecast_days: 1,
+    });
+
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(firstText(result.content)).toContain('**Model:** ncep_gefs025 | **Members:** 2');
+  });
+
+  // --- the plane of global_tilted_irradiance (#101) -----------------------------
+
+  /** Upstream's notice when tilt was not sent: Open-Meteo computed a horizontal surface. */
+  const HORIZONTAL =
+    'global_tilted_irradiance was computed for a horizontal surface because tilt was not set: the same irradiance as shortwave_radiation.';
+
+  /** Upstream's notice when tilt was sent without azimuth: Open-Meteo faced the panel south. */
+  const SOUTH_FACING =
+    'global_tilted_irradiance was computed for a panel facing south (azimuth 0) because azimuth was not set.';
+
+  /** Two hours of every member's global_tilted_irradiance, as the endpoint returns it. */
+  const tiltedResponse = () => {
+    const time = hourlyTimes(2, '2026-11-18T12:00');
+    const columns = modelColumns(time, 'global_tilted_irradiance', 2, (row, m) => 600 + row + m);
+    return {
+      ...MOCK_RESPONSE,
+      hourly: { time, ...columns },
+      hourly_units: unitsFor(columns, 'W/m²'),
+    };
+  };
+
+  it.each([
+    { plane: { tilt: 33, azimuth: 0 }, sent: { tilt: 33, azimuth: 0 } },
+    { plane: { tilt: 0 }, sent: { tilt: 0, azimuth: undefined } },
+    { plane: {}, sent: { tilt: undefined, azimuth: undefined } },
+  ])('sends the plane $plane as $sent (#101)', async ({ plane, sent }) => {
+    mockGetEnsemble.mockResolvedValue(tiltedResponse());
+
+    const result = await runToolContract(openmeteoGetEnsembleTool, {
+      ...SEATTLE,
+      hourly_variables: ['global_tilted_irradiance'],
+      forecast_days: 1,
+      ...plane,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const params = mockGetEnsemble.mock.calls[0]?.[2] as { azimuth?: number; tilt?: number };
+    expect({ tilt: params.tilt, azimuth: params.azimuth }).toEqual(sent);
+  });
+
+  it.each([
+    { plane: {}, says: HORIZONTAL },
+    { plane: { azimuth: 180 }, says: HORIZONTAL },
+    { plane: { tilt: 34 }, says: SOUTH_FACING },
+  ])(
+    'names the plane Open-Meteo filled in for $plane on both surfaces (#101)',
+    async ({ plane, says }) => {
+      mockGetEnsemble.mockResolvedValue(tiltedResponse());
+
+      const result = await runToolContract(openmeteoGetEnsembleTool, {
+        ...SEATTLE,
+        hourly_variables: ['global_tilted_irradiance'],
+        forecast_days: 1,
+        ...plane,
+      });
+
+      const notice = noticeOf(result);
+      expect(notice).toContain(says);
+      expect(renderedText(trailerOf(result))).toBe(notice);
+    },
+  );
+
+  it.each([
+    { plane: { tilt: 34, azimuth: 180 }, variable: 'global_tilted_irradiance' },
+    { plane: { tilt: 0 }, variable: 'global_tilted_irradiance' },
+    { plane: { tilt: 33, azimuth: -90 }, variable: 'shortwave_radiation' },
+  ])(
+    'says nothing about the plane for $plane with $variable requested (#101)',
+    async ({ plane, variable }) => {
+      const time = hourlyTimes(2, '2026-11-18T12:00');
+      const columns = modelColumns(time, variable, 2, (row, m) => 600 + row + m);
+      mockGetEnsemble.mockResolvedValue({
+        ...MOCK_RESPONSE,
+        hourly: { time, ...columns },
+        hourly_units: unitsFor(columns, 'W/m²'),
+      });
+
+      const result = await runToolContract(openmeteoGetEnsembleTool, {
+        ...SEATTLE,
+        hourly_variables: [variable],
+        forecast_days: 1,
+        ...plane,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).not.toHaveProperty('notice');
+    },
+  );
+
+  it.each([
+    ['canvas enabled', true],
+    ['canvas disabled', false],
+  ])(
+    'names the horizontal surface ahead of the spill notice — %s (#101)',
+    async (_label, canvasEnabled) => {
+      const time = hourlyTimes(384);
+      const columns = modelColumns(time, 'global_tilted_irradiance', 50, (row, m) => row + m);
+      mockGetEnsemble.mockResolvedValue({
+        ...MOCK_RESPONSE,
+        hourly: { time, ...columns },
+        hourly_units: unitsFor(columns, 'W/m²'),
+      });
+      if (canvasEnabled) stageOnCanvas('spilled_ens101', 'canvas-ens-101', 384);
+      else mockCanvasInstance = undefined;
+
+      const result = await runToolContract(openmeteoGetEnsembleTool, {
+        ...SEATTLE,
+        hourly_variables: ['global_tilted_irradiance'],
+        forecast_days: 16,
+      });
+
+      const notice = noticeOf(result);
+      expect((result.structuredContent as { truncated?: boolean }).truncated).toBe(true);
+      const spill = canvasEnabled ? 'spilled_ens101' : 'DataCanvas is disabled';
+      expect(notice.indexOf(HORIZONTAL)).toBeGreaterThanOrEqual(0);
+      expect(notice.indexOf(HORIZONTAL)).toBeLessThan(notice.indexOf(spill));
+      expect(renderedText(trailerOf(result))).toBe(notice);
+    },
+  );
+
+  it.each([{ tilt: 91 }, { tilt: -1 }, { azimuth: 181 }, { azimuth: -181 }])(
+    'rejects the out-of-range plane %o before any request (#101)',
+    async (plane) => {
+      const error = await wireError(openmeteoGetEnsembleTool, {
+        ...SEATTLE,
+        hourly_variables: ['global_tilted_irradiance'],
+        ...plane,
+      } as never);
+
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.message).toContain(Object.keys(plane)[0] as string);
+      // A bound on a known field, not the rejection of a key the tool does not take.
+      expect(error.message).not.toContain('Unrecognized');
+      expect(mockGetEnsemble).not.toHaveBeenCalled();
+    },
+  );
 });

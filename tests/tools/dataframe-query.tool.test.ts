@@ -41,9 +41,12 @@ vi.mock('@/services/canvas-accessor.js', () => ({
 /** Stands in for every counter the tool creates, so a test can count its increments. */
 const clampCounter = vi.hoisted(() => ({ add: vi.fn() }));
 
+/** Hands out {@link clampCounter}, recording the metric name each counter is created under. */
+const createCounter = vi.hoisted(() => vi.fn((_name: string) => clampCounter));
+
 vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>()),
-  createCounter: () => clampCounter,
+  createCounter,
 }));
 
 const MOCK_ROWS = [
@@ -488,6 +491,14 @@ describe('openmeteoDataframeQueryTool limit (#94)', () => {
     });
   });
 
+  it('creates its clamp counter under the metric name openmeteo.dataframe_query.limit_clamped', async () => {
+    createCounter.mockClear();
+    await loadTool(undefined);
+    expect(createCounter.mock.calls.map(([name]) => name)).toEqual([
+      'openmeteo.dataframe_query.limit_clamped',
+    ]);
+  });
+
   it('takes its cap from a lower CANVAS_DEFAULT_ROW_LIMIT in both modes', async () => {
     resetConfig({ CANVAS_DEFAULT_ROW_LIMIT: '500' });
     expect(advertisedLimit(await loadTool('false'))).toMatchObject({
@@ -543,6 +554,114 @@ describe('openmeteoDataframeQueryTool limit (#94)', () => {
       expect(err.message).not.toContain('Unrecognized');
     }
   });
+
+  /** A canvas whose data query answers three whole rows, recording the rowLimit each call asks for. */
+  function threeRowCanvas() {
+    const query = vi.fn((_sql: string, _options: { rowLimit?: number }) =>
+      Promise.resolve({ rows: [{ k: 1 }, { k: 2 }, { k: 3 }], rowCount: 3, truncated: false }),
+    );
+    mockCanvasInstance = {
+      acquire: vi.fn().mockResolvedValue({ canvasId: 'testCanv01', query }),
+    };
+    return query;
+  }
+
+  const clampNotice = (requested: string) =>
+    `limit ${requested} is above the per-call cap of 10000 rows, so 10000 was applied. To read more than 10000 rows, page with LIMIT / OFFSET in the SQL.`;
+
+  it.each([
+    ['on', undefined, 1, 1],
+    ['on', undefined, 10000, 10000],
+    ['on', undefined, 10001, 10000],
+    ['on', undefined, Number.MAX_SAFE_INTEGER, 10000],
+    ['off', 'false', 1, 1],
+    ['off', 'false', 10000, 10000],
+  ])(
+    'with clamping %s, limit %d asks the canvas for %d rows',
+    async (_mode, clampLimits, limit, applied) => {
+      const tool = await loadTool(clampLimits);
+      const query = threeRowCanvas();
+
+      const result = await runToolContract(tool, {
+        canvas_id: 'testCanv01',
+        sql: 'SELECT k',
+        limit,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(query.mock.calls.map((call) => call[1].rowLimit)).toEqual([applied]);
+      expect(result.structuredContent).toMatchObject({ rows: [{ k: 1 }, { k: 2 }, { k: 3 }] });
+      const notice = (result.structuredContent as { notice?: string }).notice;
+      expect(notice).toBe(applied < limit ? clampNotice(String(limit)) : undefined);
+    },
+  );
+
+  it.each([
+    [2 ** 53, '9007199254740992'],
+    [1e20, '100000000000000000000'],
+  ])(
+    'lowers limit %d, past the safe-integer range, to the cap while clamping is on, and says so on both surfaces',
+    async (limit, requested) => {
+      const tool = await loadTool(undefined);
+      const query = threeRowCanvas();
+
+      const result = await runToolContract(tool, {
+        canvas_id: 'testCanv01',
+        sql: 'SELECT k',
+        limit,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(query.mock.calls.map((call) => call[1].rowLimit)).toEqual([10000]);
+      expect(result.structuredContent).toMatchObject({
+        rows: [{ k: 1 }, { k: 2 }, { k: 3 }],
+        notice: clampNotice(requested),
+      });
+      expect(result.content[1]).toEqual({ type: 'text', text: `\n\n> ${clampNotice(requested)}` });
+    },
+  );
+
+  it('rejects limit 1e20 at the cap alone when OPENMETEO_CLAMP_LIMITS=false, before any query', async () => {
+    const tool = await loadTool('false');
+    const query = threeRowCanvas();
+
+    const err = await wireError(tool, { canvas_id: 'testCanv01', sql: 'SELECT k', limit: 1e20 });
+
+    expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(err.message).toBe(
+      'Input validation error: Invalid arguments for tool openmeteo_dataframe_query: limit: Too big: expected number to be <=10000',
+    );
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['on', undefined],
+    ['off', 'false'],
+  ])(
+    'rejects a fractional limit with clamping %s on the integer rule alone, before any query',
+    async (_mode, clampLimits) => {
+      const tool = await loadTool(clampLimits);
+      const query = threeRowCanvas();
+      for (const limit of [0.5, -1.5, 2.5, 10000.5]) {
+        const parsed = tool.input.safeParse({ canvas_id: 'testCanv01', sql: 'SELECT k', limit });
+        expect(
+          parsed.error?.issues.map(({ code, path, message }) => ({ code, path, message })),
+        ).toEqual([
+          {
+            code: 'invalid_type',
+            path: ['limit'],
+            message: 'Invalid input: expected int, received number',
+          },
+        ]);
+        const err = await wireError(tool, { canvas_id: 'testCanv01', sql: 'SELECT k', limit });
+        expect(err.code).toBe(JsonRpcErrorCode.InvalidParams);
+        expect(err.message).toBe(
+          'Input validation error: Invalid arguments for tool openmeteo_dataframe_query: limit: Invalid input: expected int, received number',
+        );
+      }
+      expect(query).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('openmeteoDataframeQueryTool response ceiling', () => {
@@ -981,25 +1100,29 @@ describe('openmeteoDataframeQueryTool content[] round trip (#86)', () => {
       ['a long digit run', (size) => '1'.repeat(size), 320_000],
     ];
 
-    it.each(SHAPES)('stays linear on %s', (_shape, build, largest) => {
-      const timeAt = (size: number) => {
-        const value = build(size);
-        const rows = [{ [value]: value }];
-        return cpuMicrosPerCall(() => render(rows), Math.max(4, Math.ceil(400_000 / size)));
-      };
+    it.each(SHAPES)(
+      'stays linear on %s',
+      (_shape, build, largest) => {
+        const timeAt = (size: number) => {
+          const value = build(size);
+          const rows = [{ [value]: value }];
+          return cpuMicrosPerCall(() => render(rows), Math.max(4, Math.ceil(400_000 / size)));
+        };
 
-      const base = timeAt(BASE);
-      expect(base).toBeLessThan(BASE * CPU_MICROS_PER_CHAR);
-      let atLargest = base;
-      for (let size = BASE * 2; size <= largest; size *= 2) {
-        atLargest = timeAt(size);
-        expect(atLargest, `${size} characters`).toBeLessThan(size * CPU_MICROS_PER_CHAR);
-      }
+        const base = timeAt(BASE);
+        expect(base).toBeLessThan(BASE * CPU_MICROS_PER_CHAR);
+        let atLargest = base;
+        for (let size = BASE * 2; size <= largest; size *= 2) {
+          atLargest = timeAt(size);
+          expect(atLargest, `${size} characters`).toBeLessThan(size * CPU_MICROS_PER_CHAR);
+        }
 
-      // Linear growth over the span is its own size; quadratic would be its square.
-      const span = largest / BASE;
-      expect(atLargest / base).toBeLessThan(4 * span);
-    });
+        // Linear growth over the span is its own size; quadratic would be its square.
+        const span = largest / BASE;
+        expect(atLargest / base).toBeLessThan(4 * span);
+      },
+      0,
+    );
   });
 
   it('leaves structuredContent rows exactly as the canvas returned them', async () => {
@@ -1361,6 +1484,37 @@ describe('openmeteoDataframeQueryTool against a real DuckDB canvas', () => {
       expect(
         (result.structuredContent as Structured).rows.map((r) => Number(r.members_reporting)),
       ).toEqual([50]);
+    });
+
+    it('counts one model of a multi-model ensemble table with the pattern the description names', async () => {
+      // With several models every column ends in its model's name, so the single-model
+      // pattern matches no column at all and DuckDB refuses the query.
+      const pattern = /'(\^precipitation_member\\d\+_ncep_gefs025\$)'/.exec(description)?.[1];
+      expect(pattern).toBeDefined();
+      const instance = await canvas.acquire(canvasId, createMockContext({ tenantId: TENANT }));
+      const { tableName } = await stageSpill(instance, [
+        {
+          time: '2026-07-30T00:00',
+          precipitation_ncep_gefs025: 9,
+          precipitation_member01_ncep_gefs025: 0.7,
+          precipitation_member02_ncep_gefs025: 0.2,
+          precipitation_gem_global_ensemble: 9,
+          precipitation_member01_gem_global_ensemble: 0.9,
+        },
+      ] as Parameters<typeof stageSpill>[1]);
+
+      const result = await runExample(
+        // A replacer function, since the pattern's trailing `$'` is a replacement token.
+        (memberExample as string).replaceAll("'^precipitation_member\\d+$'", () => `'${pattern}'`),
+        tableName,
+      );
+
+      expect(result.isError).toBeFalsy();
+      const rows = (result.structuredContent as Structured).rows.map((row) => ({
+        over: Number(row.members_over),
+        reporting: Number(row.members_reporting),
+      }));
+      expect(rows).toEqual([{ over: 1, reporting: 2 }]);
     });
 
     it('casts daily sunrise and sunset the way the description says', async () => {

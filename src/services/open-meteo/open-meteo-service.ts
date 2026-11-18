@@ -85,21 +85,28 @@ interface RequestOrigin {
    * coordinate-free wording only in principle.
    */
   coordinate?: { latitude: number; longitude: number } | undefined;
+  /**
+   * The `models` the call sent — on `marine`, what decides whether switching models can
+   * reach a coordinate (see {@link isModelCapable}). Absent elsewhere, where it does not.
+   */
+  models?: readonly string[] | undefined;
   /** Per-endpoint label — the retry `operation`, and the dataset the wording names. */
   operation: OpenMeteoOperation;
 }
 
 /**
- * The coverage-gap rejection for either shape. The recovery half splits on whether the
- * calling endpoint exposes `models` (see {@link coverageGapRecovery}). Non-retryable in
- * both branches — the same request returns the same body.
+ * The coverage-gap rejection for either shape. The recovery half splits on whether
+ * switching models is a move the call can make (see {@link coverageGapRecovery}).
+ * Non-retryable in both branches — the same request returns the same body.
  *
  * `data.reason` names the `coverage_gap` entry the tools that reach a gap declare with
- * this same recovery sentence, so the handler boundary fills it onto the wire and
- * `content[]` still states it once.
+ * the recovery sentence for a call that sent no models, so the handler boundary fills it
+ * onto the wire and `content[]` still states it once. A call whose sentence differs — a
+ * marine call that sent `models` — carries its own as the hint, which the boundary keeps.
  */
 function coverageGapError(origin: RequestOrigin, fromNanBody: boolean): McpError {
-  const modelCapable = isModelCapable(origin.operation);
+  const modelCapable = isModelCapable(origin.operation, origin.models);
+  const recovery = coverageGapRecovery(origin.operation, origin.models);
   const at = origin.coordinate
     ? ` (${origin.coordinate.latitude}, ${origin.coordinate.longitude})`
     : '';
@@ -110,8 +117,11 @@ function coverageGapError(origin: RequestOrigin, fromNanBody: boolean): McpError
         : 'the endpoint reports a coordinate outside the grid it covers')
     : '';
   return validationError(
-    `Open-Meteo returned no data for this location${at}${shape}. ${coverageGapRecovery(origin.operation)}`,
-    { reason: 'coverage_gap' },
+    `Open-Meteo returned no data for this location${at}${shape}. ${recovery}`,
+    {
+      reason: 'coverage_gap',
+      ...(recovery !== coverageGapRecovery(origin.operation) && { recovery: { hint: recovery } }),
+    },
   );
 }
 
@@ -179,6 +189,45 @@ function isConcurrencyLimit(error: unknown): error is McpError {
 }
 
 /**
+ * True of a 4xx that is not one of Open-Meteo's input rejections. Open-Meteo rejects a
+ * caller's arguments — an unknown name, an out-of-range value or date, an unknown zone,
+ * too much data — with HTTP 400 and its `{"error": true, "reason": …}` envelope. Any other
+ * 4xx, whatever the body (an error page, JSON without the envelope, an empty or `null`
+ * body, Open-Meteo's own enveloped 404 for a path its host does not serve), comes from
+ * the configured endpoint or a proxy or access layer in front of it, so no change to the
+ * arguments clears it.
+ *
+ * A 429 and a 408 are classified before this. A 414 is left to the checks after it: an
+ * over-long request is reachable from the caller's own arguments.
+ */
+function isUpstreamRejection(status: number, text: string): boolean {
+  if (status < 400 || status > 499 || status === 414) return false;
+  if (status !== 400) return true;
+  try {
+    const body: unknown = JSON.parse(text);
+    return !(typeof body === 'object' && body !== null && 'error' in body && body.error === true);
+  } catch {
+    // A 400 body that is not JSON carries no envelope.
+    return true;
+  }
+}
+
+/**
+ * The rejection for {@link isUpstreamRejection}, thrown on the first attempt. It shares
+ * `ServiceUnavailable` with the transient failures, since the endpoint rather than the
+ * call is at fault, so `data.retryable: false` is what keeps {@link isRetryable} off it
+ * and puts "not retryable" on the wire. `data.reason` names the `upstream_rejected` entry
+ * every upstream-calling tool declares. `status` is the only detail it carries: the body
+ * can be a proxy's page naming hosts and paths.
+ */
+function upstreamRejectedError(status: number): McpError {
+  return serviceUnavailable(
+    `Open-Meteo answered HTTP ${status} without an input rejection, so the request's arguments did not cause this.`,
+    { reason: 'upstream_rejected', status, retryable: false },
+  );
+}
+
+/**
  * Which failures the retry loop is allowed to spend attempts on.
  *
  * A windowed `RateLimited` is deliberately absent. Its window reopens on a fixed
@@ -186,11 +235,14 @@ function isConcurrencyLimit(error: unknown): error is McpError {
  * backoff across three attempts, so retrying one can only ever fail three times: this
  * predicate replaces the framework's default entirely, so an error it admits is one
  * `withRetry` will retry. The concurrency 429 is the exception, since it clears as soon
- * as the address's in-flight requests finish.
+ * as the address's in-flight requests finish. An error carrying `data.retryable: false`
+ * is never retried: that is the framework default's per-error opt-out, which replacing
+ * the default means honoring here.
  */
 function isRetryable(error: unknown): boolean {
   if (error instanceof TypeError) return true;
   if (error instanceof McpError) {
+    if (error.data?.retryable === false) return false;
     return (
       [JsonRpcErrorCode.ServiceUnavailable, JsonRpcErrorCode.Timeout].includes(error.code) ||
       isConcurrencyLimit(error)
@@ -226,7 +278,7 @@ function transportError(err: unknown, ctx: Context, phase: 'request' | 'body'): 
  * One request and the classification of its response. Request URLs never appear in
  * error data or logs: the URL is built on an operator-configured base and reaches only
  * `fetch`, while every error carries the message alone or a field the caller can act
- * on (`status`, `reason`, `retryAttempts`).
+ * on (`status`, `reason`, `retryable`, `retryAttempts`).
  */
 async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigin): Promise<T> {
   const signal = AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), ctx.signal]);
@@ -250,6 +302,18 @@ async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigi
     throw rateLimitError(text);
   }
 
+  // A request timeout, from Open-Meteo or a layer in front of it, is transient whatever
+  // the body: retried, as a 5xx is, rather than read as a refusal or an input rejection.
+  if (response.status === 408) {
+    throw serviceUnavailable(`Open-Meteo API returned ${response.status}.`);
+  }
+
+  // Every other 4xx is classified by status too, ahead of the HTML guard that would retry
+  // an access layer's error page. See isUpstreamRejection.
+  if (isUpstreamRejection(response.status, text)) {
+    throw upstreamRejectedError(response.status);
+  }
+
   // CDN error page — treat as transient
   if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
     throw serviceUnavailable('Open-Meteo API returned HTML instead of JSON. Retry shortly.');
@@ -271,9 +335,14 @@ async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigi
     });
   }
 
+  // `null` or a bare scalar parses, but is no Open-Meteo response: the same unreadable answer.
+  if (typeof body !== 'object' || body === null) {
+    throw serviceUnavailable('Open-Meteo API returned unparseable response.');
+  }
+
   // Open-Meteo error envelope: { "error": true, "reason": "..." }
   // 5xx envelopes are transient — throw immediately so the retry loop fires.
-  // 4xx envelopes carry input-error context that tool handlers need to classify;
+  // A 400 envelope carries input-error context that tool handlers need to classify;
   // return the body so handlers can call ctx.fail() with the correct contract reason.
   const asRecord = body as Record<string, unknown>;
   if (asRecord.error === true && response.status >= 500) {
@@ -290,8 +359,8 @@ async function openMeteoFetch<T>(url: string, ctx: Context, origin: RequestOrigi
     if (response.status >= 500) {
       throw serviceUnavailable(`Open-Meteo API returned ${response.status}.`);
     }
-    // 4xx without an error envelope — throw as validation error.
-    // 4xx WITH an error envelope: body is returned above so handlers can attach the contract reason.
+    // Of the 4xx, only a 400 envelope and a 414 get past isUpstreamRejection. A 414
+    // without an envelope throws as a validation error; an envelope returns for the handler.
     if (!(asRecord.error === true)) {
       throw validationError(`Open-Meteo API returned ${response.status}.`);
     }
@@ -359,6 +428,11 @@ function withOpenMeteoRetry<T>(url: string, ctx: Context, origin: RequestOrigin)
 
 export interface ForecastParams {
   /**
+   * Panel azimuth for `global_tilted_irradiance` in degrees: 0 south, -90 east, 90 west,
+   * ±180 north. Omitted sends no parameter, and upstream faces the panel south.
+   */
+  azimuth?: number | undefined;
+  /**
    * Which grid cell answers: `land`, `sea`, or `nearest`. Omitted sends no parameter, so
    * upstream's own default — a land cell on this endpoint — answers.
    */
@@ -377,11 +451,19 @@ export interface ForecastParams {
   past_days?: number | undefined;
   precipitation_unit?: string | undefined;
   temperature_unit?: string | undefined;
+  /**
+   * Panel tilt for `global_tilted_irradiance` in degrees from horizontal (0–90). Omitted
+   * sends no parameter, and upstream computes a horizontal surface — the same irradiance
+   * as `shortwave_radiation`. No other variable reads `tilt` or `azimuth`.
+   */
+  tilt?: number | undefined;
   timezone?: string | undefined;
   wind_speed_unit?: string | undefined;
 }
 
 export interface HistoricalParams {
+  /** As on {@link ForecastParams}. */
+  azimuth?: number | undefined;
   /** As on {@link ForecastParams}; the archive also defaults to a land cell. */
   cell_selection?: string | undefined;
   daily?: string[] | undefined;
@@ -396,6 +478,8 @@ export interface HistoricalParams {
   precipitation_unit?: string | undefined;
   start_date: string;
   temperature_unit?: string | undefined;
+  /** As on {@link ForecastParams}. */
+  tilt?: number | undefined;
   timezone?: string | undefined;
   wind_speed_unit?: string | undefined;
 }
@@ -414,6 +498,13 @@ export interface MarineParams {
   hourly?: string[] | undefined;
   /** `imperial` returns wave, swell, and sea-level heights in ft; omitted means m. */
   length_unit?: string | undefined;
+  /**
+   * Marine models to read from. Omitted selects Open-Meteo's `best_match`; with 2+ names
+   * every hourly and daily column comes back suffixed with the model (`best_match`'s as
+   * `_marine_best_match`), while `current` stays one unsuffixed block from the first
+   * listed model covering the point.
+   */
+  models?: string[] | undefined;
   past_days?: number | undefined;
   start_date?: string | undefined;
   /** Unit of `sea_surface_temperature`; omitted means °C. */
@@ -435,15 +526,23 @@ export interface AirQualityParams {
 }
 
 export interface EnsembleParams {
+  /** As on {@link ForecastParams}; every member's column is computed for the same plane. */
+  azimuth?: number | undefined;
   /** As on {@link ForecastParams}; the ensemble endpoint also defaults to a land cell. */
   cell_selection?: string | undefined;
   daily?: string[] | undefined;
   forecast_days?: number | undefined;
   hourly?: string[] | undefined;
-  models?: string | undefined;
+  /**
+   * Ensemble models to read from. The endpoint has no default, so the tool always sends
+   * at least one; with 2+ names every column comes back suffixed with the model.
+   */
+  models?: string[] | undefined;
   past_days?: number | undefined;
   precipitation_unit?: string | undefined;
   temperature_unit?: string | undefined;
+  /** As on {@link ForecastParams}; every member's column is computed for the same plane. */
+  tilt?: number | undefined;
   timezone?: string | undefined;
   wind_speed_unit?: string | undefined;
 }
@@ -561,10 +660,12 @@ export class OpenMeteoService {
       past_days: params.past_days,
       start_date: params.start_date,
       end_date: params.end_date,
+      models: params.models,
     });
     return withOpenMeteoRetry<WeatherEnvelope>(url, ctx, {
       operation: 'marine',
       coordinate: { latitude: lat, longitude: lon },
+      models: params.models,
     });
   }
 
@@ -611,6 +712,8 @@ export class OpenMeteoService {
       wind_speed_unit: params.wind_speed_unit,
       precipitation_unit: params.precipitation_unit,
       cell_selection: params.cell_selection,
+      tilt: params.tilt,
+      azimuth: params.azimuth,
       timezone: params.timezone ?? 'auto',
     });
 
@@ -748,19 +851,20 @@ type QueryValue = string | number | string[] | undefined;
  * Every character that could alter the query's structure is escaped: `encodeURIComponent`
  * runs per list element and per scalar, so `&`, `=`, `#`, `?`, `%`, whitespace, and any
  * non-ASCII byte are percent-encoded, and no value can add, replace, or truncate a
- * parameter. A comma inside an element encodes to `%2C`, which Open-Meteo also splits a
- * valid list on, so an element holding a comma reaches upstream as the names it joins.
- * What it leaves literal beyond the separator — `!`, `'`, `(`,
- * `)`, `~`, `*`, and a space as `%20` rather than `+` — are all characters RFC 3986
- * permits unencoded in a query value; none is a delimiter, so none can split a parameter.
- * Keys are literals in this module and need no escaping.
+ * parameter. A comma inside a list element would encode to `%2C`, but none arrives: every
+ * tool runs its name lists through `cleanNames`, which splits such an element into the
+ * names it joins, before calling the service. What `encodeURIComponent` leaves literal
+ * beyond the separator — `!`, `'`, `(`, `)`, `~`, `*`, and a space as `%20` rather than
+ * `+` — are all characters RFC 3986 permits unencoded in a query value; none is a
+ * delimiter, so none can split a parameter. Keys are literals in this module and need no
+ * escaping.
  *
  * An empty value is omitted rather than sent as a bare `key=`. No Open-Meteo parameter
  * reads an empty value as a default: `models=` on the ensemble endpoint is rejected with
  * `No data is available for this location`, pointing the caller at the coordinate for
- * what is an empty field. A schema
- * that admits an empty string (a form-based client sending a blank field) therefore has
- * to reach the wire as an absent parameter, not an empty one.
+ * what is an empty field. A schema that admits an empty string (a form-based client
+ * sending a blank field) therefore has to reach the wire as an absent parameter, not an
+ * empty one.
  */
 function openMeteoUrl(base: string, params: Record<string, QueryValue>): string {
   const parts: string[] = [];
@@ -784,6 +888,7 @@ function openMeteoUrl(base: string, params: Record<string, QueryValue>): string 
  * declare is simply never present, and an absent field is omitted from the query.
  */
 interface WeatherQueryParams {
+  azimuth?: number | undefined;
   cell_selection?: string | undefined;
   current?: string[] | undefined;
   daily?: string[] | undefined;
@@ -796,6 +901,7 @@ interface WeatherQueryParams {
   precipitation_unit?: string | undefined;
   start_date?: string | undefined;
   temperature_unit?: string | undefined;
+  tilt?: number | undefined;
   timezone?: string | undefined;
   wind_speed_unit?: string | undefined;
 }
@@ -822,6 +928,8 @@ function buildWeatherUrl(
     precipitation_unit: params.precipitation_unit,
     length_unit: params.length_unit,
     cell_selection: params.cell_selection,
+    tilt: params.tilt,
+    azimuth: params.azimuth,
     timezone: params.timezone ?? 'auto',
   });
 }

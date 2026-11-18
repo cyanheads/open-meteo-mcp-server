@@ -1,8 +1,9 @@
 /**
  * @fileoverview Wire-level contract for the Open-Meteo failures other than HTTP 429: a
- * coordinate the requested dataset does not cover (`coverage_gap`), and a retry ladder
- * that runs out on an outage (`upstream_unavailable`) or on the per-attempt timeout
- * (`upstream_timeout`). Runs each tool through `runToolContract` over the real service
+ * coordinate the requested dataset does not cover (`coverage_gap`), a 4xx that is not an
+ * input rejection (`upstream_rejected`), and a retry ladder that runs out on an outage
+ * (`upstream_unavailable`) or on the per-attempt timeout (`upstream_timeout`). Runs each
+ * tool through `runToolContract` over the real service
  * with only `fetch` stubbed, so the service's classification, its `data.reason`, and
  * the handler boundary's fill of the declared `recovery` are all under test together.
  * @module tests/tools/upstream-failure-contract.test
@@ -54,6 +55,18 @@ const SWITCH_MODELS =
   "Switch to a model whose domain includes this coordinate (any global model does), or omit models to use the tool's global default. Retrying returns the same response.";
 const gridRecovery = (dataset: string) =>
   `The ${dataset} dataset's grid does not cover this coordinate — request a point inside its coverage. Retrying returns the same response.`;
+/** Marine's per-call coverage-gap remedies, each closed by where no wave model has data. */
+const marineRecovery = (remedy: string) =>
+  `${remedy} A point on land or under sea ice has no wave data from any model, so there the remedy is a coordinate in open water. Retrying returns the same response.`;
+/** With no models sent the likelier cause, land or sea ice, leads; the blend's gaps follow. */
+const MARINE_NO_MODELS =
+  'A point on land or under sea ice has no wave data from any model, so there the remedy is a coordinate in open water. For a point in open water, name a model in models: the default blend has gaps a single wave model can fill. Retrying returns the same response.';
+const MARINE_OTHER_MODEL = marineRecovery(
+  'Name another model, or omit models to read the default blend.',
+);
+const MARINE_BLEND_SENT = marineRecovery(
+  'Name other models: best_match, the default blend, missed this coordinate too, so omitting models will not reach it.',
+);
 const NAN_REGIONAL =
   ' — the response carried nan coordinates and no data blocks, which is how a regional model reports a coordinate outside the area it covers';
 const NAN_GRID =
@@ -106,8 +119,8 @@ const COVERAGE_GAP_CASES = [
     tool: definitions.openmeteoGetMarineTool,
     input: { latitude: -90, longitude: 0, hourly_variables: ['wave_height'] },
     response: () => new Response(NO_DATA_ENVELOPE, { status: 400 }),
-    message: `Open-Meteo returned no data for this location (-90, 0). ${gridRecovery('marine')}`,
-    recovery: gridRecovery('marine'),
+    message: `Open-Meteo returned no data for this location (-90, 0). ${MARINE_NO_MODELS}`,
+    recovery: MARINE_NO_MODELS,
   },
   {
     tool: definitions.openmeteoGetFloodTool,
@@ -230,6 +243,128 @@ describe('upstream failure contracts (#77)', () => {
         expect(occurrences(text, recovery)).toBe(1);
         expect(text).not.toContain('Recovery:');
         expect(text).toContain('reason coverage_gap');
+        for (const marker of URL_MARKERS) expect(JSON.stringify(result)).not.toContain(marker);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('answers a marine call whose models all miss the point with its own remedy alone (#104)', async () => {
+      // Live: models=ewam at 45, −30 — ewam covers Europe only. The declared recovery is
+      // the sentence of a call without models; this call carries its own hint.
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(new Response(NO_DATA_ENVELOPE, { status: 400 })),
+      );
+
+      const { error, text } = await failedCall(
+        runToolContract(
+          definitions.openmeteoGetMarineTool as AnyDefinition,
+          {
+            latitude: 45,
+            longitude: -30,
+            hourly_variables: ['wave_height'],
+            models: ['ewam'],
+          } as AnyInput,
+        ),
+      );
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toBe(
+        `Open-Meteo returned no data for this location (45, -30). ${MARINE_OTHER_MODEL}`,
+      );
+      expect(error.data).toEqual({
+        reason: 'coverage_gap',
+        recovery: { hint: MARINE_OTHER_MODEL },
+      });
+      expect(occurrences(text, MARINE_OTHER_MODEL)).toBe(1);
+      expect(text).not.toContain('Recovery:');
+      expect(text).not.toMatch(/global|grid does not cover/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([[['best_match']], [['best_match', 'ecmwf_wam']]])(
+      'answers a marine call with models %j, the default blend among them, with other models and open water',
+      async (models) => {
+        // Live: models=best_match at −90, 0 answers HTTP 400 "No data is available for this
+        // location", the default blend's own gap; every global wave model returns all-null
+        // columns there, so omitting models cannot reach the point and no model may either.
+        fetchMock.mockImplementation(() =>
+          Promise.resolve(new Response(NO_DATA_ENVELOPE, { status: 400 })),
+        );
+
+        const { error, text } = await failedCall(
+          runToolContract(
+            definitions.openmeteoGetMarineTool as AnyDefinition,
+            { latitude: -90, longitude: 0, hourly_variables: ['wave_height'], models } as AnyInput,
+          ),
+        );
+
+        expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(error.message).toBe(
+          `Open-Meteo returned no data for this location (-90, 0). ${MARINE_BLEND_SENT}`,
+        );
+        expect(error.data).toEqual({
+          reason: 'coverage_gap',
+          recovery: { hint: MARINE_BLEND_SENT },
+        });
+        expect(occurrences(text, MARINE_BLEND_SENT)).toBe(1);
+        expect(text).not.toMatch(/switch|global|grid does not cover/i);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      },
+    );
+  });
+
+  describe('upstream_rejected (#99)', () => {
+    /** Open-Meteo's own answer to a path its host does not serve — a misrouted base URL. */
+    const NOT_FOUND_ENVELOPE = '{"error":true,"reason":"Not Found"}';
+    const REJECTED_404 =
+      "Open-Meteo answered HTTP 404 without an input rejection, so the request's arguments did not cause this.";
+
+    it('is declared on exactly the nine upstream-calling tools', () => {
+      const declaring = Object.values(definitions)
+        .filter((definition) => entryFor(definition as AnyDefinition, 'upstream_rejected'))
+        .map((definition) => definition.name)
+        .sort();
+      expect(declaring).toEqual(UPSTREAM_CALLS.map(({ tool }) => tool.name).sort());
+    });
+
+    it.each(UPSTREAM_CALLS)(
+      '$tool.name declares it as a service-thrown, non-retryable ServiceUnavailable naming the operator',
+      ({ tool }) => {
+        const entry = entryFor(tool as AnyDefinition, 'upstream_rejected');
+        expect(entry).toMatchObject({
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          thrownBy: 'service',
+          retryable: false,
+        });
+        expect(entry?.recovery).toContain('retrying will not clear it');
+        expect(entry?.recovery).toContain('whoever operates this server');
+      },
+    );
+
+    it.each(UPSTREAM_CALLS)(
+      "$tool.name answers Open-Meteo's routing 404 with upstream_rejected and its recovery, after one request",
+      async ({ tool, input }) => {
+        fetchMock.mockImplementation(() =>
+          Promise.resolve(new Response(NOT_FOUND_ENVELOPE, { status: 404 })),
+        );
+        const recovery = entryFor(tool as AnyDefinition, 'upstream_rejected')?.recovery;
+
+        const { result, error, text } = await failedCall(
+          runToolContract(tool as AnyDefinition, input as AnyInput),
+        );
+
+        expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(error.message).toBe(REJECTED_404);
+        expect(error.data).toEqual({
+          reason: 'upstream_rejected',
+          status: 404,
+          retryable: false,
+          recovery: { hint: recovery },
+        });
+        expect(text).toContain(`Recovery: ${recovery}`);
+        expect(text).toContain('reason upstream_rejected · not retryable');
+        // No handler framed the upstream reason as an input error.
+        expect(text).not.toContain('Upstream:');
         for (const marker of URL_MARKERS) expect(JSON.stringify(result)).not.toContain(marker);
         expect(fetchMock).toHaveBeenCalledTimes(1);
       },

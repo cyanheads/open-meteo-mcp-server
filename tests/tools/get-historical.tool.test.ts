@@ -9,7 +9,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetHistoricalTool } from '@/mcp-server/tools/definitions/get-historical.tool.js';
 import { ARCHIVE_MODELS } from '@/mcp-server/tools/model-catalog.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
-import { firstText } from '../helpers/content.js';
+import { renderedText } from '../helpers/commonmark.js';
+import { firstText, trailerOf } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
 import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
 import { wireError } from '../helpers/wire-error.js';
@@ -136,14 +137,14 @@ describe('openmeteoGetHistoricalTool', () => {
       longitude: -122.3321,
       start_date: '2024-07-01',
       end_date: '2024-07-02',
-      hourly_variables: ['temperature_2m_max'],
+      hourly_variables: ['precipitation_sum'],
       daily_variables: ['temperature_2m_max', 'cloud_cover'],
     });
 
     await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message: expect.stringContaining(
-        'temperature_2m_max is not valid in hourly_variables — Open-Meteo publishes it as a daily variable.',
+        'precipitation_sum is not valid in hourly_variables — Open-Meteo publishes it as a daily variable.',
       ),
       data: { reason: 'variable_wrong_cadence' },
     });
@@ -1542,5 +1543,240 @@ describe('openmeteoGetHistoricalTool provenance wording (#37)', () => {
     await expect(openmeteoGetHistoricalTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'date_out_of_range' },
     });
+  });
+});
+
+/*
+ * Wiring only: the bounds and every branch of the notice are tabled in
+ * tests/tools/tilt-input.test.ts, and the URL in tests/services/open-meteo-service.test.ts.
+ */
+describe('openmeteoGetHistoricalTool tilt and azimuth (#101)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
+  });
+
+  const SYDNEY_DAY = {
+    latitude: -33.87,
+    longitude: 151.21,
+    start_date: '2025-06-21',
+    end_date: '2025-06-21',
+    timezone: 'Australia/Sydney',
+  };
+
+  const TIME = ['2025-06-21T12:00', '2025-06-21T13:00', '2025-06-21T14:00'];
+
+  /** Live archive, Sydney 2025-06-21 12:00–14:00, no tilt sent: each tilted column is its horizontal twin. */
+  const UNTILTED = {
+    latitude: -33.848858,
+    longitude: 151.19551,
+    elevation: 69,
+    generationtime_ms: 0.1,
+    utc_offset_seconds: 39600,
+    timezone: 'Australia/Sydney',
+    timezone_abbreviation: 'GMT+11',
+    hourly_units: {
+      time: 'iso8601',
+      shortwave_radiation: 'W/m²',
+      global_tilted_irradiance: 'W/m²',
+      global_tilted_irradiance_instant: 'W/m²',
+    },
+    hourly: {
+      time: TIME,
+      shortwave_radiation: [456, 514, 512],
+      global_tilted_irradiance: [456, 514, 512],
+      global_tilted_irradiance_instant: [486.9, 521.1, 494],
+    },
+  };
+
+  /** The same hours with tilt=34&azimuth=180 sent: a north-facing panel, only the tilted columns move. */
+  const NORTH_FACING = {
+    ...UNTILTED,
+    hourly: {
+      ...UNTILTED.hourly,
+      global_tilted_irradiance: [746.9, 830.1, 827.8],
+      global_tilted_irradiance_instant: [797.4, 841.6, 798.8],
+    },
+  };
+
+  const GTI_CALL = {
+    ...SYDNEY_DAY,
+    hourly_variables: [
+      'shortwave_radiation',
+      'global_tilted_irradiance',
+      'global_tilted_irradiance_instant',
+    ],
+  };
+
+  const HORIZONTAL_BOTH =
+    'global_tilted_irradiance and global_tilted_irradiance_instant were computed for a horizontal surface because tilt was not set: the same irradiance as shortwave_radiation and shortwave_radiation_instant. Set tilt (degrees from horizontal, 0–90) and azimuth (0 south, -90 east, 90 west, ±180 north) for the plane of a tilted panel.';
+
+  const HORIZONTAL_ONE =
+    'global_tilted_irradiance was computed for a horizontal surface because tilt was not set: the same irradiance as shortwave_radiation. Set tilt (degrees from horizontal, 0–90) and azimuth (0 south, -90 east, 90 west, ±180 north) for the plane of a tilted panel.';
+
+  /** The params object the handler handed the service. */
+  const sentParams = () => mockGetHistorical.mock.calls[0]?.[2] as Record<string, unknown>;
+
+  type Result = Awaited<ReturnType<typeof runToolContract>>;
+
+  const noticeOf = (result: Result) => (result.structuredContent as { notice?: string }).notice;
+
+  const hourlyOf = (result: Result) =>
+    (result.structuredContent as { hourly: Record<string, unknown>[] }).hourly;
+
+  it('passes the tilted columns through and sends neither parameter when both are omitted', async () => {
+    mockGetHistorical.mockResolvedValue(UNTILTED);
+
+    const result = await runToolContract(openmeteoGetHistoricalTool, GTI_CALL);
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams().tilt).toBeUndefined();
+    expect(sentParams().azimuth).toBeUndefined();
+    expect(hourlyOf(result).map((row) => row.global_tilted_irradiance)).toEqual([456, 514, 512]);
+  });
+
+  it('names the horizontal surface and both twins when tilted variables are requested without tilt', async () => {
+    mockGetHistorical.mockResolvedValue(UNTILTED);
+
+    const result = await runToolContract(openmeteoGetHistoricalTool, GTI_CALL);
+
+    expect(noticeOf(result)).toBe(HORIZONTAL_BOTH);
+  });
+
+  it('forwards tilt and azimuth and adds no notice when the caller set the plane', async () => {
+    mockGetHistorical.mockResolvedValue(NORTH_FACING);
+
+    const result = await runToolContract(openmeteoGetHistoricalTool, {
+      ...GTI_CALL,
+      tilt: 34,
+      azimuth: 180,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams()).toMatchObject({ tilt: 34, azimuth: 180 });
+    expect(noticeOf(result)).toBeUndefined();
+    expect(hourlyOf(result)[1]).toEqual({
+      time: '2025-06-21T13:00',
+      shortwave_radiation: 514,
+      global_tilted_irradiance: 830.1,
+      global_tilted_irradiance_instant: 841.6,
+    });
+  });
+
+  it('forwards tilt and azimuth with no tilted variable requested, adding no notice', async () => {
+    mockGetHistorical.mockResolvedValue({
+      ...UNTILTED,
+      hourly_units: { time: 'iso8601', shortwave_radiation: 'W/m²' },
+      hourly: { time: TIME, shortwave_radiation: [456, 514, 512] },
+    });
+
+    const result = await runToolContract(openmeteoGetHistoricalTool, {
+      ...SYDNEY_DAY,
+      hourly_variables: ['shortwave_radiation'],
+      tilt: 34,
+      azimuth: 180,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams()).toMatchObject({ tilt: 34, azimuth: 180 });
+    expect(noticeOf(result)).toBeUndefined();
+    expect(hourlyOf(result).map((row) => row.shortwave_radiation)).toEqual([456, 514, 512]);
+  });
+
+  it.each([
+    ['tilt', -1],
+    ['azimuth', 181],
+  ])('rejects %s %s at argument validation, before any request', async (field, value) => {
+    const error = await wireError(openmeteoGetHistoricalTool, { ...GTI_CALL, [field]: value });
+
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.message).toContain(field);
+    expect(error.message).not.toContain('Unrecognized key');
+    expect(mockGetHistorical).not.toHaveBeenCalled();
+  });
+
+  it('keeps the tilt sentence beside the response’s other notices, on both surfaces', async () => {
+    mockGetHistorical.mockResolvedValue({
+      ...UNTILTED,
+      hourly_units: { ...UNTILTED.hourly_units, soil_moisture_0_to_1cm: 'undefined' },
+      hourly: { ...UNTILTED.hourly, soil_moisture_0_to_1cm: [null, null, null] },
+    });
+
+    const result = await runToolContract(openmeteoGetHistoricalTool, {
+      ...GTI_CALL,
+      hourly_variables: [...GTI_CALL.hourly_variables, 'soil_moisture_0_to_1cm'],
+    });
+
+    const notice = noticeOf(result) ?? '';
+    expect(notice).toContain('soil_moisture_0_to_1cm returned no data');
+    expect(notice).toContain(HORIZONTAL_BOTH);
+    expect(renderedText(trailerOf(result))).toBe(notice);
+  });
+
+  /** A year of hourly archive wide enough to spill, with the tilted column in it. */
+  const wideTiltedArchive = () => {
+    const time = hourlyTimes(8760);
+    const hourly: Record<string, (number | null)[] | string[]> = { time };
+    for (const variable of [
+      'temperature_2m',
+      'precipitation',
+      'wind_speed_10m',
+      'relative_humidity_2m',
+      'cloud_cover',
+      'dew_point_2m',
+      'surface_pressure',
+      'shortwave_radiation',
+      'global_tilted_irradiance',
+    ]) {
+      hourly[variable] = time.map((_, row) => 100.5 + (row % 17));
+    }
+    return {
+      rowCount: time.length,
+      response: { ...MOCK_RESPONSE, daily_units: undefined, daily: undefined, hourly },
+      input: {
+        latitude: 47.6062,
+        longitude: -122.3321,
+        start_date: '2023-01-01',
+        end_date: '2023-12-31',
+        hourly_variables: Object.keys(hourly).filter((key) => key !== 'time'),
+      },
+    };
+  };
+
+  it('puts the tilt sentence ahead of the canvas pointer when the result spills', async () => {
+    const { rowCount, response, input } = wideTiltedArchive();
+    mockGetHistorical.mockResolvedValue(response);
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount, tableName: 'spilled_hi101' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-hi-101' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetHistoricalTool.errors });
+    const result = await openmeteoGetHistoricalTool.handler(
+      openmeteoGetHistoricalTool.input.parse(input),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-hi-101');
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice.startsWith(`${HORIZONTAL_ONE} `)).toBe(true);
+    expect(notice).toContain('spilled_hi101');
+  });
+
+  it('keeps the tilt sentence beside the no-canvas disclosure, on both surfaces', async () => {
+    const { response, input } = wideTiltedArchive();
+    mockGetHistorical.mockResolvedValue(response);
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const result = await runToolContract(openmeteoGetHistoricalTool, input);
+
+    expectNoCanvasDisclosureOnce(result, 'a shorter start_date–end_date range');
+    const notice = noticeOf(result) ?? '';
+    expect(notice.startsWith(`${HORIZONTAL_ONE} `)).toBe(true);
+    expect(renderedText(trailerOf(result))).toBe(notice);
   });
 });

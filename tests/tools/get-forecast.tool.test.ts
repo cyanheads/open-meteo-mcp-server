@@ -9,7 +9,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetForecastTool } from '@/mcp-server/tools/definitions/get-forecast.tool.js';
 import { FORECAST_MODELS } from '@/mcp-server/tools/model-catalog.js';
 import { INLINE_CHARS } from '@/mcp-server/tools/spill-utils.js';
-import { firstText } from '../helpers/content.js';
+import { renderedText } from '../helpers/commonmark.js';
+import { firstText, trailerOf } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
 import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
 import { type WireError, wireError } from '../helpers/wire-error.js';
@@ -365,20 +366,20 @@ describe('openmeteoGetForecastTool', () => {
     expect(mockGetForecast).not.toHaveBeenCalled();
   });
 
-  it('rejects temperature_2m_max in hourly_variables instead of returning an all-null column (#26)', async () => {
-    // Upstream answers this one with HTTP 200, an all-null column, and unit
-    // "undefined" — a success indistinguishable from a genuine data gap.
+  it('rejects precipitation_sum in hourly_variables before the request (#26)', async () => {
+    // Upstream answers this one with an HTTP 400 that rejects it as an unknown name,
+    // naming neither the field it belongs in nor an hourly counterpart.
     const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
     const input = openmeteoGetForecastTool.input.parse({
       latitude: 40.71427,
       longitude: -74.00597,
-      hourly_variables: ['temperature_2m_max'],
+      hourly_variables: ['precipitation_sum'],
     });
 
     await expect(openmeteoGetForecastTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
       message:
-        'temperature_2m_max is not valid in hourly_variables — Open-Meteo publishes it as a daily variable. Move it to daily_variables, or stay in hourly_variables with temperature_2m.',
+        'precipitation_sum is not valid in hourly_variables — Open-Meteo publishes it as a daily variable. Move it to daily_variables, or stay in hourly_variables with precipitation.',
       data: { reason: 'variable_wrong_cadence' },
     });
     expect(mockGetForecast).not.toHaveBeenCalled();
@@ -419,19 +420,17 @@ describe('openmeteoGetForecastTool', () => {
         some_new_daily_name: [null, null],
       },
     });
-    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
-    const input = openmeteoGetForecastTool.input.parse({
+    const result = await runToolContract(openmeteoGetForecastTool, {
       latitude: 47.6062,
       longitude: -122.3321,
       hourly_variables: ['temperature_2m', 'some_new_daily_name'],
     });
 
-    await openmeteoGetForecastTool.handler(input, ctx);
-
-    expect(getEnrichment(ctx).notice).toContain('some_new_daily_name returned no data');
-    expect(getEnrichment(ctx).notice).toContain(
-      'current_variables, hourly_variables, or daily_variables',
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    expect(notice).toBe(
+      'some_new_daily_name returned no data — Open-Meteo reported the unit as "undefined", which means the endpoint parsed that name but serves no data for it. Drop it, or request it from the tool that serves that kind of variable: marine variables (wave_height, sea_surface_temperature, …) from openmeteo_get_marine, air-quality variables (pm2_5, ozone, …) from openmeteo_get_air_quality.',
     );
+    expect(renderedText(trailerOf(result))).toBe(notice);
   });
 
   it('stays quiet when every requested column carries a real unit', async () => {
@@ -1419,6 +1418,62 @@ describe('openmeteoGetForecastTool model comparison (#80)', () => {
     expect(mockGetForecast).not.toHaveBeenCalled();
   });
 
+  it('rejects current_variables with two models as current_multi_model before a misplaced current name', async () => {
+    // temperature_2m_mean is filed under daily alone, so at current it is also a cadence fault.
+    const error = await wireError(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      current_variables: ['temperature_2m_mean'],
+      models: ['gfs_seamless', 'ecmwf_ifs025'],
+    });
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'current_multi_model' },
+    });
+    expect(mockGetForecast).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['named twice', ['gfs_seamless', 'gfs_seamless']],
+    ['repeated inside one element', ['gfs_seamless,gfs_seamless']],
+  ])('answers current_variables beside one model %s, in one request', async (_, models) => {
+    // Shaped on the live marine answer to a model named twice: the current block
+    // unsuffixed, and each hourly variable as one column suffixed with that model.
+    mockGetForecast.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', temperature_2m_gfs_seamless: '°C' },
+      hourly: {
+        time: ['2026-05-30T00:00', '2026-05-30T01:00'],
+        temperature_2m_gfs_seamless: [10.1, 9.4],
+      },
+      current_units: { time: 'iso8601', interval: 'seconds', temperature_2m: '°C' },
+      current: { time: '2026-05-30T00:15', interval: 900, temperature_2m: 10 },
+    });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...SEATTLE,
+      current_variables: ['temperature_2m'],
+      hourly_variables: ['temperature_2m'],
+      models,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockGetForecast).toHaveBeenCalledTimes(1);
+    expect(sentParams()).toMatchObject({
+      current: ['temperature_2m'],
+      models: ['gfs_seamless', 'gfs_seamless'],
+    });
+    const wire = JSON.parse(JSON.stringify(result.structuredContent)) as Record<string, unknown>;
+    expect(wire).toMatchObject({
+      current: { temperature_2m: 10 },
+      hourly: [{ temperature_2m_gfs_seamless: 10.1 }, { temperature_2m_gfs_seamless: 9.4 }],
+    });
+    expect(wire).not.toHaveProperty('notice');
+    expect(result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')).not.toMatch(
+      /returned no columns|without a model suffix|unattributable/,
+    );
+  });
+
   it('accepts current_variables with one model and forwards both', async () => {
     mockGetForecast.mockResolvedValue({
       ...MOCK_RESPONSE,
@@ -1766,28 +1821,75 @@ describe('openmeteoGetForecastTool current conditions (#42)', () => {
     });
   });
 
-  it('surfaces a mis-cadenced current name through the existing "undefined"-unit backstop', async () => {
-    // Upstream answers a daily-only name passed to current with HTTP 200, a null value,
-    // and the literal unit "undefined" — the same shape hourly_variables already hits.
-    const { ctx } = await run(
-      { current_variables: ['temperature_2m', 'temperature_2m_max'] },
+  it('rejects a daily-only current name before any request, naming daily_variables', async () => {
+    // Live, 2026-11-17: every name the forecast catalog files under daily alone draws this
+    // HTTP 400 at `current`, which read as an unknown name.
+    mockGetForecast.mockResolvedValue({
+      error: true,
+      reason:
+        'Invalid value: Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value precipitation_sum',
+    });
+
+    const error = await wireError(openmeteoGetForecastTool, {
+      latitude: 47.6,
+      longitude: -122.3,
+      current_variables: ['temperature_2m', 'precipitation_sum'],
+    });
+
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data?.reason).toBe('variable_wrong_cadence');
+    expect(error.message).toContain(
+      'precipitation_sum is not valid in current_variables — Open-Meteo publishes it as a daily variable. Move it to daily_variables',
+    );
+    expect(mockGetForecast).not.toHaveBeenCalled();
+  });
+
+  it('answers a name the catalog files under both cadences in current_variables', async () => {
+    // Live, 2026-11-17: `current=temperature_2m_max` is served with a real unit and value.
+    const { result, params } = await run(
+      { current_variables: ['temperature_2m_max'] },
       {
         ...MOCK_RESPONSE,
-        current_units: {
-          time: 'iso8601',
-          interval: 'seconds',
-          temperature_2m: '°C',
-          temperature_2m_max: 'undefined',
-        },
-        current: {
-          time: '2026-05-30T14:15',
-          interval: 900,
-          temperature_2m: 16.3,
-          temperature_2m_max: null,
-        },
+        current_units: { time: 'iso8601', interval: 'seconds', temperature_2m_max: '°C' },
+        current: { time: '2026-11-17T20:45', interval: 900, temperature_2m_max: 6 },
       },
     );
-    expect(String(getEnrichment(ctx).notice)).toContain('temperature_2m_max returned no data');
+
+    expect(params.current).toEqual(['temperature_2m_max']);
+    expect(result.current).toEqual({
+      time: '2026-11-17T20:45',
+      interval: 900,
+      temperature_2m_max: 6,
+    });
+  });
+
+  /**
+   * Live, 2026-11-17: `current=temperature_2m,wave_height` on the forecast endpoint — a
+   * marine name outside the forecast catalogs — answers HTTP 200 with wave_height null
+   * under the unit "undefined".
+   */
+  const UNSERVED_CURRENT = {
+    ...MOCK_RESPONSE,
+    current_units: {
+      time: 'iso8601',
+      interval: 'seconds',
+      temperature_2m: '°C',
+      wave_height: 'undefined',
+    },
+    current: {
+      time: '2026-11-17T20:45',
+      interval: 900,
+      temperature_2m: 6,
+      wave_height: null,
+    },
+  };
+
+  it('surfaces an unserved current name through the existing "undefined"-unit backstop', async () => {
+    const { ctx } = await run(
+      { current_variables: ['temperature_2m', 'wave_height'] },
+      UNSERVED_CURRENT,
+    );
+    expect(String(getEnrichment(ctx).notice)).toContain('wave_height returned no data');
   });
 
   // --- null current values under a real unit (#63) ----------------------------
@@ -1843,25 +1945,11 @@ describe('openmeteoGetForecastTool current conditions (#42)', () => {
 
   it('reports an "undefined"-unit current name once, through its own notice only (#63)', async () => {
     const { ctx } = await run(
-      { current_variables: ['temperature_2m', 'temperature_2m_max'] },
-      {
-        ...MOCK_RESPONSE,
-        current_units: {
-          time: 'iso8601',
-          interval: 'seconds',
-          temperature_2m: '°C',
-          temperature_2m_max: 'undefined',
-        },
-        current: {
-          time: '2026-05-30T14:15',
-          interval: 900,
-          temperature_2m: 16.3,
-          temperature_2m_max: null,
-        },
-      },
+      { current_variables: ['temperature_2m', 'wave_height'] },
+      UNSERVED_CURRENT,
     );
     const notice = String(getEnrichment(ctx).notice);
-    expect(notice.match(/temperature_2m_max/g)).toHaveLength(1);
+    expect(notice.match(/wave_height returned no data/g)).toHaveLength(1);
     expect(notice).not.toContain('No current value');
   });
 
@@ -1944,5 +2032,238 @@ describe('openmeteoGetForecastTool current conditions (#42)', () => {
     expect(rowBudgetFor(result)).toBeLessThan(
       rowBudgetFor({ hourly_units: result.hourly_units, daily_units: result.daily_units }),
     );
+  });
+});
+
+/*
+ * Wiring only: the bounds and every branch of the notice are tabled in
+ * tests/tools/tilt-input.test.ts, and the URL in tests/services/open-meteo-service.test.ts.
+ */
+describe('openmeteoGetForecastTool tilt and azimuth (#101)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
+  });
+
+  const PHOENIX = { latitude: 33.45, longitude: -112.07, timezone: 'America/Phoenix' };
+
+  /** Live, Phoenix 2026-11-16 11:00–13:00, no tilt sent: the tilted column is the horizontal one. */
+  const UNTILTED = {
+    latitude: 33.440266,
+    longitude: -112.06021,
+    elevation: 335,
+    generationtime_ms: 0.14,
+    utc_offset_seconds: -25200,
+    timezone: 'America/Phoenix',
+    timezone_abbreviation: 'GMT-7',
+    hourly_units: {
+      time: 'iso8601',
+      shortwave_radiation: 'W/m²',
+      global_tilted_irradiance: 'W/m²',
+    },
+    hourly: {
+      time: ['2026-11-16T11:00', '2026-11-16T12:00', '2026-11-16T13:00'],
+      shortwave_radiation: [536, 594, 616],
+      global_tilted_irradiance: [536, 594, 616],
+    },
+  };
+
+  /** The same hours with tilt=33&azimuth=0 sent: only the tilted column moves. */
+  const TILTED = {
+    ...UNTILTED,
+    hourly: { ...UNTILTED.hourly, global_tilted_irradiance: [806.5, 858.2, 889.5] },
+  };
+
+  const GTI_CALL = {
+    ...PHOENIX,
+    forecast_days: 1,
+    hourly_variables: ['shortwave_radiation', 'global_tilted_irradiance'],
+  };
+
+  const HORIZONTAL =
+    'global_tilted_irradiance was computed for a horizontal surface because tilt was not set: the same irradiance as shortwave_radiation. Set tilt (degrees from horizontal, 0–90) and azimuth (0 south, -90 east, 90 west, ±180 north) for the plane of a tilted panel.';
+
+  /** The params object the handler handed the service. */
+  const sentParams = () => mockGetForecast.mock.calls[0]?.[2] as Record<string, unknown>;
+
+  const noticeOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { notice?: string }).notice;
+
+  const hourlyOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { hourly: Record<string, unknown>[] }).hourly;
+
+  it('passes the tilted column through and sends neither parameter when both are omitted', async () => {
+    mockGetForecast.mockResolvedValue(UNTILTED);
+
+    const result = await runToolContract(openmeteoGetForecastTool, GTI_CALL);
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams().tilt).toBeUndefined();
+    expect(sentParams().azimuth).toBeUndefined();
+    expect(hourlyOf(result).map((row) => row.global_tilted_irradiance)).toEqual([536, 594, 616]);
+  });
+
+  it('names the horizontal surface when a tilted hourly variable is requested without tilt', async () => {
+    mockGetForecast.mockResolvedValue(UNTILTED);
+
+    const result = await runToolContract(openmeteoGetForecastTool, GTI_CALL);
+
+    expect(noticeOf(result)).toBe(HORIZONTAL);
+  });
+
+  it('names the horizontal surface for a tilted current variable', async () => {
+    mockGetForecast.mockResolvedValue({
+      ...UNTILTED,
+      hourly_units: undefined,
+      hourly: undefined,
+      current_units: { time: 'iso8601', interval: 'seconds', global_tilted_irradiance: 'W/m²' },
+      current: { time: '2026-11-16T13:00', interval: 900, global_tilted_irradiance: 616 },
+    });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...PHOENIX,
+      current_variables: ['global_tilted_irradiance'],
+    });
+
+    expect(noticeOf(result)).toBe(HORIZONTAL);
+  });
+
+  it('forwards tilt and azimuth and adds no notice when the caller set the plane', async () => {
+    mockGetForecast.mockResolvedValue(TILTED);
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...GTI_CALL,
+      tilt: 33,
+      azimuth: 0,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams()).toMatchObject({ tilt: 33, azimuth: 0 });
+    expect(noticeOf(result)).toBeUndefined();
+    expect(hourlyOf(result).at(-1)).toEqual({
+      time: '2026-11-16T13:00',
+      shortwave_radiation: 616,
+      global_tilted_irradiance: 889.5,
+    });
+  });
+
+  it('forwards tilt and azimuth with no tilted variable requested, adding no notice', async () => {
+    mockGetForecast.mockResolvedValue({
+      ...UNTILTED,
+      hourly_units: { time: 'iso8601', shortwave_radiation: 'W/m²' },
+      hourly: { time: UNTILTED.hourly.time, shortwave_radiation: [536, 594, 616] },
+    });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...PHOENIX,
+      forecast_days: 1,
+      hourly_variables: ['shortwave_radiation'],
+      tilt: 33,
+      azimuth: -90,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams()).toMatchObject({ tilt: 33, azimuth: -90 });
+    expect(noticeOf(result)).toBeUndefined();
+    expect(hourlyOf(result).map((row) => row.shortwave_radiation)).toEqual([536, 594, 616]);
+  });
+
+  it.each([
+    ['tilt', 91],
+    ['azimuth', -181],
+  ])('rejects %s %s at argument validation, before any request', async (field, value) => {
+    const error = await wireError(openmeteoGetForecastTool, { ...GTI_CALL, [field]: value });
+
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.message).toContain(field);
+    expect(error.message).not.toContain('Unrecognized key');
+    expect(mockGetForecast).not.toHaveBeenCalled();
+  });
+
+  it('keeps the tilt sentence beside the response’s other notices, on both surfaces', async () => {
+    mockGetForecast.mockResolvedValue({
+      ...UNTILTED,
+      hourly_units: {
+        ...UNTILTED.hourly_units,
+        soil_moisture_0_to_1cm: 'undefined',
+        visibility: 'm',
+      },
+      hourly: {
+        ...UNTILTED.hourly,
+        soil_moisture_0_to_1cm: [null, null, null],
+        visibility: [24140, null, null],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetForecastTool, {
+      ...GTI_CALL,
+      hourly_variables: [...GTI_CALL.hourly_variables, 'soil_moisture_0_to_1cm', 'visibility'],
+    });
+
+    const notice = noticeOf(result) ?? '';
+    expect(notice).toContain('soil_moisture_0_to_1cm returned no data');
+    expect(notice).toContain('Partial hourly coverage for visibility');
+    expect(notice).toContain(HORIZONTAL);
+    expect(renderedText(trailerOf(result))).toBe(notice);
+  });
+
+  /** A 108-day hourly window wide enough to spill, with the tilted column in it. */
+  const wideTiltedResponse = () => {
+    const time = hourlyTimes(2592);
+    return {
+      time,
+      response: {
+        ...MOCK_RESPONSE,
+        hourly: {
+          ...wideHourlyBlock(time),
+          global_tilted_irradiance: time.map((_, row) => (row % 24) * 10),
+        },
+      },
+    };
+  };
+
+  const WIDE_GTI_CALL = {
+    latitude: 47.6062,
+    longitude: -122.3321,
+    forecast_days: 16,
+    past_days: 92,
+    hourly_variables: ['temperature_2m', 'global_tilted_irradiance'],
+  };
+
+  it('puts the tilt sentence ahead of the canvas pointer when the result spills', async () => {
+    const { time, response } = wideTiltedResponse();
+    mockGetForecast.mockResolvedValue(response);
+    mockSpillover.mockResolvedValue({
+      spilled: true,
+      handle: { rowCount: time.length, tableName: 'spilled_fc101' },
+      previewRows: [],
+    });
+    mockCanvasInstance = { acquire: vi.fn().mockResolvedValue({ canvasId: 'canvas-fc-101' }) };
+
+    const ctx = createMockContext({ errors: openmeteoGetForecastTool.errors });
+    const result = await openmeteoGetForecastTool.handler(
+      openmeteoGetForecastTool.input.parse(WIDE_GTI_CALL),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.canvas_id).toBe('canvas-fc-101');
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice.startsWith(`${HORIZONTAL} `)).toBe(true);
+    expect(notice).toContain('spilled_fc101');
+  });
+
+  it('keeps the tilt sentence beside the no-canvas disclosure, on both surfaces', async () => {
+    const { response } = wideTiltedResponse();
+    mockGetForecast.mockResolvedValue(response);
+    mockCanvasInstance = undefined; // CANVAS_PROVIDER_TYPE=none
+
+    const result = await runToolContract(openmeteoGetForecastTool, WIDE_GTI_CALL);
+
+    expectNoCanvasDisclosureOnce(result, 'fewer past_days / forecast_days');
+    const notice = noticeOf(result) ?? '';
+    expect(notice.startsWith(`${HORIZONTAL} `)).toBe(true);
+    expect(renderedText(trailerOf(result))).toBe(notice);
   });
 });

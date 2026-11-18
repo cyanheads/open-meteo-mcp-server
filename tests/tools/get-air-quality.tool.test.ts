@@ -153,6 +153,29 @@ describe('openmeteoGetAirQualityTool', () => {
     });
   });
 
+  it('reports a comma in timezone as invalid_timezone, not an unknown variable', async () => {
+    // Live upstream shape for timezone=Europe/Berlin,America/New_York beside one coordinate.
+    mockGetAirQuality.mockResolvedValue({
+      error: true,
+      reason: "Parameter 'timezone' and coordinates must have the same number of elements",
+    });
+    const input = openmeteoGetAirQualityTool.input.parse({
+      latitude: 47.6062,
+      longitude: -122.3321,
+      hourly_variables: ['pm2_5'],
+      timezone: 'Europe/Berlin,America/New_York',
+    });
+    await expect(wireError(openmeteoGetAirQualityTool, input)).resolves.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('the comma made it a list of zones'),
+      data: {
+        reason: 'invalid_timezone',
+        recovery: { hint: expect.stringContaining('auto') },
+      },
+    });
+    expect(mockGetAirQuality).toHaveBeenCalledTimes(1);
+  });
+
   it('still defaults an omitted timezone to auto (#38)', async () => {
     mockGetAirQuality.mockResolvedValue(MOCK_RESPONSE);
     const ctx = createMockContext({ errors: openmeteoGetAirQualityTool.errors });
@@ -1066,7 +1089,7 @@ describe('openmeteoGetAirQualityTool current conditions (#42)', () => {
     expect(contract?.recovery).toContain('current_variables');
   });
 
-  it('surfaces a mis-cadenced current name through the "undefined"-unit backstop', async () => {
+  it('surfaces a weather name in current_variables through the "undefined"-unit backstop', async () => {
     const { ctx } = await run(
       { current_variables: ['pm2_5', 'temperature_2m_max'] },
       {

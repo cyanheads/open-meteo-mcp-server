@@ -14,7 +14,7 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js';
 import { toUnitsMap } from '@/services/open-meteo/types.js';
 import { CalendarDateSchema } from '../date-input.js';
-import { CLIMATE_MODEL_LIST } from '../model-catalog.js';
+import { CLIMATE_MODEL_LIST, CLIMATE_MODELS, DEFAULT_CLIMATE_MODEL } from '../model-catalog.js';
 import { cleanNames, nameList } from '../name-input.js';
 import { formatRecord, formatUnits, reshapeColumnar } from '../reshape-utils.js';
 import {
@@ -46,6 +46,7 @@ import {
   isDateOutOfRangeReason,
   isRequestTooLargeReason,
   RATE_LIMITED_ERROR,
+  UPSTREAM_REJECTED_ERROR,
   UPSTREAM_TIMEOUT_ERROR,
   UPSTREAM_UNAVAILABLE_ERROR,
   variableOrModelRecovery,
@@ -131,6 +132,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     RATE_LIMITED_ERROR,
     UPSTREAM_UNAVAILABLE_ERROR,
     UPSTREAM_TIMEOUT_ERROR,
+    UPSTREAM_REJECTED_ERROR,
   ],
 
   // Open-Meteo's own parameter name for the variable list.
@@ -155,7 +157,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       'Daily climate variables to fetch (e.g., ["temperature_2m_max", "temperature_2m_min", "precipitation_sum", "wind_speed_10m_mean", "shortwave_radiation_sum"]). Required — the Climate API is daily-only.',
     ),
     models: nameList(7).describe(
-      `CMIP6 models to include: ${CLIMATE_MODEL_LIST}. With 2+ models each variable column is suffixed with the model name (e.g. temperature_2m_max_MRI_AGCM3_2_S). Omit to use the API default (a single model, unsuffixed columns). A name outside this list is sent upstream rather than rejected here.`,
+      `CMIP6 models to include: ${CLIMATE_MODEL_LIST}. With 2+ models each variable column is suffixed with the model name (e.g. temperature_2m_max_MRI_AGCM3_2_S). Omit or leave blank to read ${DEFAULT_CLIMATE_MODEL} alone, with unsuffixed columns; one model is one projection, so the spread a projection needs comes from naming several. A name outside this list is sent upstream rather than rejected here.`,
     ),
     temperature_unit: z
       .enum(['celsius', 'fahrenheit'])
@@ -198,9 +200,8 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     timezone: z.string().describe('Resolved IANA timezone'),
     models: z
       .array(z.string())
-      .optional()
       .describe(
-        'Climate models requested — echoes the models parameter. Absent when models was omitted (API default model; the response carries no provenance).',
+        `Climate models the response was read from — the models parameter as sent, or ["${DEFAULT_CLIMATE_MODEL}"] when models was omitted or blank.`,
       ),
     date_range: z
       .object({
@@ -260,6 +261,14 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       daily_variables: cleanNames(args.daily_variables),
       models: cleanNames(args.models),
     };
+    /*
+     * `input.models` is the caller's own choice; `models` is what the request sends and the
+     * response echoes. The documented model goes out when the caller named none, but it is
+     * not a selection: the invalid_variable hint and the coverage-gap attribution below keep
+     * reading `input.models`, so an omitted call is never told to omit models or handed the
+     * model list for a variable it misspelled.
+     */
+    const models = input.models ?? [DEFAULT_CLIMATE_MODEL];
     const dailyVariables = input.daily_variables;
     if (!dailyVariables) {
       throw ctx.fail(
@@ -306,7 +315,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
         start_date: input.start_date,
         end_date: input.end_date,
         daily: dailyVariables,
-        models: input.models,
+        models,
         temperature_unit: input.temperature_unit,
         wind_speed_unit: input.wind_speed_unit,
         precipitation_unit: input.precipitation_unit,
@@ -339,8 +348,9 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
        * alongside a bad name is not echoed as a suspect. Reframing that message is all
        * this needs; reconstructing the offender from a local catalog would only re-derive
        * what upstream already stated, against a list that has to be refreshed to stay
-       * correct. The same holds for a rejected variable name. With no models sent, the
-       * rejected name is a variable, so the hint drops the model list.
+       * correct. The same holds for a rejected variable name. When the caller named no
+       * model, only the documented default went upstream and the rejected name is a
+       * variable, so the hint drops the model list.
        */
       throw ctx.fail(
         'invalid_variable',
@@ -386,8 +396,15 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
      * real unit rather than as an unserved name. The selection is what puts such a
      * column on its model — CMCC_CM2_VHR4 returns rain_sum empty beside an
      * MRI_AGCM3_2_S column with values — rather than on the location or the window.
+     * The seven models are the whole set, so a call that named them all and got a
+     * variable empty from each is not sent to try another.
      */
-    const selection = { models: input.models, variables: dailyVariables };
+    const selection = {
+      acceptedModels: CLIMATE_MODELS,
+      defaultModel: DEFAULT_CLIMATE_MODEL,
+      models: input.models,
+      variables: dailyVariables,
+    };
     notice.add(
       describeCoverageGaps(
         findCoverageGaps('daily', data.daily, rawDailyUnits, undefined, selection),
@@ -414,7 +431,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
           longitude: data.longitude,
           elevation: data.elevation,
           timezone: data.timezone,
-          models: input.models,
+          models,
           date_range: dateRange,
           record_count: handle.rowCount,
           // The canvas preview budget, since every row is staged: the leading rows only.
@@ -443,7 +460,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
         longitude: data.longitude,
         elevation: data.elevation,
         timezone: data.timezone,
-        models: input.models,
+        models,
         date_range: dateRange,
         record_count: dailyRecords.length,
         daily: boundedPreview(dailyRecords, rowBudget),
@@ -459,7 +476,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
       longitude: data.longitude,
       elevation: data.elevation,
       timezone: data.timezone,
-      models: input.models,
+      models,
       date_range: dateRange,
       record_count: dailyRecords.length,
       daily: dailyRecords,
@@ -474,7 +491,7 @@ export const openmeteoGetClimateTool = tool('openmeteo_get_climate', {
     const lines = [
       '## Climate projections (CMIP6)',
       `**Location:** ${result.latitude}, ${result.longitude} | **Elevation:** ${result.elevation}m | **Timezone:** ${result.timezone}`,
-      `**Models:** ${result.models?.join(', ') ?? 'API default'}`,
+      `**Models:** ${result.models.join(', ')}`,
       `**Date range:** ${result.date_range.start} → ${result.date_range.end} | **Records:** ${result.record_count} | **Truncated:** ${result.truncated}`,
     ];
 

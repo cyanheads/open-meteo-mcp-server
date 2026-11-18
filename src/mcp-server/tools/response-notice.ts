@@ -24,7 +24,8 @@
  *     *location* the dataset carries nothing for — pollen outside Europe, waves at a
  *     land point.
  *
- * It also attributes the columns of a multi-model forecast, archive, or climate response
+ * It also attributes the columns of a multi-model forecast, archive, climate, or marine response
+ * — and of an ensemble one, whose member columns {@link byEnsembleVariable} groups under their model —
  * to the models that produced them ({@link columnModel}), which is how a model upstream
  * silently dropped ({@link describeDroppedModels}), a model that does not serve a
  * variable ({@link describeModelUnserved}), and a model that returned nothing for a
@@ -100,10 +101,35 @@ export type CoverageCadence = 'daily' | 'hourly';
  *   - `undetermined`: no requested model returned them. Nothing in the response
  *     separates a model that does not carry them from a location or window outside the
  *     data's coverage, so `models` are named beside the location and the window.
+ *     `defaultRequested` is set when the tool's default model was among the requested
+ *     ones: it returned no values for them either, so omitting `models` cannot help.
+ *     `everyModelRequested` is set when the request named every model of a tool whose
+ *     model set is closed, so there is no other model to try either.
  */
 export type GapAttribution =
   | { readonly kind: 'model'; readonly model: string; readonly servedBy: readonly string[] }
-  | { readonly kind: 'undetermined'; readonly models: readonly string[] };
+  | {
+      readonly kind: 'undetermined';
+      readonly models: readonly string[];
+      readonly defaultRequested?: true;
+      readonly everyModelRequested?: true;
+    };
+
+/**
+ * A tool's own wording for an `all-null` gap, where the shared sentences would claim more
+ * than its data supports. Marine gives it: its default blend has gaps a single wave model
+ * fills, and no wave model has data on land or under sea ice.
+ */
+export interface AllNullWording {
+  /** Said last about a gap no requested model served: where the tool's data does not exist under any model. */
+  readonly noSource: string;
+  /**
+   * Completes "…even though the units are real, so " when no models were selected, in
+   * place of the location-or-window cause: the cause and every remedy, in the order a
+   * caller should try them.
+   */
+  readonly unselected: string;
+}
 
 /** A set of variables sharing one temporal coverage gap in one cadence. */
 export interface CoverageGap {
@@ -123,6 +149,8 @@ export interface CoverageGap {
   readonly trailingNullRows?: number;
   /** The requested variables affected, in the order upstream listed their columns. */
   readonly variables: readonly string[];
+  /** The selection's {@link AllNullWording}, on an `all-null` gap. Absent when it gave none. */
+  readonly wording?: AllNullWording;
 }
 
 /** Names listed per gap before the rest are counted — enough to act on, short enough to read. */
@@ -134,8 +162,15 @@ const MAX_NAMED = 4;
  */
 export type ColumnGrouping = (column: string) => string;
 
-/** Strips the ensemble endpoint's `_memberNN` suffix. */
-export const byEnsembleVariable: ColumnGrouping = (column) => column.replace(/_member\d+$/, '');
+/**
+ * Strips the ensemble endpoint's `_memberNN` token, wherever upstream puts it: last on a
+ * single model's columns (`temperature_2m_member01` → `temperature_2m`), and before the
+ * model name when several models answered (`temperature_2m_member01_ncep_gefs025` →
+ * `temperature_2m_ncep_gefs025`, that model's control-run column). Each model's members
+ * therefore group under their own model, never as a variable of their own.
+ */
+export const byEnsembleVariable: ColumnGrouping = (column) =>
+  column.replace(/_member\d+(?=_|$)/, '');
 
 /**
  * Coverage gaps among the recognized variables of one columnar block.
@@ -159,7 +194,10 @@ export const byEnsembleVariable: ColumnGrouping = (column) => column.replace(/_m
  * {@link GapAttribution}, and the merge keeps apart what the attribution tells apart:
  * one entry per empty model and set of models that served the same variables, and one
  * for every column no selected model served. Without a selection, or with no models in
- * it, nothing is attributed.
+ * it, nothing is attributed. That last entry is flagged `defaultRequested` when the
+ * selection's `defaultModel` is among the requested models, and `everyModelRequested`
+ * when every one of its `acceptedModels` is. Every `all-null` entry carries the
+ * selection's `allNullWording` when it gives one, models selected or not.
  */
 export function findCoverageGaps(
   cadence: CoverageCadence,
@@ -192,6 +230,7 @@ export function findCoverageGaps(
     const key =
       owner?.kind === 'model' ? `${shape}|${owner.model}|${owner.servedBy.join(',')}` : shape;
 
+    const wording = carried ? undefined : selection?.allNullWording;
     const entry: MergedGap = merged.get(key) ?? {
       gap: {
         cadence,
@@ -199,6 +238,7 @@ export function findCoverageGaps(
         ...carried,
         nullRows,
         totalRows: times.length,
+        ...(wording && { wording }),
       },
       models: new Set(),
       ...(owner && { owner }),
@@ -210,6 +250,10 @@ export function findCoverageGaps(
   }
 
   const requested = [...new Set(selection?.models)];
+  const defaultRequested =
+    selection?.defaultModel !== undefined && requested.includes(selection.defaultModel);
+  const everyModelRequested =
+    selection?.acceptedModels?.every((model) => requested.includes(model)) === true;
   return [...merged.values()].map(({ gap, models, owner, variables }) => ({
     ...gap,
     variables,
@@ -217,7 +261,12 @@ export function findCoverageGaps(
       attribution:
         owner.kind === 'model'
           ? owner
-          : { kind: owner.kind, models: requested.filter((model) => models.has(model)) },
+          : {
+              kind: owner.kind,
+              models: requested.filter((model) => models.has(model)),
+              ...(defaultRequested && { defaultRequested: true as const }),
+              ...(everyModelRequested && { everyModelRequested: true as const }),
+            },
     }),
   }));
 }
@@ -391,9 +440,11 @@ export function describeCoverageGaps(...gaps: readonly CoverageGap[][]): string 
 /** The sentence for an `all-null` gap, its cause chosen by {@link CoverageGap.attribution}. */
 function allNullSentence(gap: CoverageGap): string {
   const columns = nameList(gap.variables);
-  const { attribution, cadence, totalRows } = gap;
+  const { attribution, cadence, totalRows, wording } = gap;
   if (!attribution) {
-    return `No ${cadence} data for ${columns} anywhere in the requested window — all ${totalRows} values are null even though the units are real, so this location or the requested window falls outside this dataset’s coverage rather than the names being unserved.`;
+    return wording
+      ? `No ${cadence} data for ${columns} anywhere in the requested window — all ${totalRows} values are null even though the units are real, so ${wording.unselected}`
+      : `No ${cadence} data for ${columns} anywhere in the requested window — all ${totalRows} values are null even though the units are real, so this location or the requested window falls outside this dataset’s coverage rather than the names being unserved.`;
   }
   const [them, variables] = gap.variables.length === 1 ? ['it', 'variable'] : ['them', 'variables'];
   switch (attribution.kind) {
@@ -403,8 +454,14 @@ function allNullSentence(gap: CoverageGap): string {
       return `${model} returned no ${cadence} data for ${columns} — all ${totalRows} values are null, while ${nameList(servedBy)} returned values for the same ${variables}. Read ${them} from ${from}.`;
     }
     case 'undetermined': {
-      const { models } = attribution;
-      return `No ${cadence} data for ${columns} anywhere in the requested window — all ${totalRows} values are null even though the units are real, so this location or the requested window falls outside this dataset’s coverage, or ${nameList(models)} ${models.length === 1 ? 'does' : 'do'} not carry ${them}. Try another model, or omit models to use the default.`;
+      const { defaultRequested, everyModelRequested, models } = attribution;
+      const cause = `No ${cadence} data for ${columns} anywhere in the requested window — all ${totalRows} values are null even though the units are real, so this location or the requested window falls outside this dataset’s coverage, or ${nameList(models)} ${models.length === 1 ? 'does' : 'do'} not carry ${them}.`;
+      const noSource = wording ? ` ${wording.noSource}` : '';
+      if (everyModelRequested) return `${cause}${noSource}`;
+      const remedy = defaultRequested
+        ? 'Try another model.'
+        : 'Try another model, or omit models to use the default.';
+      return `${cause} ${remedy}${noSource}`;
     }
     default: {
       const unreachable: never = attribution;
@@ -452,6 +509,19 @@ export function describeCurrentGaps(variables: readonly string[]): string | unde
 
 /** What a multi-model request asked for: the models, and the variables they fan out over. */
 export interface ModelSelection {
+  /**
+   * The tool's whole model set, given only where that set is closed: no model outside it
+   * serves the tool's data. Given, an all-null gap no requested model served offers no
+   * other model once every one of these was requested.
+   */
+  readonly acceptedModels?: readonly string[];
+  /** The tool's own {@link AllNullWording}, where the shared all-null sentences overclaim. */
+  readonly allNullWording?: AllNullWording;
+  /**
+   * The model the tool reads when `models` is omitted. Given, an all-null gap no requested
+   * model served offers omitting `models` only when this model was not among them.
+   */
+  readonly defaultModel?: string;
   /** The requested models, as sent; `undefined` when the caller selected none. */
   readonly models: readonly string[] | undefined;
   /** Every requested hourly and daily variable name. */
@@ -466,16 +536,19 @@ interface ColumnSource {
 
 /**
  * The suffixes a requested model's columns carry. Beside another model the archive
- * names Best Match's columns `<variable>_archive_best_match`, where the forecast
- * endpoint names them `<variable>_best_match`.
+ * names Best Match's columns `<variable>_archive_best_match` and the marine endpoint
+ * `<variable>_marine_best_match`, where the forecast endpoint names them
+ * `<variable>_best_match`.
  */
 function modelSuffixes(model: string): readonly string[] {
-  return model === 'best_match' ? ['_best_match', '_archive_best_match'] : [`_${model}`];
+  return model === 'best_match'
+    ? ['_best_match', '_archive_best_match', '_marine_best_match']
+    : [`_${model}`];
 }
 
 /**
  * The requested model and variable `column` belongs to. With 2+ models the forecast,
- * archive, and climate endpoints name every hourly and daily column
+ * archive, climate, and marine endpoints name every hourly and daily column
  * `<variable><suffix>` (see {@link modelSuffixes}), so a column is attributed only when
  * it spells exactly one requested variable–model pair — a bare suffix match would give
  * `temperature_2m_gfs_seamless` to a requested `seamless` too. `undefined` for a bare
@@ -541,11 +614,11 @@ export function describeDroppedModels(
  * A notice for the model-suffixed columns among `columns` (those upstream reported with
  * the unit `"undefined"`), or `undefined` when none is attributable to a model.
  *
- * On a plain column that unit means the endpoint does not serve the name in the cadence
- * it was requested under; on a `<variable>_<model>` column it means that model does not
- * serve the variable at all — `lightning_potential_gfs_hrrr` beside a real-unit
- * `lightning_potential_icon_seamless` — so the cadence advice would point the caller at
- * the wrong input. The caller keeps reporting the unattributed columns its own way.
+ * On a plain column that unit means the endpoint parsed the name but serves no data for
+ * it; on a `<variable>_<model>` column it means that model does not serve the variable —
+ * `lightning_potential_gfs_hrrr` beside a real-unit `lightning_potential_icon_seamless` —
+ * so the remedy is another model rather than another tool. The caller keeps reporting the
+ * unattributed columns its own way.
  */
 export function describeModelUnserved(
   columns: readonly string[],
@@ -571,33 +644,45 @@ export function describeModelUnserved(
 }
 
 /**
+ * The model a plain column came from once `models` was sent: the selected one, or on a
+ * 2+-model call the one upstream kept, which the response does not name. `requested` is
+ * the distinct requested models, never empty.
+ */
+export function describeAnsweringModel(requested: readonly string[]): string {
+  return requested.length === 1
+    ? `the selected model (${requested[0]})`
+    : `the one model left in the response (one of ${requested.join(', ')})`;
+}
+
+/**
  * The notice for every column upstream reported with the unit `"undefined"` on a tool
  * that takes `models`: the model-suffixed ones through {@link describeModelUnserved}, the
- * rest as a name the endpoint does not serve in the cadence it was requested under — plus
- * the selected model, when exactly one was sent, as the other thing that can leave a
- * column empty. `undefined` when `columns` is empty.
+ * rest as a name the endpoint parsed but serves no data for — typically a variable another
+ * endpoint carries, such as `pm2_5` or `wave_height` on the forecast endpoint. A name sent
+ * under the wrong cadence is not this case: upstream rejects it with HTTP 400. Once
+ * `models` was sent, the model that answered is the other thing that can leave a plain
+ * column empty: the selected one, or on a 2+-model call the one upstream kept. `undefined`
+ * when `columns` is empty.
  *
  * @param wording.server - What serves the data, in the sentence: `the endpoint`, `the archive`.
- * @param wording.fields - The input fields a misplaced name may belong in, e.g.
- * `hourly_variables or daily_variables`.
+ * @param wording.servedBy - Where the kinds of variable this endpoint parses but does not
+ * serve are read, e.g. `air-quality variables (pm2_5, …) from openmeteo_get_air_quality`.
  */
 export function describeUnservedColumns(
   columns: readonly string[],
   selection: ModelSelection,
-  wording: { readonly fields: string; readonly server: string },
+  wording: { readonly server: string; readonly servedBy: string },
 ): string | undefined {
   const unattributed = columns.filter((column) => !columnModel(column, selection));
-  const [onlyModel, ...others] = selection.models ?? [];
-  const modelClause =
-    onlyModel !== undefined && others.length === 0
-      ? `, or the selected model (${onlyModel}) does not serve it`
-      : '';
-  const cadenceSentence =
+  const [names, it] = unattributed.length === 1 ? ['that name', 'it'] : ['those names', 'them'];
+  const requested = [...new Set(selection.models)];
+  const answered = requested.length === 0 ? undefined : describeAnsweringModel(requested);
+  const unservedSentence =
     unattributed.length > 0
-      ? `${unattributed.join(', ')} returned no data — Open-Meteo reported the unit as "undefined", which means ${wording.server} does not serve that name in the cadence it was requested under${modelClause}. Check the spelling, and whether it belongs in ${wording.fields}.`
+      ? `${unattributed.join(', ')} returned no data — Open-Meteo reported the unit as "undefined", which means ${wording.server} parsed ${names} but serves no data for ${it}${answered ? `, or ${answered} does not serve ${it}` : ''}. Drop ${it}${answered ? `, read ${it} from another model` : ''}, or request ${it} from the tool that serves that kind of variable: ${wording.servedBy}.`
       : undefined;
   return (
-    [describeModelUnserved(columns, selection), cadenceSentence].filter(Boolean).join(' ') ||
+    [describeModelUnserved(columns, selection), unservedSentence].filter(Boolean).join(' ') ||
     undefined
   );
 }

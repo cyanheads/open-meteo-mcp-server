@@ -3,8 +3,9 @@
  * Open-Meteo error `reason` strings.
  *
  * The entries cover the failures `OpenMeteoService` raises below every handler and tags
- * with `data.reason` — a 429, a coverage gap, and a retry ladder that runs out — so the
- * handler boundary fills each declaring tool's `recovery` onto the wire.
+ * with `data.reason` — a 429, a coverage gap, a retry ladder that runs out, and a 4xx
+ * that is not an input rejection — so the handler boundary fills each declaring tool's
+ * `recovery` onto the wire.
  *
  * The framing covers the rejections a time-series tool has to tell apart: an unknown
  * variable or model name, a request whose sheer volume upstream refuses, and — for the
@@ -56,6 +57,21 @@ export const UPSTREAM_UNAVAILABLE_ERROR = {
 } as const;
 
 /**
+ * The `upstream_rejected` entry every upstream-calling tool declares: a 4xx that is neither
+ * one of Open-Meteo's input rejections nor a request timeout, so the configured endpoint,
+ * not the call, is at fault. Thrown on the first attempt and never retried.
+ */
+export const UPSTREAM_REJECTED_ERROR = {
+  reason: 'upstream_rejected',
+  code: JsonRpcErrorCode.ServiceUnavailable,
+  when: "The configured Open-Meteo endpoint, or a layer in front of it, answered with an HTTP 4xx that is neither an input rejection nor a request timeout — an error page, a body without Open-Meteo's error envelope, or an envelope on a status other than 400, such as a 404 for a path it does not serve.",
+  recovery:
+    "Nothing in this call's arguments caused this, and retrying will not clear it: the server's Open-Meteo endpoint, or a proxy or access layer in front of it, refused the request. Report it to whoever operates this server.",
+  retryable: false,
+  thrownBy: 'service',
+} as const;
+
+/**
  * The `upstream_timeout` entry every upstream-calling tool declares: the same exhausted
  * ladder, ending on the 15 s per-attempt timeout. A slow answer can be the request's own
  * size, so the recovery offers asking for less beside waiting.
@@ -74,8 +90,10 @@ type CoverageGapOperation = 'forecast' | 'ensemble' | 'historical' | 'marine' | 
 
 /**
  * The `coverage_gap` entry for a tool that reaches the gap. Its recovery is the sentence
- * the service already writes into the rejection's message for that endpoint, so the
- * handler boundary fills the hint without `content[]` stating it twice.
+ * the service writes into the rejection's message for a call to that endpoint that sent
+ * no models, so the handler boundary fills the hint without `content[]` stating it twice.
+ * A marine call that sent `models` gets the switch-models sentence instead, which the
+ * service carries as the hint itself, so the boundary never fills this one beside it.
  */
 export function coverageGapContract(operation: CoverageGapOperation) {
   return {
@@ -116,8 +134,8 @@ function extractInvalidValues(upstreamReason: string | undefined): string[] {
  * @param upstreamReason - Raw `reason` from the Open-Meteo error envelope.
  * @param label - What kind of name was rejected — "variable" for most tools,
  *   "variable or model" for the endpoints whose tool takes `models` — historical,
- *   ensemble, climate, flood ("discharge variable or model"), and forecast when
- *   models were sent (their `models` parameter is rejected through the same envelope).
+ *   ensemble, climate, flood ("discharge variable or model"), and forecast and marine
+ *   when models were sent (their `models` parameter is rejected through the same envelope).
  */
 export function frameInvalidVariableMessage(
   upstreamReason: string | undefined,
@@ -151,13 +169,17 @@ export function frameInvalidVariableMessage(
  * `variableRecovery` plus the documented model list. A call that sent no models can only
  * have had a variable rejected, so its handler hints `variableRecovery` alone.
  *
+ * Upstream can stop at the first unknown model in a list — `/v1/ensemble` rejects
+ * `models=bogus_first,bogus_second` naming `bogus_first` alone — so the hint keeps the
+ * rest of the list without vouching for it.
+ *
  * @param documentedModels - The catalog's comma-joined model names.
  */
 export function variableOrModelRecovery(
   variableRecovery: string,
   documentedModels: string,
 ): string {
-  return `${variableRecovery} Documented models: ${documentedModels}. When the message names one model, correct only that one — the rest of the models list is valid.`;
+  return `${variableRecovery} Documented models: ${documentedModels}. When the message names one model, correct that one and keep the rest of the models list; if another model in it is also unknown, the retry names it.`;
 }
 
 /**

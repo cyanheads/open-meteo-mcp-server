@@ -11,6 +11,7 @@ import {
   frameRequestTooLargeMessage,
   isDateOutOfRangeReason,
   isRequestTooLargeReason,
+  variableOrModelRecovery,
 } from '@/mcp-server/tools/upstream-error.js';
 import { cpuMicrosPerCall } from '../helpers/cpu-time.js';
 
@@ -71,6 +72,17 @@ describe('frameInvalidVariableMessage', () => {
     const msg = frameInvalidVariableMessage(undefined);
     expect(msg).toMatch(/^The API rejected a requested variable name\./);
     expect(msg).not.toContain('Upstream');
+  });
+});
+
+describe('variableOrModelRecovery', () => {
+  it('keeps the rest of a models list without vouching for it', () => {
+    // Verbatim from /v1/ensemble for models=bogus_first,bogus_second with a literal comma:
+    // "Invalid value: Cannot initialize MultiDomains from invalid String value bogus_first".
+    // Upstream names only the first unknown model, so a second one surfaces on the retry.
+    expect(variableOrModelRecovery('Check the variable name.', 'a, b')).toBe(
+      'Check the variable name. Documented models: a, b. When the message names one model, correct that one and keep the rest of the models list; if another model in it is also unknown, the retry names it.',
+    );
   });
 });
 
@@ -235,27 +247,31 @@ describe('isDateOutOfRangeReason running time', () => {
     ['a long digit run', (size) => '1'.repeat(size), 320_000],
   ];
 
-  it.each(SHAPES)('stays linear on %s', (_shape, build, largest) => {
-    const timeAt = (size: number) => {
-      const input = build(size);
-      return cpuMicrosPerCall(
-        () => isDateOutOfRangeReason(input),
-        Math.max(4, Math.ceil(2_000_000 / size)),
-      );
-    };
+  it.each(SHAPES)(
+    'stays linear on %s',
+    (_shape, build, largest) => {
+      const timeAt = (size: number) => {
+        const input = build(size);
+        return cpuMicrosPerCall(
+          () => isDateOutOfRangeReason(input),
+          Math.max(4, Math.ceil(2_000_000 / size)),
+        );
+      };
 
-    const base = timeAt(BASE);
-    expect(base).toBeLessThan(BASE * CPU_MICROS_PER_CHAR);
-    let atLargest = base;
-    for (let size = BASE * 2; size <= largest; size *= 2) {
-      atLargest = timeAt(size);
-      expect(atLargest, `${size} characters`).toBeLessThan(size * CPU_MICROS_PER_CHAR);
-    }
+      const base = timeAt(BASE);
+      expect(base).toBeLessThan(BASE * CPU_MICROS_PER_CHAR);
+      let atLargest = base;
+      for (let size = BASE * 2; size <= largest; size *= 2) {
+        atLargest = timeAt(size);
+        expect(atLargest, `${size} characters`).toBeLessThan(size * CPU_MICROS_PER_CHAR);
+      }
 
-    // Linear growth over the span is its own size; quadratic would be its square.
-    const span = largest / BASE;
-    expect(atLargest / base).toBeLessThan(4 * span);
-  });
+      // Linear growth over the span is its own size; quadratic would be its square.
+      const span = largest / BASE;
+      expect(atLargest / base).toBeLessThan(4 * span);
+    },
+    0,
+  );
 });
 
 describe('frameRequestTooLargeMessage', () => {

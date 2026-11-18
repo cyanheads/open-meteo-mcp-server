@@ -18,6 +18,7 @@ import {
   describeCurrentGaps,
   describeDroppedModels,
   describeModelUnserved,
+  describeUnservedColumns,
   findCoverageGaps,
   findCurrentGaps,
   renderNotice,
@@ -200,6 +201,31 @@ describe('findCoverageGaps', () => {
     const [gap] = findCoverageGaps('hourly', block, undefined, byEnsembleVariable);
 
     expect(gap).toMatchObject({ kind: 'partial', first: time[0], last: time[2], nullRows: 1 });
+  });
+
+  it('groups each model’s members under that model when several models answered (#98)', () => {
+    // Beside another model upstream puts the member token before the model name. Each
+    // model's members join its control-run column; neither model's members are a variable.
+    const time = hourlyTimes(4);
+    const block: ColumnarBlock = {
+      time,
+      temperature_2m_ecmwf_ifs025_ensemble: [1, 2, 3, 4],
+      temperature_2m_member01_ecmwf_ifs025_ensemble: [1, 2, 3, 4],
+      temperature_2m_ncep_gefs025: [1, null, null, null],
+      temperature_2m_member01_ncep_gefs025: [null, 2, null, null],
+      temperature_2m_member02_ncep_gefs025: [1, null, null, null],
+    };
+
+    const gaps = findCoverageGaps('hourly', block, undefined, byEnsembleVariable);
+
+    expect(gaps).toEqual([
+      expect.objectContaining({
+        variables: ['temperature_2m_ncep_gefs025'],
+        first: time[0],
+        last: time[1],
+        nullRows: 2,
+      }),
+    ]);
   });
 
   it('skips a column upstream marked with the unit "undefined"', () => {
@@ -643,6 +669,313 @@ describe('describeCoverageGaps under a model selection (#90)', () => {
   });
 });
 
+describe('the omit-models remedy of an undetermined all-null gap', () => {
+  const week = Array.from({ length: 7 }, (_, i) => `2020-06-0${i + 1}`);
+  const values = week.map((_, row) => row + 0.5);
+  const empty = week.map(() => null);
+  const ANOTHER = 'Try another model.';
+  const OR_OMIT = 'Try another model, or omit models to use the default.';
+  const lead = (columns: string) =>
+    `No daily data for ${columns} anywhere in the requested window — all 7 values are null even though the units are real, so this location or the requested window falls outside this dataset’s coverage, or `;
+
+  it.each([
+    {
+      label: 'drops omitting models when the default was requested alone',
+      selection: {
+        models: ['MRI_AGCM3_2_S'],
+        variables: ['rain_sum'],
+        defaultModel: 'MRI_AGCM3_2_S',
+      },
+      block: { time: week, rain_sum: empty },
+      units: undefined,
+      attribution: { kind: 'undetermined', models: ['MRI_AGCM3_2_S'], defaultRequested: true },
+      sentence: `${lead('rain_sum')}MRI_AGCM3_2_S does not carry it. ${ANOTHER}`,
+    },
+    {
+      label: 'drops omitting models when the default was requested beside another empty model',
+      selection: {
+        models: ['best_match', 'era5_land'],
+        variables: ['precipitation_sum'],
+        defaultModel: 'best_match',
+      },
+      block: {
+        time: week,
+        precipitation_sum_archive_best_match: empty,
+        precipitation_sum_era5_land: empty,
+      },
+      units: undefined,
+      attribution: {
+        kind: 'undetermined',
+        models: ['best_match', 'era5_land'],
+        defaultRequested: true,
+      },
+      sentence: `${lead('precipitation_sum_archive_best_match, precipitation_sum_era5_land')}best_match, era5_land do not carry them. ${ANOTHER}`,
+    },
+    {
+      label:
+        'drops omitting models when the default was requested and answered the name under the unit "undefined"',
+      selection: {
+        models: ['best_match', 'era5_land'],
+        variables: ['snow_depth'],
+        defaultModel: 'best_match',
+      },
+      block: { time: week, snow_depth_archive_best_match: empty, snow_depth_era5_land: empty },
+      units: { snow_depth_archive_best_match: 'undefined', snow_depth_era5_land: 'm' },
+      attribution: { kind: 'undetermined', models: ['era5_land'], defaultRequested: true },
+      sentence: `${lead('snow_depth_era5_land')}era5_land does not carry it. ${ANOTHER}`,
+    },
+    {
+      label: 'keeps omitting models when the default was not requested',
+      selection: {
+        models: ['era5_land'],
+        variables: ['precipitation_sum'],
+        defaultModel: 'best_match',
+      },
+      block: { time: week, precipitation_sum: empty },
+      units: undefined,
+      attribution: { kind: 'undetermined', models: ['era5_land'] },
+      sentence: `${lead('precipitation_sum')}era5_land does not carry it. ${OR_OMIT}`,
+    },
+    {
+      label: 'keeps omitting models when the selection names no default',
+      selection: { models: ['best_match'], variables: ['precipitation_sum'] },
+      block: { time: week, precipitation_sum: empty },
+      units: undefined,
+      attribution: { kind: 'undetermined', models: ['best_match'] },
+      sentence: `${lead('precipitation_sum')}best_match does not carry it. ${OR_OMIT}`,
+    },
+  ])('$label', ({ selection, block, units, attribution, sentence }) => {
+    const gaps = findCoverageGaps('daily', block, units, undefined, selection);
+
+    expect(gaps.map((gap) => gap.attribution)).toEqual([attribution]);
+    expect(describeCoverageGaps(gaps)).toBe(sentence);
+  });
+
+  it('flags no gap another requested model served, when the default was requested', () => {
+    const gaps = findCoverageGaps(
+      'daily',
+      {
+        time: week,
+        precipitation_sum_era5_land: empty,
+        precipitation_sum_archive_best_match: values,
+      },
+      undefined,
+      undefined,
+      {
+        models: ['era5_land', 'best_match'],
+        variables: ['precipitation_sum'],
+        defaultModel: 'best_match',
+      },
+    );
+
+    expect(gaps.map((gap) => gap.attribution)).toEqual([
+      { kind: 'model', model: 'era5_land', servedBy: ['best_match'] },
+    ]);
+  });
+});
+
+describe('the another-model remedy of an undetermined all-null gap, against a closed model set', () => {
+  const week = Array.from({ length: 7 }, (_, i) => `2020-06-0${i + 1}`);
+  const values = week.map((_, row) => row + 0.5);
+  const empty = week.map(() => null);
+  const ANOTHER = 'Try another model.';
+  const OR_OMIT = 'Try another model, or omit models to use the default.';
+  const lead = (columns: string) =>
+    `No daily data for ${columns} anywhere in the requested window — all 7 values are null even though the units are real, so this location or the requested window falls outside this dataset’s coverage, or `;
+  /** A closed set of three, standing in for a tool's whole model list. */
+  const ACCEPTED = ['CMCC_CM2_VHR4', 'MRI_AGCM3_2_S', 'NICAM16_8S'];
+  /** `rain_sum` empty under a real unit in each model's suffixed column. */
+  const emptyFrom = (...models: string[]): ColumnarBlock => ({
+    time: week,
+    ...Object.fromEntries(models.map((model) => [`rain_sum_${model}`, empty])),
+  });
+
+  it.each([
+    {
+      label: 'ends at the cause when every accepted model was requested',
+      models: ACCEPTED,
+      acceptedModels: ACCEPTED,
+      block: emptyFrom(...ACCEPTED),
+      attribution: {
+        kind: 'undetermined',
+        models: ACCEPTED,
+        defaultRequested: true,
+        everyModelRequested: true,
+      },
+      sentence: `${lead('rain_sum_CMCC_CM2_VHR4, rain_sum_MRI_AGCM3_2_S, rain_sum_NICAM16_8S')}CMCC_CM2_VHR4, MRI_AGCM3_2_S, NICAM16_8S do not carry them.`,
+    },
+    {
+      label:
+        'ends at the cause when every accepted model was requested out of order, beside a name outside the set',
+      models: ['NICAM16_8S', 'unlisted_model', 'CMCC_CM2_VHR4', 'MRI_AGCM3_2_S'],
+      acceptedModels: ACCEPTED,
+      block: emptyFrom('NICAM16_8S', 'unlisted_model', 'CMCC_CM2_VHR4', 'MRI_AGCM3_2_S'),
+      attribution: {
+        kind: 'undetermined',
+        models: ['NICAM16_8S', 'unlisted_model', 'CMCC_CM2_VHR4', 'MRI_AGCM3_2_S'],
+        defaultRequested: true,
+        everyModelRequested: true,
+      },
+      sentence: `${lead('rain_sum_NICAM16_8S, rain_sum_unlisted_model, rain_sum_CMCC_CM2_VHR4, rain_sum_MRI_AGCM3_2_S')}NICAM16_8S, unlisted_model, CMCC_CM2_VHR4, MRI_AGCM3_2_S do not carry them.`,
+    },
+    {
+      label: 'ends at the cause on a one-model request when that model is the whole set',
+      models: ['MRI_AGCM3_2_S'],
+      acceptedModels: ['MRI_AGCM3_2_S'],
+      block: { time: week, rain_sum: empty },
+      attribution: {
+        kind: 'undetermined',
+        models: ['MRI_AGCM3_2_S'],
+        defaultRequested: true,
+        everyModelRequested: true,
+      },
+      sentence: `${lead('rain_sum')}MRI_AGCM3_2_S does not carry it.`,
+    },
+    {
+      label: 'keeps another model when one accepted model was not requested',
+      models: ['CMCC_CM2_VHR4', 'MRI_AGCM3_2_S'],
+      acceptedModels: ACCEPTED,
+      block: emptyFrom('CMCC_CM2_VHR4', 'MRI_AGCM3_2_S'),
+      attribution: {
+        kind: 'undetermined',
+        models: ['CMCC_CM2_VHR4', 'MRI_AGCM3_2_S'],
+        defaultRequested: true,
+      },
+      sentence: `${lead('rain_sum_CMCC_CM2_VHR4, rain_sum_MRI_AGCM3_2_S')}CMCC_CM2_VHR4, MRI_AGCM3_2_S do not carry them. ${ANOTHER}`,
+    },
+    {
+      label: 'counts a repeated name once, so three names short of the set keep another model',
+      models: ['CMCC_CM2_VHR4', 'CMCC_CM2_VHR4', 'MRI_AGCM3_2_S'],
+      acceptedModels: ACCEPTED,
+      block: emptyFrom('CMCC_CM2_VHR4', 'MRI_AGCM3_2_S'),
+      attribution: {
+        kind: 'undetermined',
+        models: ['CMCC_CM2_VHR4', 'MRI_AGCM3_2_S'],
+        defaultRequested: true,
+      },
+      sentence: `${lead('rain_sum_CMCC_CM2_VHR4, rain_sum_MRI_AGCM3_2_S')}CMCC_CM2_VHR4, MRI_AGCM3_2_S do not carry them. ${ANOTHER}`,
+    },
+    {
+      label: 'keeps omitting models when the unrequested accepted model is the default',
+      models: ['CMCC_CM2_VHR4', 'NICAM16_8S'],
+      acceptedModels: ACCEPTED,
+      block: emptyFrom('CMCC_CM2_VHR4', 'NICAM16_8S'),
+      attribution: { kind: 'undetermined', models: ['CMCC_CM2_VHR4', 'NICAM16_8S'] },
+      sentence: `${lead('rain_sum_CMCC_CM2_VHR4, rain_sum_NICAM16_8S')}CMCC_CM2_VHR4, NICAM16_8S do not carry them. ${OR_OMIT}`,
+    },
+    {
+      label: 'keeps another model when the selection names no closed set, whatever it requested',
+      models: ACCEPTED,
+      acceptedModels: undefined,
+      block: emptyFrom(...ACCEPTED),
+      attribution: { kind: 'undetermined', models: ACCEPTED, defaultRequested: true },
+      sentence: `${lead('rain_sum_CMCC_CM2_VHR4, rain_sum_MRI_AGCM3_2_S, rain_sum_NICAM16_8S')}CMCC_CM2_VHR4, MRI_AGCM3_2_S, NICAM16_8S do not carry them. ${ANOTHER}`,
+    },
+  ])('$label', ({ models, acceptedModels, block, attribution, sentence }) => {
+    const gaps = findCoverageGaps('daily', block, undefined, undefined, {
+      models,
+      variables: ['rain_sum'],
+      defaultModel: 'MRI_AGCM3_2_S',
+      ...(acceptedModels && { acceptedModels }),
+    });
+
+    expect(gaps.map((gap) => gap.attribution)).toEqual([attribution]);
+    expect(describeCoverageGaps(gaps)).toBe(sentence);
+  });
+
+  it('still names the model that served a variable, when every accepted model was requested', () => {
+    const gaps = findCoverageGaps(
+      'daily',
+      {
+        time: week,
+        rain_sum_CMCC_CM2_VHR4: empty,
+        rain_sum_MRI_AGCM3_2_S: values,
+        rain_sum_NICAM16_8S: values,
+      },
+      undefined,
+      undefined,
+      {
+        models: ACCEPTED,
+        variables: ['rain_sum'],
+        defaultModel: 'MRI_AGCM3_2_S',
+        acceptedModels: ACCEPTED,
+      },
+    );
+
+    expect(gaps.map((gap) => gap.attribution)).toEqual([
+      { kind: 'model', model: 'CMCC_CM2_VHR4', servedBy: ['MRI_AGCM3_2_S', 'NICAM16_8S'] },
+    ]);
+    expect(describeCoverageGaps(gaps)).toBe(
+      'CMCC_CM2_VHR4 returned no daily data for rain_sum_CMCC_CM2_VHR4 — all 7 values are null, while MRI_AGCM3_2_S, NICAM16_8S returned values for the same variable. Read it from one of MRI_AGCM3_2_S, NICAM16_8S.',
+    );
+  });
+});
+
+describe('an all-null gap under a tool’s own wording', () => {
+  const week = Array.from({ length: 7 }, (_, i) => `2020-06-0${i + 1}`);
+  const values = week.map((_, row) => row + 0.5);
+  const empty = week.map(() => null);
+  const wording = { unselected: 'UNSELECTED CAUSE.', noSource: 'NO SOURCE.' };
+  const head = (columns: string) =>
+    `No daily data for ${columns} anywhere in the requested window — all 7 values are null even though the units are real, so `;
+  const undetermined = (columns: string, models: string) =>
+    `${head(columns)}this location or the requested window falls outside this dataset’s coverage, or ${models} does not carry it.`;
+
+  it.each([
+    {
+      label: 'replaces the cause and its remedy when no models were selected',
+      models: undefined,
+      block: { time: week, wave_height_max: empty },
+      sentence: `${head('wave_height_max')}UNSELECTED CAUSE.`,
+    },
+    {
+      label: 'follows the omit-models remedy of one empty model',
+      models: ['ecmwf_wam'],
+      block: { time: week, wave_height_max: empty },
+      sentence: `${undetermined('wave_height_max', 'ecmwf_wam')} Try another model, or omit models to use the default. NO SOURCE.`,
+    },
+    {
+      label: 'follows the another-model remedy when the default was requested',
+      models: ['best_match'],
+      block: { time: week, wave_height_max: empty },
+      sentence: `${undetermined('wave_height_max', 'best_match')} Try another model. NO SOURCE.`,
+    },
+    {
+      label: 'adds nothing where another requested model served the variable',
+      models: ['ecmwf_wam', 'ncep_gfswave025'],
+      block: {
+        time: week,
+        wave_height_max_ecmwf_wam: empty,
+        wave_height_max_ncep_gfswave025: values,
+      },
+      sentence:
+        'ecmwf_wam returned no daily data for wave_height_max_ecmwf_wam — all 7 values are null, while ncep_gfswave025 returned values for the same variable. Read it from ncep_gfswave025.',
+    },
+  ])('$label', ({ models, block, sentence }) => {
+    const selection = {
+      models,
+      variables: ['wave_height_max'],
+      defaultModel: 'best_match',
+      allNullWording: wording,
+    };
+    expect(
+      describeCoverageGaps(findCoverageGaps('daily', block, undefined, undefined, selection)),
+    ).toBe(sentence);
+  });
+
+  it('leaves a partial gap’s sentence alone', () => {
+    const block = { time: week, wave_height_max: [...values.slice(0, 3), null, null, null, null] };
+    const gaps = findCoverageGaps('daily', block, undefined, undefined, {
+      models: undefined,
+      variables: ['wave_height_max'],
+      allNullWording: wording,
+    });
+    expect(describeCoverageGaps(gaps)).toBe(
+      'Partial daily coverage for wave_height_max: data runs 2020-06-01 to 2020-06-03, and 4 of 7 rows are null.',
+    );
+  });
+});
+
 describe('describeCoverageGaps', () => {
   const gap = (over: Partial<CoverageGap> = {}): CoverageGap => ({
     cadence: 'hourly',
@@ -997,6 +1330,21 @@ describe('columnModel (#80, #83)', () => {
       }),
     ).toBeUndefined();
   });
+
+  it('attributes the marine endpoint’s _marine_best_match suffix to best_match (#104)', () => {
+    // Live: models=best_match,ecmwf_wam at 45, −30 names Best Match's columns
+    // `wave_height_marine_best_match` and `wave_height_max_marine_best_match`.
+    const marine = {
+      models: ['best_match', 'ecmwf_wam'],
+      variables: ['wave_height', 'wave_height_max'],
+    };
+    expect(columnModel('wave_height_marine_best_match', marine)).toBe('best_match');
+    expect(columnModel('wave_height_max_marine_best_match', marine)).toBe('best_match');
+    expect(columnModel('wave_height_ecmwf_wam', marine)).toBe('ecmwf_wam');
+    expect(
+      columnModel('wave_height_marine_best_match', { ...marine, models: ['ecmwf_wam', 'gwam'] }),
+    ).toBeUndefined();
+  });
 });
 
 describe('describeDroppedModels (#80, #83)', () => {
@@ -1058,6 +1406,16 @@ describe('describeDroppedModels (#80, #83)', () => {
     ).toBeUndefined();
   });
 
+  it('counts the marine endpoint’s _marine_best_match columns as best_match being present (#104)', () => {
+    const selection = { models: ['best_match', 'ecmwf_wam'], variables: ['wave_height'] };
+    expect(
+      describeDroppedModels(
+        selection,
+        block('wave_height_marine_best_match', 'wave_height_ecmwf_wam'),
+      ),
+    ).toBeUndefined();
+  });
+
   it('counts a model requested twice once', () => {
     const selection = { models: ['era5', 'era5', 'cerra'], variables };
     expect(describeDroppedModels(selection, block('temperature_2m'))).toContain(
@@ -1111,6 +1469,155 @@ describe('describeModelUnserved (#80)', () => {
       }),
     ).toContain('best_match does not serve uv_index.');
   });
+});
+
+describe('describeUnservedColumns', () => {
+  /*
+   * Live: /v1/forecast answers hourly=pm2_5 and hourly=wave_height with HTTP 200, an
+   * all-null column, and the unit "undefined"; a name filed under the other cadence draws
+   * HTTP 400 instead, so the unit says nothing about cadence.
+   */
+  const wording = {
+    server: 'the endpoint',
+    servedBy: 'air-quality variables (pm2_5, …) from openmeteo_get_air_quality',
+  };
+  const UNSERVED =
+    'returned no data — Open-Meteo reported the unit as "undefined", which means the endpoint parsed that name but serves no data for it';
+  const ELSEWHERE =
+    'request it from the tool that serves that kind of variable: air-quality variables (pm2_5, …) from openmeteo_get_air_quality.';
+  const SERVED_BY = 'air-quality variables (pm2_5, …) from openmeteo_get_air_quality.';
+
+  it.each([
+    {
+      sent: 'no models',
+      columns: ['pm2_5'],
+      models: undefined,
+      notice: `pm2_5 ${UNSERVED}. Drop it, or ${ELSEWHERE}`,
+    },
+    {
+      sent: 'one model',
+      columns: ['pm2_5', 'wave_height'],
+      models: ['gfs_hrrr'],
+      notice: `pm2_5, wave_height returned no data — Open-Meteo reported the unit as "undefined", which means the endpoint parsed those names but serves no data for them, or the selected model (gfs_hrrr) does not serve them. Drop them, read them from another model, or request them from the tool that serves that kind of variable: ${SERVED_BY}`,
+    },
+    {
+      sent: 'one model named twice, whose current column is plain',
+      columns: ['wave_height'],
+      models: ['gfs_seamless', 'gfs_seamless'],
+      notice: `wave_height ${UNSERVED}, or the selected model (gfs_seamless) does not serve it. Drop it, read it from another model, or ${ELSEWHERE}`,
+    },
+    {
+      sent: 'two models, one left in the response',
+      columns: ['pm2_5'],
+      models: ['icon_d2', 'gfs_seamless'],
+      notice: `pm2_5 ${UNSERVED}, or the one model left in the response (one of icon_d2, gfs_seamless) does not serve it. Drop it, read it from another model, or ${ELSEWHERE}`,
+    },
+    {
+      sent: 'two models, a suffixed column beside a plain one',
+      columns: ['lightning_potential_gfs_hrrr', 'pm2_5'],
+      models: ['gfs_hrrr', 'icon_seamless'],
+      notice: `lightning_potential_gfs_hrrr returned no data — Open-Meteo reported the unit as "undefined", which on a model-suffixed column means that model does not serve the variable: gfs_hrrr does not serve lightning_potential. Read it from a model that serves it. pm2_5 ${UNSERVED}, or the one model left in the response (one of gfs_hrrr, icon_seamless) does not serve it. Drop it, read it from another model, or ${ELSEWHERE}`,
+    },
+    {
+      sent: 'two models, only suffixed columns',
+      columns: ['lightning_potential_gfs_hrrr'],
+      models: ['gfs_hrrr', 'icon_seamless'],
+      notice:
+        'lightning_potential_gfs_hrrr returned no data — Open-Meteo reported the unit as "undefined", which on a model-suffixed column means that model does not serve the variable: gfs_hrrr does not serve lightning_potential. Read it from a model that serves it.',
+    },
+  ])(
+    'names what the unit means and where to read the name, with $sent',
+    ({ columns, models, notice }) => {
+      const variables = ['lightning_potential', 'pm2_5', 'wave_height'];
+      expect(describeUnservedColumns(columns, { models, variables }, wording)).toBe(notice);
+    },
+  );
+
+  it('says nothing when no column came back with the unit "undefined"', () => {
+    expect(
+      describeUnservedColumns([], { models: undefined, variables: [] }, wording),
+    ).toBeUndefined();
+  });
+});
+
+describe('model attribution running time (#104)', () => {
+  /** Generous CPU ceiling per character of model and variable names, held at every size. */
+  const CPU_MICROS_PER_CHAR = 1;
+  const BASE = 5_000;
+  const LARGEST = 320_000;
+
+  interface Attribution {
+    readonly block: ColumnarBlock;
+    readonly columns: readonly string[];
+    readonly selection: { models: string[]; variables: string[] };
+  }
+
+  /** Caller-typed models and variables, and the suffixed columns a response would carry for them. */
+  const attribution = (models: string[], variables: string[]): Attribution => {
+    const columns = models.flatMap((model) => variables.map((v) => `${v}_${model}`));
+    const block: ColumnarBlock = {
+      time: ['2026-11-18T00:00', '2026-11-18T01:00'],
+      // The first column carries values and the rest none, so an all-null gap is attributed.
+      ...Object.fromEntries(columns.map((c, i) => [c, i === 0 ? [1, 2] : [null, null]])),
+    };
+    return { block, columns, selection: { models, variables } };
+  };
+
+  /** Shapes grown by doubling from 5k characters to 320k, the full 64× span. */
+  const SHAPES: [string, (size: number) => Attribution][] = [
+    [
+      'one long model name',
+      (size) => attribution(['x'.repeat(size), 'ecmwf_wam'], ['wave_height']),
+    ],
+    ['one long variable name', (size) => attribution(['ecmwf_wam', 'gwam'], ['v'.repeat(size)])],
+    [
+      'ten models sharing a long tail',
+      (size) =>
+        attribution(
+          Array.from({ length: 10 }, (_, i) => `${i}${'_'.repeat(size / 10)}`),
+          ['wave_height'],
+        ),
+    ],
+    [
+      'one long line ending in a break',
+      (size) => attribution([`${'§1 x'.repeat(size / 4)}\ny`, 'best_match'], ['wave_height']),
+    ],
+    [
+      'breaks throughout',
+      (size) => attribution(['  \r\n'.repeat(size / 4), 'best_match'], ['wave_height']),
+    ],
+  ];
+
+  /** Every reader of the selection a marine or forecast handler calls. */
+  const attribute = ({ block, columns, selection }: Attribution) => {
+    for (const column of columns) columnModel(column, selection);
+    describeDroppedModels(selection, block);
+    describeModelUnserved(columns, selection);
+    findCoverageGaps('hourly', block, undefined, undefined, selection);
+  };
+
+  it.each(SHAPES)(
+    'stays linear on %s',
+    (_shape, build) => {
+      const timeAt = (size: number) => {
+        const input = build(size);
+        return cpuMicrosPerCall(() => attribute(input), Math.max(4, Math.ceil(400_000 / size)));
+      };
+
+      expect(timeAt(BASE)).toBeLessThan(BASE * CPU_MICROS_PER_CHAR);
+      let ratio = 1;
+      for (let size = BASE * 2; size <= LARGEST; size *= 2) {
+        const base = timeAt(BASE);
+        const atSize = timeAt(size);
+        expect(atSize, `${size} characters`).toBeLessThan(size * CPU_MICROS_PER_CHAR);
+        ratio = atSize / base;
+      }
+
+      // Linear growth over the 64× span is its own size; quadratic would be its square.
+      expect(ratio).toBeLessThan(256);
+    },
+    0,
+  );
 });
 
 describe('renderNotice', () => {
@@ -1185,4 +1692,50 @@ describe('renderNotice', () => {
       expect(micros).toBeLessThan(200_000 * (size / 320_000) + 20_000);
     }
   });
+});
+
+describe('byEnsembleVariable (#98)', () => {
+  it.each([
+    ['temperature_2m_member01', 'temperature_2m'],
+    ['temperature_2m', 'temperature_2m'],
+    ['temperature_2m_member01_ncep_gefs025', 'temperature_2m_ncep_gefs025'],
+    ['temperature_2m_ncep_gefs025', 'temperature_2m_ncep_gefs025'],
+    [
+      'soil_moisture_0_to_1cm_member30_ecmwf_ifs025_ensemble',
+      'soil_moisture_0_to_1cm_ecmwf_ifs025_ensemble',
+    ],
+  ])('groups %s under %s', (column, group) => {
+    expect(byEnsembleVariable(column)).toBe(group);
+  });
+
+  /** Thread CPU microseconds per grouping of `column`, so the bound reads the regex's own work. */
+  const groupMicros = (column: string, calls: number): number =>
+    cpuMicrosPerCall(() => byEnsembleVariable(column), calls);
+
+  /** `unit` repeated to at least `chars` characters. */
+  const repeatTo = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
+
+  /**
+   * Grows each shape by doubling from 5k to 320k, the full 64× span, re-timing the 5k
+   * baseline beside every size so a slow stretch of the run cannot pass for growth.
+   */
+  it.each([
+    ['member tokens with no boundary after them', (n: number) => repeatTo('_member1x', n)],
+    ['a long digit run after one member token', (n: number) => `_member${'1'.repeat(n)}x`],
+    ['one long line ending in a break', (n: number) => `${repeatTo('_member1x', n)}\n`],
+    ['breaks throughout', (n: number) => repeatTo('_member1\n', n)],
+  ])(
+    'stays linear on %s',
+    (_shape, make) => {
+      const base = 5_000;
+      for (let size = base * 2; size <= base * 64; size *= 2) {
+        const baseMicros = groupMicros(make(base), 20);
+        const micros = groupMicros(make(size), size >= 80_000 ? 2 : 5);
+        // Linear growth doubles per step; quadratic quadruples. 256 over the whole span
+        // sits between 64× (linear) and 4096× (quadratic).
+        expect(micros / baseMicros, `${size} characters`).toBeLessThan(256 * (size / (base * 64)));
+      }
+    },
+    0,
+  );
 });

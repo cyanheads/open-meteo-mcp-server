@@ -262,25 +262,29 @@ describe('rowsWithinCeiling', () => {
       ['a long digit run', (size) => [{ s: '1'.repeat(size) }]],
     ];
 
-    it.each(SIZED)('stays linear on %s', (_shape, build) => {
-      const timeAt = (size: number) => {
-        const rows = build(size);
-        return cpuMicrosPerCall(
-          () => rowsWithinCeiling(rows),
-          Math.max(4, Math.ceil(400_000 / size)),
-        );
-      };
+    it.each(SIZED)(
+      'stays linear on %s',
+      (_shape, build) => {
+        const timeAt = (size: number) => {
+          const rows = build(size);
+          return cpuMicrosPerCall(
+            () => rowsWithinCeiling(rows),
+            Math.max(4, Math.ceil(400_000 / size)),
+          );
+        };
 
-      const base = timeAt(BASE);
-      expect(base).toBeLessThan(BASE * CPU_MICROS_PER_UNIT);
-      let atLargest = base;
-      for (let size = BASE * 2; size <= LARGEST; size *= 2) {
-        atLargest = timeAt(size);
-        expect(atLargest, `${size} units`).toBeLessThan(size * CPU_MICROS_PER_UNIT);
-      }
+        const base = timeAt(BASE);
+        expect(base).toBeLessThan(BASE * CPU_MICROS_PER_UNIT);
+        let atLargest = base;
+        for (let size = BASE * 2; size <= LARGEST; size *= 2) {
+          atLargest = timeAt(size);
+          expect(atLargest, `${size} units`).toBeLessThan(size * CPU_MICROS_PER_UNIT);
+        }
 
-      // Linear growth over the 64× span is its own size; quadratic would be its square.
-      expect(atLargest / base).toBeLessThan(256);
-    });
+        // Linear growth over the 64× span is its own size; quadratic would be its square.
+        expect(atLargest / base).toBeLessThan(256);
+      },
+      0,
+    );
   });
 });

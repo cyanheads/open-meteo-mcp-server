@@ -3,12 +3,15 @@
  * post-call tell that catches what it cannot know in advance.
  *
  * Open-Meteo keeps a separate variable set per cadence: `cloud_cover` is hourly,
- * `temperature_2m_max` is daily. A name placed in the opposite bucket fails in one of
- * two ways, both reproduced against the live endpoints. Either the request is rejected
- * with a 400 whose message echoes the whole encoded variable list, so the offender is
- * never isolated and the caller cannot converge; or — on the forecast, archive, and
- * air-quality endpoints — it returns HTTP 200 with an all-null column and the unit
- * string "undefined", indistinguishable from a genuine data gap.
+ * `precipitation_sum` is daily. A name placed in the opposite bucket draws an HTTP 400
+ * that rejects it as an unknown name (`Cannot initialize … from invalid String value
+ * precipitation_sum`), naming neither the field it belongs in nor a same-cadence
+ * alternative, so the caller is sent to check a spelling that is already correct. A sweep
+ * on 2026-11-17 requested every name these sets file under one cadence alone at the
+ * other, on the forecast, archive, ensemble, and marine endpoints: each name not served
+ * there drew that 400, and none came back as an all-null column. The unit "undefined"
+ * remains the tell for a name an endpoint parses but does not serve at all, such as
+ * `hourly=temperature_2m` on the marine endpoint; {@link undefinedUnitColumns} reads it.
  *
  * The catalogs below are NOT an allowlist. A name is rejected only when it is known to
  * belong to the bucket OPPOSITE the one it arrived in. A name in neither set is unknown,
@@ -17,17 +20,19 @@
  * allowlists out of scope in the first place.
  *
  * Provenance: each set is the variable list published on the matching Open-Meteo
- * documentation page, read on 2026-07-30:
+ * documentation page, read on 2026-07-30, plus the names that sweep found served at the
+ * cadence the page does not list them under — forecast hourly `temperature_2m_max`,
+ * `temperature_2m_min`, and `growing_degree_days_base_0_limit_50`; archive hourly
+ * `temperature_2m_max` and `temperature_2m_min`; ensemble daily `sunshine_duration` and
+ * `weather_code`. A name served at both cadences sits in both sets and is never rejected.
  *   forecast   — https://open-meteo.com/en/docs
  *   historical — https://open-meteo.com/en/docs/historical-weather-api
  *   marine     — https://open-meteo.com/en/docs/marine-weather-api
  *   ensemble   — https://open-meteo.com/en/docs/ensemble-api
- * The sets are per endpoint rather than shared because the endpoints genuinely differ:
- * the ensemble API publishes `temperature_2m_max` as an hourly aggregation, where the
- * forecast API publishes it under daily only. A shared catalog would reject a valid
- * ensemble request. Pressure-level and model-specific variables are not listed on these
- * pages as cadence-tagged entries and therefore fall through as unknown, which is the
- * intended behaviour.
+ * Each endpoint keeps its own sets, read from its own page and probed against it, so what
+ * one endpoint changes is corrected in that endpoint's sets alone. Pressure-level and
+ * model-specific variables are not listed on these pages as cadence-tagged entries and
+ * therefore fall through as unknown, which is the intended behaviour.
  *
  * @module mcp-server/tools/variable-cadence
  */
@@ -54,7 +59,7 @@ export interface CadenceMismatch {
   readonly variable: string;
 }
 
-/** Documented hourly variables of the forecast endpoint (65). */
+/** Hourly variables of the forecast endpoint (68): the documented 65 plus 3 served, not listed. */
 const FORECAST_HOURLY = new Set([
   'apparent_temperature',
   'boundary_layer_height',
@@ -76,6 +81,7 @@ const FORECAST_HOURLY = new Set([
   'freezing_level_height',
   'global_tilted_irradiance',
   'global_tilted_irradiance_instant',
+  'growing_degree_days_base_0_limit_50',
   'is_day',
   'lifted_index',
   'precipitation',
@@ -102,6 +108,8 @@ const FORECAST_HOURLY = new Set([
   'temperature_120m',
   'temperature_180m',
   'temperature_2m',
+  'temperature_2m_max',
+  'temperature_2m_min',
   'temperature_80m',
   'terrestrial_radiation',
   'terrestrial_radiation_instant',
@@ -190,7 +198,7 @@ const FORECAST_DAILY = new Set([
 /** Cadence catalog for the forecast endpoint. */
 export const FORECAST_CADENCE: CadenceCatalog = { hourly: FORECAST_HOURLY, daily: FORECAST_DAILY };
 
-/** Documented hourly variables of the historical endpoint (72). */
+/** Hourly variables of the historical endpoint (74): the documented 72 plus 2 served, not listed. */
 const HISTORICAL_HOURLY = new Set([
   'albedo',
   'apparent_temperature',
@@ -247,6 +255,8 @@ const HISTORICAL_HOURLY = new Set([
   'sunshine_duration',
   'surface_pressure',
   'temperature_2m',
+  'temperature_2m_max',
+  'temperature_2m_min',
   'temperature_2m_spread',
   'terrestrial_radiation',
   'terrestrial_radiation_instant',
@@ -448,7 +458,7 @@ const ENSEMBLE_HOURLY = new Set([
   'wind_speed_80m',
 ]);
 
-/** Documented daily variables of the ensemble endpoint (41). */
+/** Daily variables of the ensemble endpoint (43): the documented 41 plus 2 served, not listed. */
 const ENSEMBLE_DAILY = new Set([
   'apparent_temperature_max',
   'apparent_temperature_mean',
@@ -474,12 +484,14 @@ const ENSEMBLE_DAILY = new Set([
   'relative_humidity_2m_min',
   'shortwave_radiation_sum',
   'snowfall_sum',
+  'sunshine_duration',
   'surface_pressure_max',
   'surface_pressure_mean',
   'surface_pressure_min',
   'temperature_2m_max',
   'temperature_2m_mean',
   'temperature_2m_min',
+  'weather_code',
   'wind_direction_100m_dominant',
   'wind_direction_10m_dominant',
   'wind_gusts_10m_max',
@@ -502,7 +514,7 @@ const MAX_ALTERNATIVES = 3;
 /**
  * Names in `bucket` sharing a subject with `variable` — an aggregate of it
  * (`cloud_cover` → `cloud_cover_max`) or the base it aggregates
- * (`temperature_2m_max` → `temperature_2m`).
+ * (`precipitation_sum` → `precipitation`).
  */
 function sameSubject(bucket: ReadonlySet<string>, variable: string): string[] {
   return [...bucket]
@@ -529,18 +541,20 @@ function collect(
 }
 
 /**
- * Every requested variable that is documented in the opposite cadence bucket, in the
+ * Every requested variable that is filed only in the opposite cadence bucket, in the
  * order the caller listed them (hourly field first, then daily, then current). A name
- * valid in the bucket it was passed in is never reported, so a variable both sets
- * publish — `weather_code`, or the ensemble endpoint's `temperature_2m_max` — passes
- * either way.
+ * valid in the bucket it was passed in is never reported, so a variable both sets carry
+ * — `weather_code`, or `temperature_2m_max` on the forecast, archive, and ensemble
+ * endpoints — passes either way.
  *
  * `current` takes the hourly names, so it is checked against the hourly set and a
- * daily-only name is pointed at daily_variables. Only a tool whose endpoint rejects
- * that case passes it: the marine endpoint answers `current=wave_height_max` with an
- * HTTP 400 the unknown-name framing would misreport, while the forecast endpoint
- * answers the same misplacement with HTTP 200 and an "undefined" unit, which
- * {@link undefinedUnitColumns} already reports.
+ * daily-only name is pointed at daily_variables; the forecast and marine tools pass
+ * their `current_variables` here. Upstream rejects a daily-only current name with the
+ * same unknown-name HTTP 400 as at hourly cadence: on 2026-11-17 all 54 names the
+ * forecast sets file under daily alone drew it at `current` on the forecast endpoint, as
+ * `current=wave_height_max` did on the marine endpoint. A name both forecast sets carry
+ * is served there — `current=temperature_2m_max` returns a value under a real unit — and
+ * passes, like any name valid in the bucket it arrived in.
  */
 export function findCadenceMismatches(
   catalog: CadenceCatalog,

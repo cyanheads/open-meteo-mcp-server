@@ -7,11 +7,13 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openmeteoGetMarineTool } from '@/mcp-server/tools/definitions/get-marine.tool.js';
+import { MARINE_MODEL_NAMES, MARINE_MODELS } from '@/mcp-server/tools/model-catalog.js';
+import { renderNotice } from '@/mcp-server/tools/response-notice.js';
 import { INLINE_CHARS, inlineBudget } from '@/mcp-server/tools/spill-utils.js';
 import { firstText } from '../helpers/content.js';
 import { rowBudgetFor, structuredSize } from '../helpers/inline-surface.js';
 import { expectNoCanvasDisclosureOnce } from '../helpers/no-canvas.js';
-import { wireError } from '../helpers/wire-error.js';
+import { type WireError, wireError } from '../helpers/wire-error.js';
 
 const mockGetMarine = vi.fn();
 const mockSpillover = vi.fn();
@@ -412,23 +414,31 @@ describe('openmeteoGetMarineTool', () => {
 
   // --- Time window: forecast_days / past_days / date range -------------------
 
-  it('accepts forecast_days up to 8 and rejects 9', () => {
+  it('accepts forecast_days up to 16 and rejects 17, advertising the ceiling (#104)', async () => {
+    // Live: forecast_days=17 answers HTTP 400 "Forecast days is invalid. Allowed range 0 to 16."
     expect(() =>
       openmeteoGetMarineTool.input.parse({
         latitude: 47.8,
         longitude: -122.5,
         hourly_variables: ['wave_height'],
-        forecast_days: 8,
+        forecast_days: 16,
       }),
     ).not.toThrow();
-    expect(() =>
-      openmeteoGetMarineTool.input.parse({
-        latitude: 47.8,
-        longitude: -122.5,
-        hourly_variables: ['wave_height'],
-        forecast_days: 9,
-      }),
-    ).toThrow();
+
+    const error = await wireError(openmeteoGetMarineTool, {
+      latitude: 47.8,
+      longitude: -122.5,
+      hourly_variables: ['wave_height'],
+      forecast_days: 17,
+    });
+    expect(error.code).toBe(-32602);
+    expect(error.message).toContain('forecast_days');
+    expect(mockGetMarine).not.toHaveBeenCalled();
+
+    const advertised = openmeteoGetMarineTool.input['~standard'].jsonSchema.input({
+      target: 'draft-2020-12',
+    }) as { properties: Record<string, { maximum?: number }> };
+    expect(advertised.properties.forecast_days?.maximum).toBe(16);
   });
 
   it('forwards forecast_days and past_days as the forecast window', async () => {
@@ -1201,7 +1211,10 @@ describe('openmeteoGetMarineTool', () => {
 
     const notice = String(getEnrichment(ctx).notice);
     expect(notice).toContain('No daily data for wave_height_max');
-    expect(notice).toContain('this location or the requested window falls outside');
+    expect(notice).toContain('the default blend has no data for this location or window');
+    expect(notice).toContain(
+      'A point on land or under sea ice has no wave data from any model, so there the remedy is a coordinate in open water.',
+    );
     expect(result.daily?.every((row) => row.wave_height_max === null)).toBe(true);
   });
 
@@ -1772,6 +1785,690 @@ describe('openmeteoGetMarineTool unit inputs (#81)', () => {
       (field) => field.description ?? '',
     );
     expect(descriptions.length).toBeGreaterThan(5);
-    for (const text of descriptions) expect(text).not.toMatch(/meters?\b|metres?\b/i);
+    for (const text of descriptions) expect(text).not.toMatch(/\bmeters?\b|\bmetres?\b/i);
+  });
+});
+
+describe('openmeteoGetMarineTool models and the 16-day window (#104)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCanvasInstance = undefined;
+    mockSpillover.mockResolvedValue({ spilled: false, previewRows: [] });
+  });
+
+  const MID_ATLANTIC = { latitude: 45, longitude: -30 };
+
+  it('names the default blend in the description with the straight apostrophe its other strings use', () => {
+    expect(openmeteoGetMarineTool.description).toContain(
+      "With models omitted the data is Open-Meteo's best_match blend",
+    );
+    expect(openmeteoGetMarineTool.description).not.toContain('’');
+  });
+
+  /** Live: no wave model has data at −90, 0, and the default blend has none at −60, 0 where ecmwf_wam does. */
+  const NO_WAVE_DATA =
+    'A point on land or under sea ice has no wave data from any model, so there the remedy is a coordinate in open water.';
+
+  /** The live all-null shape at a point the call's wave data does not reach, one day hourly. */
+  const allNullHourly = (column: string) => {
+    const time = hourlyTimes(24, '2026-11-18T00:00');
+    return {
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', [column]: 'm' },
+      hourly: { time, [column]: time.map(() => null) },
+    };
+  };
+
+  it('declares a coverage_gap recovery that claims no model reaches the point', () => {
+    const recovery = openmeteoGetMarineTool.errors?.find(
+      (entry) => entry.reason === 'coverage_gap',
+    )?.recovery;
+    expect(recovery).toBe(
+      `${NO_WAVE_DATA} For a point in open water, name a model in models: the default blend has gaps a single wave model can fill. Retrying returns the same response.`,
+    );
+  });
+
+  it('sends an all-null default blend to a single model, and a point without wave data to open water', async () => {
+    mockGetMarine.mockResolvedValue(allNullHourly('wave_height'));
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      latitude: -60,
+      longitude: 0,
+      hourly_variables: ['wave_height'],
+      forecast_days: 1,
+    });
+
+    expect(noticeOf(result)).toBe(
+      `No hourly data for wave_height anywhere in the requested window — all 24 values are null even though the units are real, so the default blend has no data for this location or window. ${NO_WAVE_DATA} For a point in open water, name a model in models: the default blend has gaps a single wave model can fill.`,
+    );
+  });
+
+  it('follows the remedy of an all-null model with the point no model covers', async () => {
+    mockGetMarine.mockResolvedValue(allNullHourly('wave_height'));
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      latitude: -90,
+      longitude: 0,
+      hourly_variables: ['wave_height'],
+      forecast_days: 1,
+      models: ['ecmwf_wam'],
+    });
+
+    expect(noticeOf(result)).toBe(
+      `No hourly data for wave_height anywhere in the requested window — all 24 values are null even though the units are real, so this location or the requested window falls outside this dataset’s coverage, or ecmwf_wam does not carry it. Try another model, or omit models to use the default. ${NO_WAVE_DATA}`,
+    );
+  });
+
+  /** The upstream params the handler sent on its one call. */
+  const sentParams = () => mockGetMarine.mock.calls[0]?.[2] as Record<string, unknown>;
+
+  /** Every text block of a result, joined — the notice trailer is its own block. */
+  const allText = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+
+  /** The notice on both surfaces: structuredContent as composed, content[] as rendered. */
+  const noticeOf = (result: Awaited<ReturnType<typeof runToolContract>>) => {
+    const notice = (result.structuredContent as { notice?: string }).notice ?? '';
+    expect(allText(result)).toContain(renderNotice(notice));
+    return notice;
+  };
+
+  /**
+   * The live 16-day default-blend shape at 45, −30: 384 hourly and 16 daily rows, with
+   * wave_height data through 2026-11-26T23:00 (216 rows) and wave_height_max through
+   * 2026-11-26 (9 rows), every later row null under the real unit.
+   */
+  const sixteenDayBlend = () => {
+    const time = hourlyTimes(384, '2026-11-18T00:00');
+    const days = time.filter((_, i) => i % 24 === 0).map((t) => t.slice(0, 10));
+    return {
+      ...MOCK_RESPONSE,
+      latitude: 45.041664,
+      longitude: -30.041656,
+      timezone: 'GMT',
+      hourly_units: { time: 'iso8601', wave_height: 'm' },
+      hourly: { time, wave_height: time.map((_, i) => (i < 216 ? 6.24 - (i % 30) / 10 : null)) },
+      daily_units: { time: 'iso8601', wave_height_max: 'm' },
+      daily: { time: days, wave_height_max: days.map((_, i) => (i < 9 ? 6.48 - i / 10 : null)) },
+    };
+  };
+
+  const SIXTEEN_DAY_NOTICE =
+    'Partial hourly coverage for wave_height: data runs 2026-11-18T00:00 to 2026-11-26T23:00, and 168 of 384 rows are null. Partial daily coverage for wave_height_max: data runs 2026-11-18 to 2026-11-26, and 7 of 16 rows are null.';
+
+  it('reports the default blend’s null tail past its horizon on both surfaces, through the existing coverage notice', async () => {
+    mockGetMarine.mockResolvedValue(sixteenDayBlend());
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: ['wave_height'],
+      daily_variables: ['wave_height_max'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(noticeOf(result)).toBe(SIXTEEN_DAY_NOTICE);
+    expect((result.structuredContent as { record_count: number }).record_count).toBe(400);
+  });
+
+  it('names a non-marine name in the no-models unserved-column sentence, exactly', async () => {
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', wave_height: 'm', temperature_2m: 'undefined' },
+      hourly: {
+        time: ['2026-05-30T00:00', '2026-05-30T01:00'],
+        wave_height: [0.5, 0.6],
+        temperature_2m: [null, null],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      latitude: 47.8,
+      longitude: -122.5,
+      hourly_variables: ['wave_height', 'temperature_2m'],
+    });
+
+    expect(noticeOf(result)).toBe(
+      'temperature_2m returned no data — Open-Meteo reported the unit as "undefined", which means the marine endpoint does not serve that name. Check it against the marine variable list (wave_height, wave_period, swell_wave_height, sea_surface_temperature, …); weather variables belong in openmeteo_get_forecast.',
+    );
+  });
+
+  it('answers forecast_days: 16 with all 384 hourly rows and the null-tail notice on both surfaces', async () => {
+    mockGetMarine.mockResolvedValue(sixteenDayBlend());
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: ['wave_height'],
+      daily_variables: ['wave_height_max'],
+      forecast_days: 16,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams()).toMatchObject({ forecast_days: 16, past_days: 0 });
+    expect(sentParams().models).toBeUndefined();
+    const structured = result.structuredContent as { hourly: unknown[]; daily: unknown[] };
+    expect(structured.hourly).toHaveLength(384);
+    expect(structured.daily).toHaveLength(16);
+    // Serialized, as the wire carries it: an undefined value leaves no key behind.
+    expect(JSON.parse(JSON.stringify(structured))).not.toHaveProperty('models');
+    expect(noticeOf(result)).toBe(SIXTEEN_DAY_NOTICE);
+  });
+
+  /**
+   * Live shape for models=ecmwf_wam,ncep_gfswave016,ewam at 45, −30: ewam (Europe only) is
+   * dropped without a word, every remaining key carries its model, and ecmwf_wam answers
+   * swell_wave_height with the unit "undefined" over nulls.
+   */
+  const THREE_MODELS = ['ecmwf_wam', 'ncep_gfswave016', 'ewam'];
+  const THREE_MODEL_RESPONSE = {
+    ...MOCK_RESPONSE,
+    latitude: 44.956062,
+    longitude: -29.99997,
+    timezone: 'GMT',
+    hourly_units: {
+      time: 'iso8601',
+      wave_height_ecmwf_wam: 'm',
+      swell_wave_height_ecmwf_wam: 'undefined',
+      wave_height_ncep_gfswave016: 'm',
+      swell_wave_height_ncep_gfswave016: 'm',
+    },
+    hourly: {
+      time: ['2026-11-18T00:00', '2026-11-18T01:00'],
+      wave_height_ecmwf_wam: [6.48, 6.58],
+      swell_wave_height_ecmwf_wam: [null, null],
+      wave_height_ncep_gfswave016: [6.28, 6.44],
+      swell_wave_height_ncep_gfswave016: [0.88, 0.86],
+    },
+    daily_units: {
+      time: 'iso8601',
+      wave_height_max_ecmwf_wam: 'm',
+      wave_height_max_ncep_gfswave016: 'm',
+    },
+    daily: {
+      time: ['2026-11-18'],
+      wave_height_max_ecmwf_wam: [6.84],
+      wave_height_max_ncep_gfswave016: [6.56],
+    },
+  };
+
+  it('forwards models and echoes them, naming the dropped model and the one that serves no swell, on both surfaces', async () => {
+    mockGetMarine.mockResolvedValue(THREE_MODEL_RESPONSE);
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: ['wave_height', 'swell_wave_height'],
+      daily_variables: ['wave_height_max'],
+      forecast_days: 16,
+      models: THREE_MODELS,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams().models).toEqual(THREE_MODELS);
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured.models).toEqual(THREE_MODELS);
+    expect(structured.latitude).toBe(44.956062);
+    expect(structured.hourly).toEqual([
+      {
+        time: '2026-11-18T00:00',
+        wave_height_ecmwf_wam: 6.48,
+        swell_wave_height_ecmwf_wam: null,
+        wave_height_ncep_gfswave016: 6.28,
+        swell_wave_height_ncep_gfswave016: 0.88,
+      },
+      {
+        time: '2026-11-18T01:00',
+        wave_height_ecmwf_wam: 6.58,
+        swell_wave_height_ecmwf_wam: null,
+        wave_height_ncep_gfswave016: 6.44,
+        swell_wave_height_ncep_gfswave016: 0.86,
+      },
+    ]);
+    expect(structured.daily_units).toEqual(THREE_MODEL_RESPONSE.daily_units);
+    expect(noticeOf(result)).toBe(
+      'swell_wave_height_ecmwf_wam returned no data — Open-Meteo reported the unit as "undefined", which on a model-suffixed column means that model does not serve the variable: ecmwf_wam does not serve swell_wave_height. Read it from a model that serves it. Open-Meteo returned no columns for ewam — it leaves a requested model out of the response when it has no data at this coordinate (typically a regional model outside its domain), so this response compares only ecmwf_wam, ncep_gfswave016.',
+    );
+
+    const text = firstText(result.content);
+    expect(text).toContain('**Models:** ecmwf_wam, ncep_gfswave016, ewam\n');
+    expect(text).toContain('wave_height_max_ncep_gfswave016: 6.56');
+    expect(text).toContain('swell_wave_height_ecmwf_wam: undefined');
+  });
+
+  it('counts best_match’s _marine_best_match columns as its own, with no dropped-model notice', async () => {
+    // Live shape for models=best_match,ecmwf_wam at 45, −30.
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: {
+        time: 'iso8601',
+        wave_height_marine_best_match: 'm',
+        wave_height_ecmwf_wam: 'm',
+      },
+      hourly: {
+        time: ['2026-11-18T00:00', '2026-11-18T01:00'],
+        wave_height_marine_best_match: [6.24, 6.32],
+        wave_height_ecmwf_wam: [6.48, 6.58],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: ['wave_height'],
+      models: ['best_match', 'ecmwf_wam'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).not.toHaveProperty('notice');
+  });
+
+  it('calls the plain columns of a 2-model request unattributable', async () => {
+    // Live shape for models=ewam,gwam at 45, −30: ewam dropped, gwam's columns plain.
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', wave_height: 'm' },
+      hourly: { time: ['2026-11-18T00:00', '2026-11-18T01:00'], wave_height: [5.56, 5.6] },
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: ['wave_height'],
+      models: ['ewam', 'gwam'],
+    });
+
+    expect(noticeOf(result)).toBe(
+      'wave_height came back without a model suffix although 2 models were requested (ewam, gwam) — Open-Meteo leaves out a requested model that has no data at this coordinate (typically a regional model outside its domain), and the columns of the one left carry plain names, so these values are unattributable: they come from one of ewam, gwam, and the response does not say which. Request one model at a time to attribute them.',
+    );
+  });
+
+  it('puts an archive range’s all-null columns on the model that returned them empty', async () => {
+    // Live shape for models=era5_ocean,ecmwf_wam over 2024-07-01..02 at 45, −30: ecmwf_wam's
+    // record starts in November 2025, so its columns are null under the real unit.
+    const time = hourlyTimes(48, '2024-07-01T00:00');
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', wave_height_era5_ocean: 'm', wave_height_ecmwf_wam: 'm' },
+      hourly: {
+        time,
+        wave_height_era5_ocean: time.map((_, i) => 1.12 + (i % 10) / 50),
+        wave_height_ecmwf_wam: time.map(() => null),
+      },
+      daily_units: {
+        time: 'iso8601',
+        wave_height_max_era5_ocean: 'm',
+        wave_height_max_ecmwf_wam: 'm',
+      },
+      daily: {
+        time: ['2024-07-01', '2024-07-02'],
+        wave_height_max_era5_ocean: [1.52, 1.5],
+        wave_height_max_ecmwf_wam: [null, null],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: ['wave_height'],
+      daily_variables: ['wave_height_max'],
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      models: ['era5_ocean', 'ecmwf_wam'],
+    });
+
+    expect(sentParams()).toMatchObject({
+      start_date: '2024-07-01',
+      end_date: '2024-07-02',
+      models: ['era5_ocean', 'ecmwf_wam'],
+    });
+    expect(noticeOf(result)).toBe(
+      'ecmwf_wam returned no hourly data for wave_height_ecmwf_wam — all 48 values are null, while era5_ocean returned values for the same variable. Read it from era5_ocean. ecmwf_wam returned no daily data for wave_height_max_ecmwf_wam — all 2 values are null, while era5_ocean returned values for the same variable. Read it from era5_ocean.',
+    );
+  });
+
+  it('names the selected model as a cause of an "undefined" unit on a single-model call', async () => {
+    // Live: models=ecmwf_wam answers ocean_current_velocity with a plain column, unit "undefined".
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', wave_height: 'm', ocean_current_velocity: 'undefined' },
+      hourly: {
+        time: ['2026-11-18T00:00', '2026-11-18T01:00'],
+        wave_height: [6.48, 6.58],
+        ocean_current_velocity: [null, null],
+      },
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: ['wave_height', 'ocean_current_velocity'],
+      models: ['ecmwf_wam'],
+    });
+
+    expect(noticeOf(result)).toBe(
+      'ocean_current_velocity returned no data — Open-Meteo reported the unit as "undefined", which means the marine endpoint does not serve that name, or the selected model (ecmwf_wam) does not serve it. Check it against the marine variable list (wave_height, wave_period, swell_wave_height, sea_surface_temperature, …); weather variables belong in openmeteo_get_forecast. Read a marine name that model does not serve from another model, or omit models.',
+    );
+    expect(firstText(result.content)).toContain('**Models:** ecmwf_wam\n');
+  });
+
+  it('names the one model left as a cause of an "undefined" unit on a plain column of a 2-model call', async () => {
+    // ewam (Europe only) dropped at 45, −30, meteofrance_currents left: it serves no waves.
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', wave_height: 'undefined' },
+      hourly: { time: ['2026-11-18T00:00', '2026-11-18T01:00'], wave_height: [null, null] },
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: ['wave_height'],
+      models: ['ewam', 'meteofrance_currents'],
+    });
+
+    expect(noticeOf(result)).toContain(
+      'wave_height returned no data — Open-Meteo reported the unit as "undefined", which means the marine endpoint does not serve that name, or the one model left in the response (one of ewam, meteofrance_currents) does not serve it.',
+    );
+  });
+
+  it.each([
+    [['best_match'], 'the selected model (best_match)'],
+    [
+      ['best_match', 'ecmwf_wam'],
+      'the one model left in the response (one of best_match, ecmwf_wam)',
+    ],
+  ])(
+    'leaves omitting models out of an "undefined" unit on a plain column when models %j holds the default blend',
+    async (models, answered) => {
+      // Omitting models reads best_match, which either answered this call or was left out of
+      // the response for having no data at the coordinate: neither reads the name anew.
+      mockGetMarine.mockResolvedValue({
+        ...MOCK_RESPONSE,
+        hourly_units: { time: 'iso8601', wave_height: 'm', ocean_current_velocity: 'undefined' },
+        hourly: {
+          time: ['2026-11-18T00:00', '2026-11-18T01:00'],
+          wave_height: [6.48, 6.58],
+          ocean_current_velocity: [null, null],
+        },
+      });
+
+      const result = await runToolContract(openmeteoGetMarineTool, {
+        ...MID_ATLANTIC,
+        hourly_variables: ['wave_height', 'ocean_current_velocity'],
+        models,
+      });
+
+      const notice = noticeOf(result);
+      expect(notice).toContain(
+        `ocean_current_velocity returned no data — Open-Meteo reported the unit as "undefined", which means the marine endpoint does not serve that name, or ${answered} does not serve it. Check it against the marine variable list (wave_height, wave_period, swell_wave_height, sea_surface_temperature, …); weather variables belong in openmeteo_get_forecast. Read a marine name that model does not serve from another model.`,
+      );
+      expect(notice).not.toContain('omit models');
+    },
+  );
+
+  it('names one model named twice as the selected model for an "undefined" unit on its plain current column', async () => {
+    // A model named twice suffixes the hourly column, as live for models=ecmwf_wam,ecmwf_wam,
+    // while the current block stays unsuffixed — ocean_current_velocity under "undefined".
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', wave_height_ecmwf_wam: 'm' },
+      hourly: {
+        time: ['2026-11-18T00:00', '2026-11-18T01:00'],
+        wave_height_ecmwf_wam: [6.66, 6.8],
+      },
+      current_units: { time: 'iso8601', interval: 'seconds', ocean_current_velocity: 'undefined' },
+      current: { time: '2026-11-18T04:15', interval: 900, ocean_current_velocity: null },
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      current_variables: ['ocean_current_velocity'],
+      hourly_variables: ['wave_height'],
+      models: ['ecmwf_wam', 'ecmwf_wam'],
+    });
+
+    expect(noticeOf(result)).toContain(
+      'ocean_current_velocity returned no data — Open-Meteo reported the unit as "undefined", which means the marine endpoint does not serve that name, or the selected model (ecmwf_wam) does not serve it. Check it against the marine variable list (wave_height, wave_period, swell_wave_height, sea_surface_temperature, …); weather variables belong in openmeteo_get_forecast. Read a marine name that model does not serve from another model, or omit models.',
+    );
+  });
+
+  it('offers fewer models in the units-trimmed notice of a multi-model call', async () => {
+    // Every marine model over 50 hourly and 50 daily names: a suffixed unit map wide
+    // enough to pass the units ceiling.
+    const models = MARINE_MODELS.map((m) => m.name);
+    const named = (cadence: string) =>
+      Array.from({ length: 50 }, (_, i) =>
+        `${cadence}_variable_${String(i).padStart(2, '0')}`.padEnd(60, '_x'),
+      );
+    const block = (variables: string[], time: string) => {
+      const columns = variables.flatMap((v) =>
+        models.map((m) => `${v}_${m === 'best_match' ? 'marine_best_match' : m}`),
+      );
+      return {
+        units: Object.fromEntries([['time', 'iso8601'], ...columns.map((c) => [c, 'm'])]),
+        data: Object.fromEntries([['time', [time]], ...columns.map((c) => [c, [1]])]),
+      };
+    };
+    const [hourlyVariables, dailyVariables] = [named('hourly'), named('daily')];
+    const hourly = block(hourlyVariables, '2026-11-18T00:00');
+    const daily = block(dailyVariables, '2026-11-18');
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: hourly.units,
+      hourly: hourly.data,
+      daily_units: daily.units,
+      daily: daily.data,
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: hourlyVariables,
+      daily_variables: dailyVariables,
+      models,
+    });
+
+    expect(noticeOf(result)).toMatch(
+      /\d+ unit entries were omitted to keep this response within its inline size ceiling — the units map is incomplete\. Units are not staged on the canvas, so re-run with a narrower column set to see them all: fewer current_variables \/ hourly_variables \/ daily_variables, or fewer models\./,
+    );
+  });
+
+  it('rejects current_variables with two models before any request (current_multi_model)', async () => {
+    const error = await wireError(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      current_variables: ['wave_height'],
+      hourly_variables: ['wave_height'],
+      models: ['ecmwf_wam', 'ncep_gfswave016'],
+    });
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'current_multi_model',
+        recovery: { hint: expect.stringContaining('at most one model') },
+      },
+    });
+    expect(error.message).toContain('2 models (ecmwf_wam, ncep_gfswave016)');
+    expect(mockGetMarine).not.toHaveBeenCalled();
+  });
+
+  it('rejects current_variables with two models as current_multi_model before a misplaced current name', async () => {
+    // wave_height_max is filed under daily alone, so at current it is also a cadence fault.
+    const error = await wireError(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      current_variables: ['wave_height_max'],
+      models: ['ecmwf_wam', 'ncep_gfswave016'],
+    });
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'current_multi_model' },
+    });
+    expect(mockGetMarine).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['named twice', ['ecmwf_wam', 'ecmwf_wam']],
+    ['repeated inside one element', ['ecmwf_wam,ecmwf_wam']],
+  ])('answers current_variables beside one model %s, in one request', async (_, models) => {
+    // The two live shapes for models=ecmwf_wam,ecmwf_wam at 45, −30, combined: the current
+    // block unsuffixed, and the hourly block as one wave_height_ecmwf_wam column.
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly_units: { time: 'iso8601', wave_height_ecmwf_wam: 'm' },
+      hourly: {
+        time: ['2026-11-18T00:00', '2026-11-18T01:00'],
+        wave_height_ecmwf_wam: [6.66, 6.8],
+      },
+      current_units: { time: 'iso8601', interval: 'seconds', wave_height: 'm' },
+      current: { time: '2026-11-18T04:15', interval: 900, wave_height: 6.5 },
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      current_variables: ['wave_height'],
+      hourly_variables: ['wave_height'],
+      models,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockGetMarine).toHaveBeenCalledTimes(1);
+    expect(sentParams()).toMatchObject({
+      current: ['wave_height'],
+      models: ['ecmwf_wam', 'ecmwf_wam'],
+    });
+    const wire = JSON.parse(JSON.stringify(result.structuredContent)) as Record<string, unknown>;
+    expect(wire).toMatchObject({
+      current: { wave_height: 6.5 },
+      hourly: [{ wave_height_ecmwf_wam: 6.66 }, { wave_height_ecmwf_wam: 6.8 }],
+    });
+    expect(wire).not.toHaveProperty('notice');
+    expect(allText(result)).not.toMatch(
+      /returned no columns|without a model suffix|unattributable/,
+    );
+  });
+
+  it('accepts current_variables with one model and forwards both', async () => {
+    // Live shape for current=wave_height,wave_period&models=ncep_gfswave016 at 45, −30.
+    mockGetMarine.mockResolvedValue({
+      ...MOCK_RESPONSE,
+      hourly: undefined,
+      hourly_units: undefined,
+      current_units: { time: 'iso8601', interval: 'seconds', wave_height: 'm', wave_period: 's' },
+      current: { time: '2026-11-18T03:45', interval: 900, wave_height: 6.54, wave_period: 11.75 },
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      current_variables: ['wave_height', 'wave_period'],
+      models: ['ncep_gfswave016'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(sentParams()).toMatchObject({
+      current: ['wave_height', 'wave_period'],
+      models: ['ncep_gfswave016'],
+    });
+    expect((result.structuredContent as { current: unknown }).current).toMatchObject({
+      wave_height: 6.54,
+    });
+  });
+
+  it('frames an unknown model as a variable-or-model rejection and lists the marine models', async () => {
+    mockGetMarine.mockResolvedValue({
+      error: true,
+      reason: 'Invalid value: Cannot initialize MultiDomains from invalid String value bogus_model',
+    });
+
+    const error = await wireError(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: ['wave_height'],
+      models: ['ecmwf_wam', 'bogus_model'],
+    });
+
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data?.reason).toBe('invalid_variable');
+    expect(error.message).toMatch(/^Unknown variable or model name: bogus_model\./);
+    expect(error.data?.recovery?.hint).toContain(`Documented models: ${MARINE_MODEL_NAMES}.`);
+  });
+
+  it('keeps the variable-only hint for an unknown name when models is omitted', async () => {
+    mockGetMarine.mockResolvedValue({
+      error: true,
+      reason:
+        'Invalid value: Cannot initialize SurfacePressureAndHeightVariable<VariableAndPreviousDay, VariableOrSpread<ForecastPressureVariable>, ForecastHeightVariable> from invalid String value bogus_wave.',
+    });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: ['bogus_wave'],
+    });
+    const error = (result.structuredContent as { error: WireError }).error;
+
+    expect(error.message).toMatch(/^Unknown variable name: bogus_wave\./);
+    expect(error.data?.recovery?.hint).toBe(
+      'Check variable names against Open-Meteo marine docs. Common: wave_height, wave_direction, wave_period, wind_wave_height, swell_wave_height, wave_height_max.',
+    );
+    expect(allText(result)).not.toContain('Documented models');
+  });
+
+  it.each([
+    ['two models', ['ecmwf_wam', 'gwam'], true],
+    ['no models', undefined, false],
+  ])(
+    'names fewer models as a lever on the volume rejection only with %s',
+    async (_label, models, named) => {
+      mockGetMarine.mockResolvedValue({
+        error: true,
+        reason:
+          'Your API call requests too much data. Please reduce the number of variables, locations and/or weather models.',
+      });
+
+      const error = await wireError(openmeteoGetMarineTool, {
+        ...MID_ATLANTIC,
+        hourly_variables: ['wave_height'],
+        past_days: 92,
+        ...(models && { models }),
+      });
+
+      expect(error.data?.reason).toBe('request_too_large');
+      expect(error.message.includes('daily_variables, or fewer models.')).toBe(named);
+    },
+  );
+
+  it('offers fewer models as a lever in the canvas-less preview of a wide multi-model window', async () => {
+    const models = ['ecmwf_wam', 'ncep_gfswave025', 'gwam'];
+    const variables = ['wave_height', 'wave_period', 'wave_direction', 'swell_wave_height'];
+    const time = hourlyTimes(16 * 24, '2026-11-18T00:00');
+    const hourly: Record<string, (number | null)[] | string[]> = { time };
+    const hourlyUnits: Record<string, string> = { time: 'iso8601' };
+    for (const variable of variables) {
+      for (const model of models) {
+        hourly[`${variable}_${model}`] = time.map((_, i) => 100.5 + (i % 17));
+        hourlyUnits[`${variable}_${model}`] = 'm';
+      }
+    }
+    mockGetMarine.mockResolvedValue({ ...MOCK_RESPONSE, hourly_units: hourlyUnits, hourly });
+
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: variables,
+      forecast_days: 16,
+      models,
+    });
+
+    expectNoCanvasDisclosureOnce(result, 'daily_variables, or fewer models');
+  });
+
+  it('caps models at the documented marine model count, and treats a blank list as omitted', async () => {
+    const parse = (count: number) =>
+      openmeteoGetMarineTool.input.safeParse({
+        ...MID_ATLANTIC,
+        hourly_variables: ['wave_height'],
+        models: Array.from({ length: count }, (_, i) => `m${i}`),
+      }).success;
+    expect(parse(MARINE_MODELS.length)).toBe(true);
+    expect(parse(MARINE_MODELS.length + 1)).toBe(false);
+
+    mockGetMarine.mockResolvedValue(MOCK_RESPONSE);
+    const result = await runToolContract(openmeteoGetMarineTool, {
+      ...MID_ATLANTIC,
+      hourly_variables: ['wave_height'],
+      models: ['', ' '],
+    });
+    expect(sentParams().models).toBeUndefined();
+    expect(JSON.stringify(result.structuredContent)).not.toContain('"models"');
   });
 });

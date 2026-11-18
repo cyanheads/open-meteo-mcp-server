@@ -50,6 +50,13 @@ const forecast = (ctx: Context) =>
 
 type ChainLink = ReturnType<typeof mcpChain>[number];
 
+/** A 4xx that is not an input rejection: one link, carrying the status and nothing of the body. */
+const rejected = (status: number): ChainLink => ({
+  code: JsonRpcErrorCode.ServiceUnavailable,
+  message: `Open-Meteo answered HTTP ${status} without an input rejection, so the request's arguments did not cause this.`,
+  data: { reason: 'upstream_rejected', status, retryable: false },
+});
+
 /**
  * The chain a retried failure ends as: the service's exhaustion error (its reason named
  * by the last attempt's code), wrapping the framework `withRetry` exhaustion error (which
@@ -130,7 +137,7 @@ describe('OpenMeteoService keeps request URLs out of error data and logs (#59)',
         getOpenMeteoService().getEnsemble(
           47.6,
           -122.3,
-          { hourly: ['temperature_2m'], models: 'icon_eu_eps' },
+          { hourly: ['temperature_2m'], models: ['icon_eu_eps'] },
           ctx,
         ),
       calls: 1,
@@ -154,7 +161,7 @@ describe('OpenMeteoService keeps request URLs out of error data and logs (#59)',
         {
           code: JsonRpcErrorCode.ValidationError,
           message:
-            "Open-Meteo returned no data for this location (-90, 0). The marine dataset's grid does not cover this coordinate — request a point inside its coverage. Retrying returns the same response.",
+            'Open-Meteo returned no data for this location (-90, 0). A point on land or under sea ice has no wave data from any model, so there the remedy is a coordinate in open water. For a point in open water, name a model in models: the default blend has gaps a single wave model can fill. Retrying returns the same response.',
           data: { reason: 'coverage_gap' },
         },
       ],
@@ -164,13 +171,34 @@ describe('OpenMeteoService keeps request URLs out of error data and logs (#59)',
       arrange: () => respondWith('{}', 404),
       call: forecast,
       calls: 1,
-      chain: [
-        {
-          code: JsonRpcErrorCode.ValidationError,
-          message: 'Open-Meteo API returned 404.',
-          data: {},
-        },
-      ],
+      chain: [rejected(404)],
+    },
+    {
+      name: '4xx error page that echoes the request URL',
+      arrange: () =>
+        respondWith(
+          `<!DOCTYPE html><html><body><h1>403 Forbidden</h1><p>${MARKER_BASE}/v1/forecast?latitude=47.6</p></body></html>`,
+          403,
+        ),
+      call: forecast,
+      calls: 1,
+      chain: [rejected(403)],
+    },
+    {
+      name: '4xx JSON body that echoes the request URL',
+      arrange: () =>
+        respondWith(JSON.stringify({ error: true, reason: `No route for ${MARKER_BASE}` }), 404),
+      call: (ctx: Context) =>
+        getOpenMeteoService().getFlood(47.6, -122.3, { daily: ['river_discharge'] }, ctx),
+      calls: 1,
+      chain: [rejected(404)],
+    },
+    {
+      name: '4xx JSON null',
+      arrange: () => respondWith('null', 401),
+      call: forecast,
+      calls: 1,
+      chain: [rejected(401)],
     },
     {
       name: 'CDN HTML page, retried to exhaustion',
