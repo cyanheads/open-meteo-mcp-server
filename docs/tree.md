@@ -1,6 +1,6 @@
 # open-meteo-mcp-server - Directory Structure
 
-Generated on: 2026-11-10 10:00:02
+Generated on: 2026-11-18 06:44:00
 
 ```text
 open-meteo-mcp-server/
@@ -169,13 +169,16 @@ open-meteo-mcp-server/
 │   │       │   ├── get-marine.tool.ts
 │   │       │   ├── index.ts
 │   │       │   └── search-locations.tool.ts
+│   │       ├── current-input.ts
 │   │       ├── date-input.ts
+│   │       ├── integer-check.ts
 │   │       ├── model-catalog.ts
 │   │       ├── name-input.ts
 │   │       ├── reshape-utils.ts
 │   │       ├── response-notice.ts
 │   │       ├── row-data-ceiling.ts
 │   │       ├── spill-utils.ts
+│   │       ├── tilt-input.ts
 │   │       ├── timezone-input.ts
 │   │       ├── upstream-error.ts
 │   │       └── variable-cadence.ts
@@ -213,6 +216,7 @@ open-meteo-mcp-server/
 │   │   ├── bundle-agent-docs.test.ts
 │   │   └── packaging-entry-regex-sync.test.ts
 │   ├── services/
+│   │   ├── coverage-gap.test.ts
 │   │   ├── open-meteo-service-redaction.test.ts
 │   │   └── open-meteo-service.test.ts
 │   ├── smoke/
@@ -221,6 +225,7 @@ open-meteo-mcp-server/
 │       ├── canvas-id-input.test.ts
 │       ├── canvas-preview.test.ts
 │       ├── cell-selection.test.ts
+│       ├── current-input.test.ts
 │       ├── dataframe-describe.tool.test.ts
 │       ├── dataframe-drop.tool.test.ts
 │       ├── dataframe-query.tool.test.ts
@@ -244,6 +249,8 @@ open-meteo-mcp-server/
 │       ├── row-data-ceiling.test.ts
 │       ├── search-locations.tool.test.ts
 │       ├── spill-utils.test.ts
+│       ├── tilt-input.test.ts
+│       ├── timezone-input.test.ts
 │       ├── tool-surface.test.ts
 │       ├── upstream-error.test.ts
 │       ├── upstream-failure-contract.test.ts

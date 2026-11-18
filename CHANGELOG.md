@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-11-17
+
+Adds marine models and 16 forecast days, tilt and azimuth for tilted irradiance, and a search_locations count up to 100; names in a comma-joined list element are split and checked like separate elements, and a 4xx that is not an input rejection fails once as upstream_rejected.
+
 ## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-11-10 · ⚠️ Breaking
 
 Adds cell_selection for points on the water, Open-Meteo's own hourly/daily/current keys and comma-joined lists, and a limit page size (default 25 rows) on openmeteo_dataframe_query; coverage notices name the model that lacks a variable. Breaking: the query tool refuses internal metadata view names as aliases.
