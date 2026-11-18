@@ -4,7 +4,7 @@ description: Tool choice, gates, and workflows for the openmeteo_* weather tools
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.0.1"
+  version: "1.0.2"
 ---
 
 ## Scope
@@ -41,7 +41,7 @@ Modeled, gridded data from Open-Meteo, keyless: deterministic and ensemble forec
 
 ### Exceedance odds ("chance of more than 20 mm on Saturday", "will it freeze")
 
-Call `openmeteo_get_ensemble` with only the daily variable you need (`precipitation_sum`, `temperature_2m_min`) and `forecast_days` that reach the day. Each row carries the unsuffixed control column plus `_member01` and up: the default `ecmwf_ifs025_ensemble` gives 51 values per row, and `member_count` reports 50 because it leaves out the control. Probability = values past the threshold ÷ non-null values in that row. A small pull returns inline, so count it yourself. For a staged table, the `sql` parameter of `openmeteo_dataframe_query` describes a member-count pattern; it matches `_member` columns only, so its denominator leaves out the control (50 where this count uses 51).
+Call `openmeteo_get_ensemble` with only the daily variable you need (`precipitation_sum`, `temperature_2m_min`) and `forecast_days` that reach the day. Each row carries the unsuffixed control column plus `_member01` and up: the default `ecmwf_ifs025_ensemble` gives 51 values per row, and `member_count` reports 50 because it leaves out the control. Naming several comma-separated `models` ends every column in its model (control `<variable>_<model>`, members `<variable>_memberNN_<model>`) and makes `member_count` the sum across models, so count each model's values separately. Probability = values past the threshold ÷ non-null values in that row. A small pull returns inline, so count it yourself. For a staged table, the `sql` parameter of `openmeteo_dataframe_query` describes a member-count pattern; it matches `_member` columns only, so its denominator leaves out the control (50 where this count uses 51).
 
 ### Anomaly against a normal ("how does this October compare")
 

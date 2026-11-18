@@ -53,9 +53,7 @@ import { getOpenMeteoService } from '@/services/open-meteo/open-meteo-service.js
 
 export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
   description:
-    'Resolve a place name to ranked coordinate matches with country, region, elevation, ' +
-    'timezone, and population. Required prerequisite for name-based queries — all weather ' +
-    'tools take latitude/longitude, not place names.',
+    'Resolve a place name to ranked coordinate matches with country, region, elevation, timezone, and population. Required prerequisite for name-based queries — all weather tools take latitude/longitude, not place names.',
   annotations: { readOnlyHint: true, idempotentHint: true },
 
   errors: [
@@ -70,7 +68,7 @@ export const openmeteoSearchLocationsTool = tool('openmeteo_search_locations', {
 
   input: z.object({
     name: z.string().min(1).max(100).describe('Place name to search (e.g., "Seattle").'),
-    count: z.number().int().min(1).max(10).default(5).describe('Max results (1–10). Default 5.'),
+    count: z.number().int().min(1).max(100).default(5).describe('Max results (1–100). Default 5.'),
   }),
 
   output: z.object({
@@ -244,7 +242,7 @@ src/
     server-config.ts                    # Server-specific env vars (optional base URL overrides + OPENMETEO_DATAFRAME_DROP_ENABLED + OPENMETEO_CLAMP_LIMITS)
   services/
     open-meteo/
-      coverage-gap.ts                   # Per-endpoint coverage-gap recovery, shared by the service message and the tools' coverage_gap contract
+      coverage-gap.ts                   # Coverage-gap recovery per endpoint and, on marine, per the models sent, shared by the service message and the tools' coverage_gap contract; also supplies the marine wording for all-null notices
       open-meteo-service.ts             # HTTP client: forecast, archive, marine, air quality, geocoding, elevation, ensemble, flood, climate
       types.ts                          # API response types
     canvas-accessor.ts                  # DataCanvas accessor for the spill-capable tools (forecast / historical / marine / air quality / ensemble / flood / climate)

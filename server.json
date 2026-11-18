@@ -44,7 +44,7 @@
         },
         {
           "name": "OPENMETEO_CLAMP_LIMITS",
-          "description": "Default 'true': an openmeteo_dataframe_query limit above the per-call cap (10,000 rows, or CANVAS_DEFAULT_ROW_LIMIT when that is lower) returns the cap and a notice saying so. Set to 'false' to advertise the cap as the limit maximum and reject a larger value instead.",
+          "description": "Default 'true': an openmeteo_dataframe_query limit above the per-call cap (10,000 rows, or CANVAS_DEFAULT_ROW_LIMIT when that is lower), or an openmeteo_search_locations count above 100, is lowered to the cap with a notice saying so. Set to 'false' to advertise each cap as the input's maximum and reject a larger value instead.",
           "format": "boolean",
           "isRequired": false,
           "default": "true"
@@ -118,7 +118,7 @@
         },
         {
           "name": "OPENMETEO_CLAMP_LIMITS",
-          "description": "Default 'true': an openmeteo_dataframe_query limit above the per-call cap (10,000 rows, or CANVAS_DEFAULT_ROW_LIMIT when that is lower) returns the cap and a notice saying so. Set to 'false' to advertise the cap as the limit maximum and reject a larger value instead.",
+          "description": "Default 'true': an openmeteo_dataframe_query limit above the per-call cap (10,000 rows, or CANVAS_DEFAULT_ROW_LIMIT when that is lower), or an openmeteo_search_locations count above 100, is lowered to the cap with a notice saying so. Set to 'false' to advertise each cap as the input's maximum and reject a larger value instead.",
           "format": "boolean",
           "isRequired": false,
           "default": "true"
